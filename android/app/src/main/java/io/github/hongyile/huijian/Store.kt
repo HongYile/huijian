@@ -178,8 +178,19 @@ class Store(private val ctx: Context) {
 
     // ---- 端到端加密：账号私钥、等待批准时的设备钥匙对（和 token 一样用 Keystore 加密）、「已升级」标记 ----
 
-    /** 本机保存的加密钥匙。owner = 规范化的服务器地址 + 账号 id，对不上的当作没有 */
-    data class E2EVault(val keys: List<LocalKey>, val device: Core.KeyPair?)
+    /**
+     * 本机保存的加密钥匙。owner = 规范化的服务器地址 + 账号 id，对不上的当作没有。
+     * setup：开启加密进行中生成的新钥匙对和恢复码（§4.1，结果确认前）；recovery：还没点「完成」的恢复码（code, 是否刚开启加密）。
+     * 和私钥同等保护，App 被系统终止也不丢
+     */
+    data class E2EVault(
+        val keys: List<LocalKey>, val device: Core.KeyPair?,
+        val setup: SetupResult? = null, val recovery: Pair<String, Boolean>? = null,
+        /** 更换恢复码进行中（结果确认前）：新恢复码和这次上传的 recovery_wrap */
+        val rotation: RecoveryRotation? = null,
+    ) {
+        val isEmpty get() = keys.isEmpty() && device == null && setup == null && recovery == null && rotation == null
+    }
 
     /** 读取；Keystore 解不开时抛异常（调用方当作「未解锁」并显示原因） */
     @Synchronized
@@ -191,15 +202,24 @@ class Store(private val ctx: Context) {
         val keys = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
             .map { LocalKey(it.optString("kid"), it.optString("pub"), it.optString("sk")) }.filter { it.sk.isNotEmpty() }
         val d = o.optJSONObject("device")?.let { Core.KeyPair(it.optString("sk"), it.optString("pub"), it.optString("kid")) }
-        return E2EVault(keys, d?.takeIf { it.sk.isNotEmpty() })
+        val setup = o.optJSONObject("setup")?.let {
+            SetupResult(LocalKey(it.optString("kid"), it.optString("pub"), it.optString("sk")), it.optString("code"))
+        }?.takeIf { it.key.sk.isNotEmpty() && it.recoveryCode.isNotEmpty() }
+        val rec = o.optJSONObject("recovery")?.let { it.optString("code") to it.optBoolean("enabled") }?.takeIf { it.first.isNotEmpty() }
+        val rot = o.optJSONObject("rotation")?.let { RecoveryRotation(it.optString("code"), it.optString("wrap")) }
+            ?.takeIf { it.code.isNotEmpty() && it.wrap.isNotEmpty() }
+        return E2EVault(keys, d?.takeIf { it.sk.isNotEmpty() }, setup, rec, rot)
     }
 
     @Synchronized
     fun e2eSave(owner: String, v: E2EVault) {
-        if (v.keys.isEmpty() && v.device == null) { e2eClear(); return }
+        if (v.isEmpty) { e2eClear(); return }
         val o = JSONObject().put("owner", owner)
             .put("keys", JSONArray().apply { v.keys.forEach { put(JSONObject().put("kid", it.kid).put("pub", it.pub).put("sk", it.sk)) } })
         v.device?.let { o.put("device", JSONObject().put("sk", it.sk).put("pub", it.pub).put("kid", it.kid)) }
+        v.setup?.let { o.put("setup", JSONObject().put("sk", it.key.sk).put("pub", it.key.pub).put("kid", it.key.kid).put("code", it.recoveryCode)) }
+        v.recovery?.let { o.put("recovery", JSONObject().put("code", it.first).put("enabled", it.second)) }
+        v.rotation?.let { o.put("rotation", JSONObject().put("code", it.code).put("wrap", it.wrap)) }
         check(prefs.edit().putString("e2eEnc", encrypt(o.toString())).commit()) { "保存加密钥匙失败" }
     }
 

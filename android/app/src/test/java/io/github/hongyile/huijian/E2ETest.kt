@@ -401,6 +401,41 @@ class E2ETest {
         assertEquals(key, logic.unlockWithRecovery(s.net("d_pad"), code, null).first)
     }
 
+    @Test fun rotateRecoveryFailureAndUnsureResult() {
+        val key = enabledAccount()
+        val net = s.net("d_mac")
+        // 4xx（当前密码不对）：新恢复码已在发请求前交给调用方保存，请求失败照常抛出（调用方删除）
+        var gen: RecoveryRotation? = null
+        expectE2E(E2EText.T3) { logic.rotateRecovery(net, server, "alice", "wrong-password", key.sk) { gen = it } }
+        assertTrue(gen != null && gen!!.wrap != s.recoveryWrap)
+        // 服务器换成了但响应丢了：GET 核对 recovery_wrap 等于这次上传的 → 成功
+        val lost = object : E2ENet by net {
+            override fun e2eRecovery(body: JSONObject) { net.e2eRecovery(body); throw java.io.IOException("连接被重置") }
+        }
+        var r1: RecoveryRotation? = null
+        val code = logic.rotateRecovery(lost, server, "alice", "good-password-1", key.sk) { r1 = it }
+        assertEquals(r1!!.code, code); assertEquals(r1!!.wrap, s.recoveryWrap)
+        // 请求没到服务器：核对后不等 → ROTATE_RETRY（调用方删除，旧恢复码仍然有效）
+        val dropped = object : E2ENet by net {
+            override fun e2eRecovery(body: JSONObject) { throw java.io.IOException("断网") }
+        }
+        expectE2E(E2EText.ROTATE_RETRY) { logic.rotateRecovery(dropped, server, "alice", "good-password-1", key.sk) }
+        assertEquals(r1!!.wrap, s.recoveryWrap)
+        // 结果不明（核对也读不到）：ROTATE_UNSURE，调用方保留；之后刷新时 recovery_wrap 等于这次上传的就当作成功
+        var down = false
+        val flaky = object : E2ENet by net {
+            override fun e2eRecovery(body: JSONObject) { net.e2eRecovery(body); down = true; throw java.io.IOException("断网") }
+            override fun e2eState(): JSONObject = if (down) throw java.io.IOException("断网") else net.e2eState()
+        }
+        var r2: RecoveryRotation? = null
+        expectE2E(E2EText.ROTATE_UNSURE, E2EError.Kind.SETUP_UNSURE) {
+            logic.rotateRecovery(flaky, server, "alice", "good-password-1", key.sk) { r2 = it }
+        }
+        val st = E2EState.parse(net.e2eState())
+        assertTrue(logic.rotationDone(st, r2!!))
+        assertFalse(logic.rotationDone(st, r1!!))
+    }
+
     // ---------- 批准（§4.3、§5） ----------
 
     /** 批准设备用本机私钥算出的账号公钥 */
@@ -666,6 +701,42 @@ class E2ETest {
         assertEquals(pending, l2.setup(n2, server, "alice", "x", "y", pending))     // 先核对：已经开启成功，直接用
     }
 
+    @Test fun setupKeysSavedBeforeRequestAndCheckedOnRefresh() {
+        login("old-password", "mac")
+        val net = s.net("d_mac")
+        var saved: SetupResult? = null
+        var postedBeforeSave = false
+        val watch = object : E2ENet by net {
+            override fun e2eSetup(body: JSONObject): JSONObject { postedBeforeSave = saved == null; return net.e2eSetup(body) }
+        }
+        val r = logic.setup(watch, server, "alice", "old-password", "good-password-1", onGenerated = { saved = it })
+        assertEquals(r, saved); assertFalse(postedBeforeSave)        // 发请求之前就交给调用方保存了
+        // 刷新时核对：active 公钥就是这把 → 完成；不是 → 删除；还没开启 → 保留
+        val st = E2EState.parse(net.e2eState())
+        assertEquals(E2ELogic.PendingSetup.COMPLETE, logic.pendingSetup(st, r))
+        val other = SetupResult(LocalKey("kid9", "pub9", "sk9"), "CODE-9")
+        assertEquals(E2ELogic.PendingSetup.DROP, logic.pendingSetup(st, other))
+        assertEquals(E2ELogic.PendingSetup.KEEP, logic.pendingSetup(st.copy(enabled = false, keys = emptyList()), other))
+    }
+
+    @Test fun abandonedRequestIgnoresLateResults() {
+        val key = enabledAccount()
+        pair("pad")
+        val b = DeviceRequest(c, logic, c.keypair(), null)
+        b.start(s.net("d_pad"))
+        val a = Approval(c, "d_pad", "pad", accPub())
+        a.begin(s.net("d_mac"))
+        b.abandon()                                  // 换账号：停掉
+        assertEquals(DeviceRequest.Step.Waiting, b.step(s.net("d_pad")).first)
+        assertEquals("", s.devs["d_pad"]!!.nb)       // 没有揭晓
+        assertFalse(b.active)
+        // 停掉之后即使有转交也不接受，再 start 也不会重新激活
+        s.devs["d_pad"]!!.grant = c.grantSeal(key.sk, b.dev.pub)
+        b.start(s.net("d_pad"))
+        assertFalse(b.active)
+        assertEquals(DeviceRequest.Step.Waiting, b.step(s.net("d_pad")).first)
+    }
+
     @Test fun cancelRequest() {
         enabledAccount()
         pair("pad")
@@ -772,6 +843,13 @@ class E2ETest {
         assertEquals(setOf(5L), p.purged); assertEquals(setOf(6L), p.deleted); assertFalse(p.isEmpty)
         // 先删后 purge：仍然删除
         assertEquals(emptySet<Long>(), Changes.plan(listOf(MsgChange(1, 7, "delete", null), MsgChange(2, 7, "purge", null))).purged)
+    }
+
+    @Test fun reconcileKeepsPlainWhenEncrypted() {
+        // §7.4：离线超过 90 天收不到 purge，对账时服务器上找不到的明文消息记为「仅本机保留」，加密消息照常删除
+        val local = listOf(msg(null).copy(id = 1), msg("hje1.x").copy(id = 2), msg(null).copy(id = 3))
+        val (keep, remove) = Changes.splitPlain(local, setOf(1L, 2L))
+        assertEquals(setOf(1L), keep); assertEquals(setOf(2L), remove)
     }
 
     @Test fun sasFormatting() {

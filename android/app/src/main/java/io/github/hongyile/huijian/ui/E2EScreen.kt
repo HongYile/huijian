@@ -49,6 +49,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.hongyile.huijian.Api
+import io.github.hongyile.huijian.ApiException
+import io.github.hongyile.huijian.RecoveryRotation
 import io.github.hongyile.huijian.Approval
 import io.github.hongyile.huijian.DeviceRequest
 import io.github.hongyile.huijian.E2EError
@@ -124,7 +126,7 @@ fun E2EScreen(back: () -> Unit, openKeys: () -> Unit) {
         if (code != null) {
             CodePage(code.first, ctx) {
                 if (code.second) justEnabled = true else say("已更换恢复码，旧恢复码已失效")
-                E2EHub.pendingRecovery.value = null
+                E2EHub.recoveryDone()
                 page = Page.Main
             }
             return@ManageScaffold
@@ -134,7 +136,7 @@ fun E2EScreen(back: () -> Unit, openKeys: () -> Unit) {
                 status, state, vaultError ?: loadError, notice, justEnabled,
                 go = { page = it }, openKeys = openKeys, say = ::say, reload = ::reload,
             )
-            Page.Setup -> SetupPage(onDone = { c -> E2EHub.pendingRecovery.value = c to true }, onConflict = { msg ->
+            Page.Setup -> SetupPage(onDone = { page = Page.Main }, onConflict = { msg ->
                 say(msg); reload(); page = Page.Main
             })
             Page.UnlockPassword -> UnlockPasswordPage(onUnlocked = { afterUnlock(it) }, other = { page = it })
@@ -156,12 +158,27 @@ fun E2EScreen(back: () -> Unit, openKeys: () -> Unit) {
                 intro = "换一个新的恢复码，旧恢复码立即失效。先输入当前密码确认是你本人。", currentLabel = "当前密码",
                 newPassword = false, action = "生成新恢复码",
             ) { cur, _ ->
-                val c = E2EHub.work {
+                E2EHub.work {
                     val net = Hub.api() ?: throw IOException("未登录")
                     val sk = E2EHub.activeSk() ?: throw E2EError("本机还没有解锁，不能更换恢复码")
-                    E2EHub.logic.rotateRecovery(net, Hub.store.server, ownUsername(), cur, sk).also { runCatching { E2EHub.refresh(net) } }
+                    var rot: RecoveryRotation? = null
+                    try {
+                        // 新恢复码在发请求之前就存进 Keystore（服务端一换旧恢复码就失效，新的不能丢）
+                        E2EHub.logic.rotateRecovery(net, Hub.store.server, ownUsername(), cur, sk) { rot = it; E2EHub.rotationGenerated(it) }
+                        rot?.let { E2EHub.finishRotation(it) }
+                    } catch (e: E2EError) {
+                        // 结果不明：保留，之后刷新时 recovery_wrap 等于这次上传的就显示新恢复码；其他失败（T3、确认没换成）：删除
+                        if (e.kind == E2EError.Kind.SETUP_UNSURE) E2EHub.rotationUnsure() else E2EHub.dropRotation(rot)
+                        throw e
+                    } catch (e: ApiException) {
+                        if (e.status < 500) E2EHub.dropRotation(rot) else E2EHub.rotationUnsure()
+                        throw e
+                    } catch (e: Exception) {
+                        E2EHub.rotationUnsure()
+                        throw e
+                    }
+                    runCatching { E2EHub.refresh(net) }
                 }
-                E2EHub.pendingRecovery.value = c to false
             }
         }
     }
@@ -200,6 +217,9 @@ private fun ColumnScope.MainPage(
         }
         E2EStatus.DISABLED -> SectionCard(E2EText.T20_TITLE, E2EText.T20) {
             Text("未开启", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // 本机存着进行中的开启，服务器上还没开启（§4.1）：提示重试（重试时先核对，不会重复开启）
+            val interrupted by E2EHub.setupPending.collectAsStateWithLifecycle()
+            if (interrupted) Text(E2EText.SETUP_RETRY, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
             Button({ go(Page.Setup) }, Modifier.testTag("e2eSetup")) { Text(E2EText.T20_TITLE) }
         }
         E2EStatus.LOCKED -> {
@@ -317,10 +337,17 @@ private fun Requests(reqs: List<E2ERequest>, say: (String) -> Unit) {
                             Text("拒绝", color = MaterialTheme.colorScheme.error)
                         }
                     }
-                    Approval.Stage.Waiting -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                        Text("等待「${r.name}」显示核对码…", Modifier.weight(1f), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        TextButton({ run { E2EHub.deny(r.deviceId); E2EHub.dismissApproval(r.deviceId) } }, enabled = !busy) { Text("拒绝") }
+                    // 等对方揭晓（§5 第 2 步）：「拒绝」发送 deny；「取消」只停止本机的等待
+                    Approval.Stage.Waiting -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Text("等待「${r.name}」显示核对码…", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton({ run { E2EHub.deny(r.deviceId); E2EHub.dismissApproval(r.deviceId); say("已拒绝") } }, enabled = !busy,
+                                modifier = Modifier.testTag("approvalDeny")) { Text("拒绝", color = MaterialTheme.colorScheme.error) }
+                            TextButton({ E2EHub.dismissApproval(r.deviceId) }, enabled = !busy, modifier = Modifier.testTag("approvalCancel")) { Text("取消") }
+                        }
                     }
                     is Approval.Stage.Code -> {
                         SasCode(s.code)
@@ -373,7 +400,7 @@ private fun Nav(title: String, sub: String, modifier: Modifier = Modifier, onCli
 // ---------- 开启加密（§4.1） ----------
 
 @Composable
-private fun SetupPage(onDone: (String) -> Unit, onConflict: (String) -> Unit) {
+private fun SetupPage(onDone: () -> Unit, onConflict: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     var current by remember { mutableStateOf("") }
     var change by remember { mutableStateOf(true) }
@@ -404,24 +431,27 @@ private fun SetupPage(onDone: (String) -> Unit, onConflict: (String) -> Unit) {
             busy = true; error = null; pwError = null
             scope.launch {
                 try {
-                    val r = E2EHub.work {
+                    E2EHub.work {
                         val net = Hub.api() ?: throw IOException("未登录")
                         try {
-                            val r = E2EHub.logic.setup(net, Hub.store.server, ownUsername(), current, if (change) pw else null, E2EHub.pendingSetup)
-                            // 恢复码先放进 App 状态（点「完成」才清除），再保存私钥
-                            E2EHub.pendingRecovery.value = r.recoveryCode to true
-                            E2EHub.pendingSetup = null
-                            E2EHub.adopt(r.key)
+                            // 新钥匙对和恢复码在发请求之前就存进 Keystore（setupGenerated），App 被终止也不丢
+                            val r = E2EHub.logic.setup(net, Hub.store.server, ownUsername(), current, if (change) pw else null,
+                                E2EHub.pendingSetup(), onGenerated = E2EHub::setupGenerated)
+                            // 恢复码先存好、放进 App 状态（点「完成」才清除），再保存私钥
+                            E2EHub.finishSetup(r)
                             runCatching { E2EHub.refresh(net) }
                             r
                         } catch (e: E2EError) {
-                            // 结果不明：钥匙和恢复码留在内存里，重试时先核对；其他失败丢弃
-                            E2EHub.pendingSetup = if (e.kind == E2EError.Kind.SETUP_UNSURE) e.pending else null
+                            // 结果不明：留着，之后每次刷新状态都会核对；确认失败（4xx、没开启、别的设备开启了）：删除
+                            if (e.kind != E2EError.Kind.SETUP_UNSURE) E2EHub.dropSetup()
+                            throw e
+                        } catch (e: ApiException) {
+                            E2EHub.dropSetup()
                             throw e
                         }
                     }
                     current = ""; pw = ""; pw2 = ""
-                    onDone(r.recoveryCode)
+                    onDone()
                 } catch (e: E2EError) {
                     when (e.kind) {
                         E2EError.Kind.WEAK_CURRENT -> { change = true; error = e.message }

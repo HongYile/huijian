@@ -112,4 +112,13 @@ object Changes {
         val arch = local.asSequence().mapNotNull { m -> states[m.id]?.takeIf { it != m.archive }?.let { m.id to it } }.toMap()
         return del to arch
     }
+
+    /**
+     * 对账要删的 id 分成（明文 → 记为「仅本机保留」，加密 → 照常删除）。账号开了加密时用（e2ee-client.md §7.4）：
+     * 离线超过 90 天收不到 purge，服务器上找不到的明文消息可能是「删除服务器上的明文消息」删掉的
+     */
+    fun splitPlain(local: List<Message>, del: Set<Long>): Pair<Set<Long>, Set<Long>> {
+        val plain = local.asSequence().filter { it.id in del && it.e2e == null }.map { it.id }.toSet()
+        return plain to (del - plain)
+    }
 }

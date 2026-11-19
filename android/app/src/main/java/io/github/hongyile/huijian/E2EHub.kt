@@ -51,11 +51,15 @@ object E2EHub {
     /** 一次性的提示（登录时钥匙对不上 T43 等），加密页显示后清掉 */
     val notice = MutableStateFlow<String?>(null)
 
+    private val _pendingRecovery = MutableStateFlow<Pair<String, Boolean>?>(null)
     /**
-     * 刚生成、还没确认保存的恢复码（code, 是否刚开启加密）：只放在内存里，不落盘；
-     * 放在这里而不是页面状态里，转屏重建界面时不会丢（丢了就再也看不到了）
+     * 还没点「完成」的恢复码（code, 是否刚开启加密）：放在 App 状态里，同时和私钥一起存进 Keystore 加密存储，
+     * 转屏、关掉页面、App 被系统终止后都还能回到「保存恢复码」页（§4.1）。点「完成」才删除
      */
-    val pendingRecovery = MutableStateFlow<Pair<String, Boolean>?>(null)
+    val pendingRecovery: StateFlow<Pair<String, Boolean>?> = _pendingRecovery.asStateFlow()
+    private val _setupPending = MutableStateFlow(false)
+    /** 本机存着进行中的开启（服务器上还没开启）：加密页提示重试 */
+    val setupPending: StateFlow<Boolean> = _setupPending.asStateFlow()
     private val _tick = MutableStateFlow(0)
     /** 每次刷新完加一（包括长轮询收到 kind "e2e" 的变更）：等待核对的页面看到它变了立即再查一次 */
     val tick: StateFlow<Int> = _tick.asStateFlow()
@@ -94,10 +98,20 @@ object E2EHub {
         val merged = if (memOnly == null) stored else Store.E2EVault(
             stored.keys + pinCheck(o, memOnly.keys).filter { k -> stored.keys.none { it.kid == k.kid } },
             memOnly.device ?: stored.device,
+            memOnly.setup ?: stored.setup,
+            memOnly.recovery ?: stored.recovery,
+            memOnly.rotation ?: stored.rotation,
         )
         cache = merged; cacheOwner = o
         if (merged != stored) persist(o, merged)
+        mirror(merged)
         return merged
+    }
+
+    /** 把保存的「进行中的开启」「还没点完成的恢复码」同步到界面状态（App 重启后回到恢复码页） */
+    private fun mirror(v: Store.E2EVault) {
+        if (v.recovery != null) _pendingRecovery.value = v.recovery
+        _setupPending.value = v.setup != null && _state.value?.enabled != true
     }
 
     /** 和钉住的公钥核对：对不上的丢弃并提示 T43；还没钉住时钉住第一把 */
@@ -124,6 +138,80 @@ object E2EHub {
         val o = owner()
         cache = v; cacheOwner = o        // 写盘失败（或还不知道账号 id）时这次运行里仍然可用
         if (o != null) persist(o, v)
+        _setupPending.value = v.setup != null && _state.value?.enabled != true
+    }
+
+    // ---------- 进行中的开启、恢复码（§4.1） ----------
+
+    /** 开启加密时生成了新钥匙对和恢复码（发请求之前）：先存起来 */
+    @Synchronized
+    fun setupGenerated(p: SetupResult) = saveVault(vault().copy(setup = p))
+
+    /** 开启加密确认失败（4xx、确认没开启、别的设备开启了）：删除进行中的开启 */
+    @Synchronized
+    fun dropSetup() { vault().takeIf { it.setup != null }?.let { saveVault(it.copy(setup = null)) } }
+
+    /** 本机存着的进行中的开启（重试时先核对它） */
+    fun pendingSetup(): SetupResult? = vault().setup
+
+    /**
+     * 开启成功（本机发起的请求成功、或刷新状态时发现 active 公钥就是这把）：恢复码先存好、放进 App 状态，再保存私钥并钉住公钥。
+     * 已经完成过（刷新和开启页同时发现）时什么都不做。钉住的公钥对不上时丢弃（T43）
+     */
+    fun finishSetup(p: SetupResult, st: E2EState? = null) {
+        synchronized(this) {
+            val v = vault()
+            if (v.setup?.key?.pub != p.key.pub) return
+            val o = owner()
+            val pin = o?.let { Hub.store.pinnedPub(it) }
+            if (pin != null && pin != p.key.pub) { notice.value = E2EText.T43; saveVault(v.copy(setup = null)); return }
+            if (o != null && pin == null) Hub.store.pin(o, p.key.pub)
+            val r = p.recoveryCode to true
+            saveVault(v.copy(keys = v.keys.filter { it.kid != p.key.kid } + p.key, setup = null, recovery = r))
+            _pendingRecovery.value = r
+        }
+        st?.let { _state.value = it }
+        recompute()
+        redecryptAll()
+    }
+
+    /** 本机正在发更换恢复码的请求：这期间刷新看到 recovery_wrap 不同不算失败（请求可能还没到） */
+    @Volatile private var rotating = false
+
+    /** 更换恢复码：新恢复码在发请求之前就存好（§7 第 3 项） */
+    @Synchronized
+    fun rotationGenerated(rot: RecoveryRotation) { rotating = true; saveVault(vault().copy(rotation = rot)) }
+
+    /** 更换恢复码确认失败（4xx、确认没换成）：删除这一次的（null = 还没生成就失败了，不动之前保留的） */
+    @Synchronized
+    fun dropRotation(rot: RecoveryRotation?) {
+        rotating = false
+        if (rot == null) return
+        vault().takeIf { it.rotation == rot }?.let { saveVault(it.copy(rotation = null)) }
+    }
+
+    /** 本机发起的请求结果不明：保留，等刷新时核对 */
+    fun rotationUnsure() { rotating = false }
+
+    /**
+     * 更换恢复码成功（本机请求成功、或刷新时 recovery_wrap 等于这次上传的）：新恢复码放进「还没点完成」的恢复码，
+     * 显示恢复码页。已经处理过时什么都不做
+     */
+    @Synchronized
+    fun finishRotation(rot: RecoveryRotation) {
+        rotating = false
+        val v = vault()
+        if (v.rotation != rot) return
+        val r = rot.code to false
+        saveVault(v.copy(rotation = null, recovery = r))
+        _pendingRecovery.value = r
+    }
+
+    /** 恢复码页点「完成」：删除保存的恢复码 */
+    @Synchronized
+    fun recoveryDone() {
+        _pendingRecovery.value = null
+        vault().takeIf { it.recovery != null }?.let { saveVault(it.copy(recovery = null)) }
     }
 
     /** 本账号全部私钥（解密消息用） */
@@ -157,6 +245,8 @@ object E2EHub {
 
     /** App 启动时（Hub.init 读完本地消息之后）：本机有保存的私钥就把锁着的消息解一遍（读 Keystore 放后台） */
     fun onStart() {
+        // 读一次保存的钥匙：没点「完成」的恢复码回到 App 状态，打开 App 就回到「保存恢复码」页
+        if (Hub.loggedIn) scope.launch { runCatching { vault() } }
         if (Hub.messages.value.none { it.e2eStatus == E2EMessages.LOCKED }) return
         redecryptAll()
     }
@@ -193,7 +283,7 @@ object E2EHub {
                 if (pin != null && pin != key.pub) { notice.value = E2EText.T43; return false }
                 if (pin == null) Hub.store.pin(o, key.pub)
             }
-            saveVault(Store.E2EVault(v.keys.filter { it.kid != key.kid } + key, if (dropDevice) null else v.device))
+            saveVault(v.copy(keys = v.keys.filter { it.kid != key.kid } + key, device = if (dropDevice) null else v.device))
         }
         st?.let { _state.value = it }
         recompute()
@@ -211,9 +301,6 @@ object E2EHub {
         if (o.notice != null) notice.value = o.notice
     }
 
-    /** 开启加密时网络出错、结果不明：钥匙和恢复码留在内存里，重试时先核对（§4.1 第 4 步） */
-    @Volatile var pendingSetup: SetupResult? = null
-
     /** 界面拿到新状态（开启加密、解锁、改设置之后） */
     fun setState(st: E2EState) {
         _state.value = st
@@ -224,21 +311,24 @@ object E2EHub {
     }
 
     /**
-     * 退出登录、换账号：删除本机的全部私钥和设备钥匙对，清空状态（「已升级」标记不删）。
+     * 退出登录、换账号、换服务器、设备被移除（§8）：先停掉进行中的批准流程（请求批准、批准其他设备），
+     * 再删除本机的全部私钥、设备钥匙对、进行中的开启和没点「完成」的恢复码，清空状态（「已升级」标记、钉住的公钥不删）。
+     * 停掉的流程正在路上的结果一律作废（DeviceRequest.abandon、approvals 换了对象、会话编号变了）。
      * keepVault：登录失效后重新登录（同一台设备），只清内存里的状态，保存的私钥留着
      */
     fun wipe(keepVault: Boolean = false) {
         synchronized(this) {
+            request?.abandon()
             request = null
             approvals.clear()
             cache = null
             cacheOwner = null
-            pendingSetup = null
             if (!keepVault) runCatching { Hub.store.e2eClear() }
         }
         _requestStep.value = null
         _approvalStages.value = emptyMap()
-        pendingRecovery.value = null
+        _pendingRecovery.value = null
+        _setupPending.value = false
         _state.value = null
         unsupported = false
         _status.value = E2EStatus.UNKNOWN
@@ -261,7 +351,7 @@ object E2EHub {
             val req = request
             if (req != null && req.active) {
                 val (step, s) = req.step(api)
-                onRequestStep(req, step)
+                onRequestStep(req, step, session)
                 s
             } else E2EState.parse(api.e2eState())
         } catch (e: ApiException) {
@@ -281,9 +371,31 @@ object E2EHub {
         // 加强之后在这台设备上用密码登录时的防降级
         if (st.authKey) listOf(Hub.store.loginUsername, Hub.store.username).filter { it.isNotBlank() }.distinct()
             .forEach { Hub.store.upgradeFlags.markUpgraded(Hub.store.server, it) }
+        // 进行中的开启（§4.1）：每次刷新都核对，不等用户再点「开启」（开启成功后那个按钮就不显示了）
+        vault().setup?.let { p ->
+            when (logic.pendingSetup(st, p)) {
+                E2ELogic.PendingSetup.COMPLETE -> {
+                    listOf(Hub.store.loginUsername, Hub.store.username).filter { it.isNotBlank() }.distinct()
+                        .forEach { Hub.store.upgradeFlags.markUpgraded(Hub.store.server, it) }
+                    finishSetup(p)
+                }
+                E2ELogic.PendingSetup.DROP -> dropSetup()
+                E2ELogic.PendingSetup.KEEP -> {}
+            }
+        }
+        // 进行中的更换恢复码（§7 第 3 项）：recovery_wrap 就是这次上传的 → 成功，显示新恢复码；
+        // 不是、而且本机没有请求在路上 → 没换成，删除（旧恢复码仍然有效）
+        vault().rotation?.let { rot ->
+            if (logic.rotationDone(st, rot)) finishRotation(rot) else if (!rotating) dropRotation(rot)
+        }
         recompute()
-        // 已解锁、还没钉住公钥（钉住功能之前保存的私钥）：把本机这把钉住
-        if (_status.value == E2EStatus.UNLOCKED && pinned() == null) owner()?.let { o -> accountKey()?.let { Hub.store.pin(o, it.pub) } }
+        _setupPending.value = vault().setup != null && !st.enabled
+        // §4.5 末尾：本机有私钥、却还没钉住公钥（钉住功能之前保存的等）：用私钥重新算出公钥，是 active 的就补钉
+        if (_status.value == E2EStatus.UNLOCKED && pinned() == null) owner()?.let { o ->
+            accountKey()?.let { k ->
+                runCatching { logic.verify(k.sk, st.keys, null) }.getOrNull()?.let { Hub.store.pin(o, it.pub) }
+            }
+        }
         pruneApprovals(st)
         notifyRequests(st)
         _tick.update { it + 1 }
@@ -302,8 +414,9 @@ object E2EHub {
     /** 批准请求的进度；null = 没有发起 */
     val requestStep: StateFlow<DeviceRequest.Step?> = _requestStep.asStateFlow()
 
-    private fun onRequestStep(req: DeviceRequest, step: DeviceRequest.Step) {
-        if (request !== req) return
+    /** 只处理当前这个请求对象、当前会话的结果：换账号、重新发起之后，旧请求在路上的结果直接丢弃 */
+    private fun onRequestStep(req: DeviceRequest, step: DeviceRequest.Step, session: Long) {
+        if (request !== req || session != Hub.session) return
         _requestStep.value = step
         if (step is DeviceRequest.Step.Unlocked) {
             request = null
@@ -319,19 +432,25 @@ object E2EHub {
      * 不会收下没有走完核对的转交），新的 nb，请求批准。账号公钥对不上（T43）等失败时停在 Failed
      */
     suspend fun startRequest() = withContext(Dispatchers.IO) {
+        val session = Hub.session
         val api = Hub.api() ?: throw IOException("未登录")
         val dev = synchronized(this@E2EHub) {
             CoreCrypto.keypair().also { saveVault(vault().copy(device = it)) }
         }
         val r = DeviceRequest(CoreCrypto, logic, dev, pinned())
+        // 换掉之前的请求对象：它在路上的结果作废
+        synchronized(this@E2EHub) { request?.abandon(); request = r }
         try {
             r.start(api)
         } catch (e: E2EError) {
-            request = null
-            _requestStep.value = DeviceRequest.Step.Failed(e.message ?: E2EText.T43)
+            if (request === r) { request = null; _requestStep.value = DeviceRequest.Step.Failed(e.message ?: E2EText.T43) }
+            throw e
+        } catch (e: Exception) {
+            if (request === r) request = null
             throw e
         }
-        request = r
+        // 发起期间换了账号、退出登录、又发起了一次：这个请求作废
+        if (request !== r || session != Hub.session) { r.abandon(); return@withContext }
         _requestStep.value = DeviceRequest.Step.Waiting
         refresh(api)
     }
@@ -370,16 +489,22 @@ object E2EHub {
         // 用本机私钥算出的账号公钥核对承诺、计算核对码，不用服务器给的 keys（§5 第 3 步）
         val sk = activeSk() ?: throw E2EError("本机还没有解锁，不能批准其他设备")
         val a = Approval(CoreCrypto, r.deviceId, r.name, CoreCrypto.publicKey(sk).first)
+        val session = Hub.session
         synchronized(this@E2EHub) { approvals[r.deviceId] = a }
-        try { a.begin(api) } finally { publish(a) }
+        try { a.begin(api) } finally { if (live(a, session)) publish(a) }
         stepApproval(r.deviceId)
     }
 
+    /** 这个批准流程还是不是当前的（换账号、取消、重新批准后，旧对象在路上的结果丢弃） */
+    private fun live(a: Approval, session: Long) = session == Hub.session && synchronized(this) { approvals[a.deviceId] === a }
+
     /** 等对方揭晓：每 3 秒（以及收到 e2e 变更时）调用 */
     suspend fun stepApproval(deviceId: String) = withContext(Dispatchers.IO) {
+        val session = Hub.session
         val a = synchronized(this@E2EHub) { approvals[deviceId] } ?: return@withContext
         val api = Hub.api() ?: return@withContext
         val (stage, st) = a.step(api)
+        if (!live(a, session)) return@withContext
         publish(a)
         // 失败（核对不一致 T52、被别的设备接手 T51、对方取消）：请求随后会从列表里消失，原因放到页面顶部的提示里
         if (stage is Approval.Stage.Failed) notice.value = stage.message
@@ -391,15 +516,17 @@ object E2EHub {
         val a = synchronized(this@E2EHub) { approvals[deviceId] } ?: throw E2EError("请重新点「批准」")
         val sk = activeSk() ?: throw E2EError("本机还没有解锁，不能批准其他设备")
         val api = Hub.api() ?: throw IOException("未登录")
-        try { a.approve(api, sk) } finally { publish(a) }
+        val session = Hub.session
+        try { a.approve(api, sk) } finally { if (live(a, session)) publish(a) }
         runCatching { refresh(api) }
     }
 
     /** 「不一致，拒绝」/ 直接「拒绝」 */
     suspend fun deny(deviceId: String) = withContext(Dispatchers.IO) {
         val api = Hub.api() ?: throw IOException("未登录")
+        val session = Hub.session
         val a = synchronized(this@E2EHub) { approvals[deviceId] }
-        if (a != null) { a.reject(api); publish(a) } else api.e2eDeny(deviceId)
+        if (a != null) { a.reject(api); if (live(a, session)) publish(a) } else api.e2eDeny(deviceId)
         runCatching { refresh(api) }
     }
 
@@ -410,7 +537,7 @@ object E2EHub {
         if (gone.isNotEmpty()) _approvalStages.update { it - gone.toSet() }
     }
 
-    /** 批准流程结束后关掉 */
+    /** 批准流程结束后关掉；等对方揭晓期间点「取消」：只停止本机的等待，不发请求（§5 第 2 步） */
     fun dismissApproval(deviceId: String) {
         synchronized(this) { approvals.remove(deviceId) }
         _approvalStages.update { it - deviceId }

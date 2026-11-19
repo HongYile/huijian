@@ -56,6 +56,8 @@ object E2EText {
     const val NO_PRELOGIN = "服务器没有返回密码派生参数（prelogin 不存在），无法安全地核对密码，已停止。"
     const val SETUP_RETRY = "开启加密时网络出错，服务器上还没有开启，请重试。"
     const val SETUP_UNSURE = "开启加密时网络出错，暂时无法确认是否已经开启。请稍后点「开启端到端加密」重试（会先核对，不会重复开启）。"
+    const val ROTATE_RETRY = "更换恢复码时网络出错，服务器上还没有更换，旧恢复码仍然有效。请重试。"
+    const val ROTATE_UNSURE = "更换恢复码时网络出错，暂时无法确认是否已经更换。稍后刷新时会自动核对，更换成功会显示新恢复码。"
     const val GRANT_BAD = "转交来的钥匙解不开，请重新请求批准"
     const val WRAP_GONE = "用密码锁住的私钥已失效（管理员重设过密码）：请用另一台设备批准，或用恢复码解锁"
 
@@ -244,6 +246,9 @@ data class Cred(val field: String, val value: String, val unlock: String? = null
 data class LoginOutcome(val result: LoginResult, val keys: List<LocalKey> = emptyList(), val notice: String? = null, val upgraded: Boolean = false)
 
 data class SetupResult(val key: LocalKey, val recoveryCode: String)
+
+/** 更换恢复码进行中（§7 第 3 项）：新恢复码和这次上传的 recovery_wrap（刷新时用它判断是否已经换成功） */
+data class RecoveryRotation(val code: String, val wrap: String)
 
 // ---------- 逻辑 ----------
 
@@ -469,7 +474,8 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
      * newPassword 为 null：不换密码，继续用当前密码。
      * pending：上一次网络出错、结果不明时留在内存里的钥匙和恢复码：先 GET /v1/e2e 核对（第 4 步），已经开启成功就直接用它
      */
-    fun setup(net: E2ENet, server: String, username: String, current: String, newPassword: String?, pending: SetupResult? = null): SetupResult {
+    fun setup(net: E2ENet, server: String, username: String, current: String, newPassword: String?, pending: SetupResult? = null,
+              onGenerated: (SetupResult) -> Unit = {}): SetupResult {
         if (pending != null && confirmSetup(net, server, username, pending)) return pending
         if (newPassword == null) {
             if (c.passwordProblem(current, username) != null) throw E2EError(E2EText.WEAK_CURRENT, E2EError.Kind.WEAK_CURRENT)
@@ -483,6 +489,8 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
         val (auth, unlock) = c.passwordKeys(actual, salt)
         val (code, rkey) = c.recoveryNew()
         val result = SetupResult(LocalKey(kp.kid, kp.pub, kp.sk), code)
+        // 发出请求之前先存好（和私钥同等保护）：结果不明、App 被终止后，刷新状态时还能核对并完成（§4.1）
+        onGenerated(result)
         val body = cred.into(JSONObject().put("pub", kp.pub).put("auth_salt", salt).put("auth_key", auth)
             .put("password_wrap", c.wrap("hjp1", unlock, kp.sk))
             .put("recovery_wrap", c.wrap("hjr1", rkey, kp.sk)))
@@ -519,6 +527,22 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
         if (!st.enabled) return false
         if (st.keys.any { it.active && it.pub == p.key.pub }) { flags.markUpgraded(server, username); return true }
         throw E2EError("别的设备刚开启了加密，已重新读取状态", E2EError.Kind.CONFLICT)
+    }
+
+    /** 刷新状态时怎么处理本机存着的「进行中的开启」（§4.1） */
+    enum class PendingSetup {
+        /** 已开启，active 公钥就是这把：保存私钥、钉住公钥、显示恢复码页 */
+        COMPLETE,
+        /** 已开启，但公钥不是这把（别的设备开启的）：删除 */
+        DROP,
+        /** 还没开启：保留，提示重试 */
+        KEEP,
+    }
+
+    fun pendingSetup(st: E2EState, p: SetupResult): PendingSetup = when {
+        !st.enabled -> PendingSetup.KEEP
+        st.keys.any { it.active && it.pub == p.key.pub } -> PendingSetup.COMPLETE
+        else -> PendingSetup.DROP
     }
 
     // ---------- 解锁（§4.2、§4.4） ----------
@@ -616,13 +640,43 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
         } catch (_: Exception) { false }
     }
 
-    /** §7 第 3 项：更换恢复码，返回新恢复码（只显示一次，不保存） */
-    fun rotateRecovery(net: E2ENet, server: String, username: String, current: String, sk: String): String {
+    /**
+     * §7 第 3 项：更换恢复码，返回新恢复码。新恢复码在发请求之前交给 onGenerated 保存（服务端一换旧恢复码就失效，新的不能丢）。
+     * 4xx（含 403 → T3）照常抛出，调用方删除；网络出错、5xx 时先 GET 核对：recovery_wrap 等于这次上传的 → 成功；
+     * 不等 → 没有换成（ROTATE_RETRY，调用方删除）；读不到状态 → ROTATE_UNSURE（Kind.SETUP_UNSURE，调用方保留，之后刷新时核对）
+     */
+    fun rotateRecovery(net: E2ENet, server: String, username: String, current: String, sk: String,
+                       onGenerated: (RecoveryRotation) -> Unit = {}): String {
         val cred = credential(net, server, username, current, Use.E2E)
         val (code, rkey) = c.recoveryNew()
-        checked { net.e2eRecovery(cred.into(JSONObject().put("recovery_wrap", c.wrap("hjr1", rkey, sk)))) }
+        val rot = RecoveryRotation(code, c.wrap("hjr1", rkey, sk))
+        onGenerated(rot)
+        try {
+            checked { net.e2eRecovery(cred.into(JSONObject().put("recovery_wrap", rot.wrap))) }
+        } catch (e: ApiException) {
+            if (e.status < 500) throw e
+            confirmRotation(net, rot)
+        } catch (e: UnauthorizedException) {
+            throw e
+        } catch (e: java.io.IOException) {
+            confirmRotation(net, rot)
+        }
         return code
     }
+
+    private fun confirmRotation(net: E2ENet, rot: RecoveryRotation) {
+        val st = try {
+            E2EState.parse(net.e2eState())
+        } catch (e: UnauthorizedException) {
+            throw e
+        } catch (e: Exception) {
+            throw E2EError(E2EText.ROTATE_UNSURE, E2EError.Kind.SETUP_UNSURE)
+        }
+        if (!rotationDone(st, rot)) throw E2EError(E2EText.ROTATE_RETRY)
+    }
+
+    /** 刷新状态时核对进行中的更换：服务器上的 recovery_wrap 就是这次上传的那份 → 已经换成功 */
+    fun rotationDone(st: E2EState, rot: RecoveryRotation) = st.recoveryWrap.isNotEmpty() && st.recoveryWrap == rot.wrap
 
     companion object {
         const val ARGON_TIME = 3
@@ -654,8 +708,8 @@ class DeviceRequest(private val c: E2ECrypto, private val logic: E2ELogic, val d
     /** 已经对哪个 challenge 揭晓过 nb */
     private var revealedFor: String? = null
     private var code: String? = null
-    /** 请求序号：每次重新开始加一 */
-    private var gen = 0
+    /** 请求序号：每次重新开始加一（abandon 不拿锁，所以是 volatile） */
+    @Volatile private var gen = 0
     @Volatile var active = false
         private set
 
@@ -663,10 +717,12 @@ class DeviceRequest(private val c: E2ECrypto, private val logic: E2ELogic, val d
     @Synchronized
     fun start(net: E2ENet) {
         active = false
+        if (abandoned) return
         val a = logic.accountPub(E2EState.parse(net.e2eState()), pinned)
         val n = c.random32()
         net.e2eDevice(dev.pub, request = true, commit = c.sasCommit(dev.pub, a, n))
-        acc = a; nb = n; revealedFor = null; code = null; gen++; active = true
+        acc = a; nb = n; revealedFor = null; code = null; gen++
+        active = !abandoned          // 发请求期间被停掉（换账号）：不再继续
     }
 
     /** 第 4 步：读一次状态并推进；返回这一步的结果和读到的状态 */
@@ -674,7 +730,7 @@ class DeviceRequest(private val c: E2ECrypto, private val logic: E2ELogic, val d
     fun step(net: E2ENet): Pair<Step, E2EState> {
         val g = gen
         val st = E2EState.parse(net.e2eState())
-        if (g != gen) return Step.Waiting to st       // 发出之后又重新开始过：这份状态过期了
+        if (g != gen || abandoned) return Step.Waiting to st       // 发出之后又重新开始过、或已停掉：这份状态过期了
         return advance(net, st) to st
     }
 
@@ -718,6 +774,15 @@ class DeviceRequest(private val c: E2ECrypto, private val logic: E2ELogic, val d
         if (revealedFor != null) { start(net); return Step.Waiting }
         return Step.Waiting
     }
+
+    /** 换账号、退出登录：只停掉本机（不拿锁、不发请求），正在路上的结果一律作废 */
+    fun abandon() {
+        abandoned = true
+        active = false
+        gen++
+    }
+
+    @Volatile private var abandoned = false
 
     /** 第 5 步：取消 */
     @Synchronized

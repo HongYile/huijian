@@ -9,6 +9,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
@@ -85,6 +86,9 @@ class MainActivity : ComponentActivity() {
                         screen = Screen.Settings      // 登录后先去「后台运行检查」把权限设好
                     })
                 } else {
+                    // 有没点「完成」的恢复码（开启加密后 App 被终止、刷新时才确认开启成功等）：回到「保存恢复码」页（§4.1）
+                    val recovery by E2EHub.pendingRecovery.collectAsStateWithLifecycle()
+                    LaunchedEffect(recovery != null) { if (recovery != null && screen != Screen.E2E) screen = Screen.E2E }
                     when (val s = screen) {
                         Screen.Home -> HomeScreen(
                             open = { screen = Screen.Detail(it) },

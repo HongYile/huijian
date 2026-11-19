@@ -433,9 +433,14 @@ class SyncService : Service() {
         val upTo = store.cursor        // 只处理请求前已同步到的消息
         val r = a.messageStates()
         if (Hub.session != session) return
-        val (del, arch) = Changes.reconcile(Hub.messages.value, r.states, upTo, Changes.sameData(store.changesEpoch, r.epoch))
+        val (del0, arch) = Changes.reconcile(Hub.messages.value, r.states, upTo, Changes.sameData(store.changesEpoch, r.epoch))
         // 「仅本机保留」的消息服务器上本来就没有，对账时跳过
-        Hub.removeMessages(if (del.isEmpty()) del else del - store.keepLocal, session)
+        val del = if (del0.isEmpty()) del0 else del0 - store.keepLocal
+        // §7.4：变更记录只保留 90 天，离线更久的设备收不到 purge。账号开了加密时，服务器上找不到的本地明文消息记为「仅本机保留」，
+        // 不删除（可能是「删除服务器上的明文消息」删掉的）；加密消息照常删除
+        val (keep, remove) = if (del.isNotEmpty() && e2eEnabledFor(a)) Changes.splitPlain(Hub.messages.value, del) else emptySet<Long>() to del
+        Hub.keepLocally(keep, session)
+        Hub.removeMessages(remove, session)
         Hub.applyArchive(arch, session)
         Hub.saveNow()
         Hub.inSession(session) {
@@ -509,6 +514,20 @@ class SyncService : Service() {
             nextChanges?.let { store.changesCursor = it }
         }
         return if (ok) plan.refresh else null
+    }
+
+    /** 账号是否开启了加密（对账用）：还没读到时读一次；读不到（网络错误等）按开启处理，宁可留着不删 */
+    private fun e2eEnabledFor(a: Api): Boolean {
+        E2EHub.state.value?.let { return it.enabled }
+        return try {
+            E2EState.parse(a.e2eState()).enabled
+        } catch (e: UnauthorizedException) {
+            throw e
+        } catch (e: ApiException) {
+            !e.oldServer
+        } catch (_: Exception) {
+            true
+        }
     }
 
     /** 收到 401 后用 /v1/me 再核对一次：仍是 401 → 本机已被移除；网络错误等 → 不确定，按没有移除处理 */
