@@ -355,7 +355,7 @@ huijian server-push -manifest server/bin/release/update-server.json
 
 ## 4. Python SDK
 
-`sdk/python/huijian.py` 是单个文件，只用标准库，复制到项目里即可使用。
+`sdk/python/huijian.py` 是单个文件，复制到项目里即可使用。普通 pushkey 只用标准库；`pushkey` 是加密发送密钥（`PK_xxx.e2e.<公钥>`）时，标题、正文、附件（含文件名）在本机加密后再发出，需要 `cryptography` 库（`pip install cryptography`）。加密格式和 `huijian push` 逐字节一致。
 
 ```python
 import huijian

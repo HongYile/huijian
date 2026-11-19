@@ -70,7 +70,15 @@ echo "${HUIJIAN_URL:-未设置}"; [ -n "$HUIJIAN_PUSHKEY" ] && echo "pushkey 已
 
 ## 发送
 
-### curl（最简单）
+**先看 pushkey 是不是「加密发送密钥」**：形如 `PK_xxx.e2e.<43 位公钥>`（含 `.e2e.`）。是的话说明用户开启了端到端加密，**不能用 curl**（服务器会以 400 拒收明文），必须用下面的 `huijian` 命令行或 Python SDK，它们会在本机加密标题、正文和附件。判断时只看有没有 `.e2e.`，不要打印 key 本身：
+
+```bash
+case "$HUIJIAN_PUSHKEY" in *.e2e.*) echo "加密发送密钥：用 huijian 命令行或 Python SDK";; *) echo "普通 pushkey：curl 也可以";; esac
+```
+
+普通 pushkey 发出的是明文；用户开启了加密的账号，客户端会把明文消息标成「未加密」。
+
+### curl（最简单，只能发明文）
 
 ```bash
 curl -sS "$HUIJIAN_URL/message/push" \
@@ -103,7 +111,9 @@ echo "多行内容" | huijian push -          # 文本从标准输入读
 
 发送失败（网络错误或 5xx）时会存进 `~/.huijian/outbox/`，之后自动补发，不会重复。
 
-### Python（单文件 SDK，零依赖）
+### Python（单文件 SDK）
+
+普通 pushkey 只用标准库；加密发送密钥需要 `cryptography` 库（`pip install cryptography`，多数环境已经装了）。
 
 ```python
 import huijian   # 仓库里的 sdk/python/huijian.py，复制到项目里即可
@@ -184,7 +194,8 @@ with huijian.run("exp42", topic="train"):   # 自动发：开始（P4）/ 完成
 | 返回 | 原因 | 处理 |
 |---|---|---|
 | 403 `pushkey 无效或已吊销` | key 错了或被吊销 | 停止重试，告诉用户需要新的 pushkey |
-| 400 | 参数错误（例如缺 text） | 检查参数 |
+| 400 | 参数错误（例如缺 text）；或用加密发送密钥发了明文 | 检查参数；加密发送密钥改用 `huijian push` / Python SDK |
+| 403 `只接受加密消息` | 用户开启了「只接受加密消息」，而你用的是普通 pushkey | 告诉用户需要换成加密发送密钥 |
 | 413 | 附件太大（默认上限 512MB） | 压缩或改发链接 |
 | 429 | 发送太频繁 | 等一会儿再发，或合并成一条 |
 | 连接失败 / 5xx | 服务器不可达 | 用 `huijian push`（自动补发），或稍后重试一次；不要无限重试 |
