@@ -401,6 +401,9 @@ struct ThreadListView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if !multi.isEmpty { selectionBar(groups) }
             }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if model.e2eLocked { E2ELockedBanner() }
+            }
             .onChange(of: model.filter) { _, _ in multi = [] }
             // 搜索、筛选、其他设备的操作、自动归档都会让会话从列表里消失：多选只保留还看得见的
             .onChange(of: groups.map(\.id)) { _, ids in
@@ -509,10 +512,22 @@ struct ThreadRow: View {
                 indicator(style).frame(width: 12, height: 16)
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        if m.isE2E {
+                            // 加密消息：标题前一个小锁（只表示内容加密了，不表示来源可信）
+                            Image(systemName: "lock.fill").font(.system(size: 10)).foregroundStyle(Theme.text3)
+                                .help("端到端加密")
+                        }
                         Text(m.text)
                             .font(.system(size: Theme.fRowTitle, weight: unread ? .semibold : .regular))
                             .foregroundStyle(titleColor)
                             .lineLimit(1)
+                        if !m.isE2E, model.e2eAccountEnabled {
+                            Text("未加密").font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.text3)
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(Capsule().fill(Theme.surface2))
+                                .fixedSize()
+                                .help(E2E.T.t63)
+                        }
                         Spacer(minLength: 4)
                         Text(TimeFmt.relative(m.createdAt))
                             .font(.system(size: 11.5).monospacedDigit())
@@ -689,7 +704,7 @@ struct DetailView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         MessageHeader(message: focus)
                         MessageBody(message: focus, scrollTo: { anchor in withAnimation { proxy.scrollTo(anchor, anchor: .top) } })
-                        if !focus.attachments.isEmpty {
+                        if !focus.attachments.isEmpty && !focus.e2eUnreadable {
                             SectionTitle(title: "附件", trailing: "\(focus.attachments.count) 个 · \(humanSize(focus.attachments.reduce(0) { $0 + $1.size }))")
                                 .padding(.top, 26).padding(.bottom, 12)
                             LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 160), spacing: 14, alignment: .leading)],
@@ -811,6 +826,13 @@ struct MessageHeader: View {
                 Text(TimeFmt.full(message.createdAt)).monospacedDigit()
                 Text("·")
                 Text("#\(message.id)").monospacedDigit()
+                if message.isE2E {
+                    Text("·")
+                    Text("🔒 端到端加密").help("内容在发送端加密，只有你的设备能解开（不表示来源一定可信）")
+                } else if model.e2eAccountEnabled {
+                    Text("·")
+                    Text(E2E.T.t63)
+                }
             }
             .font(.system(size: Theme.fMeta))
             .foregroundStyle(Theme.text3)
@@ -828,7 +850,9 @@ struct MessageBody: View {
     @State private var missingLink = false
 
     var body: some View {
-        if let doc = message.renderDoc {
+        if message.e2eUnreadable {
+            E2ELockedBody(message: message)
+        } else if let doc = message.renderDoc {
             // 服务端 0.6.0 起：按解析好的 doc 绘制（表格、提示框、正文里的附件图片……）
             DocView(doc: doc).environment(\.mdActions, actions)
                 .alert("消息不存在或已被删除", isPresented: $missingLink) {
@@ -1209,8 +1233,13 @@ struct PairView: View {
         case .code: return code.count == 6
         case .login: return !username.trimmingCharacters(in: .whitespaces).isEmpty && !password.isEmpty
         case .register: return AppModel.normalizeUsername(username).count >= 2 && AppModel.usernameProblem(username) == nil
-            && password.count >= 8 && password == password2
+            && password.count >= 8 && password == password2 && registerProblem == nil
         }
+    }
+
+    /// 注册时的密码强度（服务器拿不到密码，只能在客户端检查，docs/e2ee-client.md §2.2）
+    var registerProblem: String? {
+        mode == .register && !password.isEmpty ? Core.passwordProblem(password, username: AppModel.normalizeUsername(username)) : nil
     }
 
     var body: some View {
@@ -1264,7 +1293,14 @@ struct PairView: View {
                                 }
                             }
                         }
-                        field("密码") { WarmField(placeholder: mode == .register ? "至少 8 位" : "密码", text: $password, secure: true) }
+                        field("密码") {
+                            VStack(alignment: .leading, spacing: 5) {
+                                WarmField(placeholder: mode == .register ? "至少 10 位，不要用常见密码" : "密码", text: $password, secure: true)
+                                if let p = registerProblem {
+                                    Text(p).font(.system(size: 11.5)).foregroundStyle(Theme.danger)
+                                }
+                            }
+                        }
                         if mode == .register {
                             field("再输入一次密码") { WarmField(placeholder: "确认密码", text: $password2, secure: true) }
                             if !password2.isEmpty && password != password2 {
@@ -1334,9 +1370,9 @@ struct PairView: View {
 
 enum SettingsTab: String, CaseIterable {
     // 账户第一、Pushkey 第二：最常用的放最前面
-    case account, keys, general, notify, server, network
-    var title: String { ["account": "账户", "general": "通用", "notify": "通知", "keys": "Pushkey", "server": "服务器", "network": "网络"][rawValue]! }
-    var icon: String { ["account": "person.crop.circle", "general": "gearshape", "notify": "bell.badge", "keys": "key", "server": "server.rack", "network": "network"][rawValue]! }
+    case account, keys, e2e, general, notify, server, network
+    var title: String { ["account": "账户", "general": "通用", "notify": "通知", "keys": "Pushkey", "e2e": "加密", "server": "服务器", "network": "网络"][rawValue]! }
+    var icon: String { ["account": "person.crop.circle", "general": "gearshape", "notify": "bell.badge", "keys": "key", "e2e": "lock.shield", "server": "server.rack", "network": "network"][rawValue]! }
 }
 
 /// 统一的「账户与设置」窗口：左侧边栏（账户在上），右侧内容。点主窗口左下角的头像直接打开「账户」页。
@@ -1364,6 +1400,7 @@ struct SettingsView: View {
                         case .notify: NotifySettings()
                         case .network: NetworkSettings()
                         case .keys: KeysSettings()
+                        case .e2e: E2ESettings()
                         case .server: ServerSettings()
                         }
                     }
@@ -2018,5 +2055,53 @@ struct EmptyMark: View {
             ctx.withCGContext { HuijianMark.draw(in: $0, rect: CGRect(origin: .zero, size: size), mono: c) }
         }
         .accessibilityHidden(true)
+    }
+}
+
+// MARK: 端到端加密：锁定横幅、解不开的消息
+
+/// 消息列表顶部：本机还没解锁加密消息（T10），点开进入设置的「加密」页
+struct E2ELockedBanner: View {
+    @State private var hover = false
+
+    var body: some View {
+        Button { AppDelegate.shared?.showSettings(tab: .e2e) } label: {
+            HStack(spacing: 6) {
+                Text(E2E.T.t10).font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.text)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.text3)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 9)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.warning.opacity(hover ? 0.18 : 0.12)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .padding(.horizontal, 8).padding(.top, 6)
+        .background(Theme.bg)
+    }
+}
+
+/// 详情页：解不开的加密消息（标题已是 T60 / T61 / T62，正文为空）
+struct E2ELockedBody: View {
+    @EnvironmentObject var model: AppModel
+    let message: Message
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            switch message.e2eStatus {
+            case "wrong_key":
+                Text("这条消息是用别的钥匙加密的（可能换过钥匙，这台设备没有那把旧钥匙），无法解开。")
+            case "format":
+                Text("这条加密消息的内容格式不对或已被篡改，无法解开。")
+            default:
+                Text("这条消息是端到端加密的。这台设备解锁后会自动解开，附件也要解锁后才能下载。")
+                if model.e2eLocked {
+                    Button("去解锁") { AppDelegate.shared?.showSettings(tab: .e2e) }.buttonStyle(SoftButtonStyle())
+                }
+            }
+        }
+        .font(.system(size: 13)).foregroundStyle(Theme.text2)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }

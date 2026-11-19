@@ -445,7 +445,8 @@ struct APIClient {
         }
         let latest = (resp as? HTTPURLResponse)?.legacyHeader("Latest-Build").flatMap { Int($0) }
         let w = try JSONCoding.decoder.decode(Wrap.self, from: data)
-        return MessagePage(messages: w.messages ?? [], latestBuild: latest, nextSince: w.next_since,
+        let msgs = (w.messages ?? []).map { m -> Message in var x = m; x.stripLocalFields(); return x }
+        return MessagePage(messages: msgs, latestBuild: latest, nextSince: w.next_since,
                            changes: w.changes ?? [], changesNext: w.changes_next, changesReset: w.changes_reset ?? false,
                            changesEpoch: w.changes_epoch)
     }
@@ -589,7 +590,8 @@ struct SSEParser {
             case "hello": return .hello
             case "message", "":
                 guard !payload.isEmpty else { return nil }
-                let m = try JSONCoding.decoder.decode(Message.self, from: Data(payload.utf8))
+                var m = try JSONCoding.decoder.decode(Message.self, from: Data(payload.utf8))
+                m.stripLocalFields()
                 return .message(m)
             default: return nil
             }
@@ -612,6 +614,21 @@ struct SSEParser {
         default: break
         }
         return nil
+    }
+}
+
+/// 端到端加密的网络接入（E2E.swift）：照常带设备凭证、记录服务端版本；HTTP 状态由 E2E.API 解释
+extension APIClient: E2ETransport {
+    func e2eSend(_ method: String, _ path: String, query: [URLQueryItem], body: Data?) async throws -> E2E.Response {
+        var r = request(path, query: query, method: method)
+        if let body {
+            r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            r.httpBody = body
+        }
+        let (data, resp) = try await Self.apiSession.data(for: r)
+        guard let h = resp as? HTTPURLResponse else { throw APIError.invalid("非 HTTP 响应") }
+        if let v = h.legacyHeader("Server") { ServerVersionSeen.note(v) }
+        return E2E.Response(status: h.statusCode, data: data, contentType: h.value(forHTTPHeaderField: "Content-Type") ?? "")
     }
 }
 

@@ -202,9 +202,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
-        let id = (response.notification.request.content.userInfo["id"] as? NSNumber)?.int64Value
+        let info = response.notification.request.content.userInfo
+        let id = (info["id"] as? NSNumber)?.int64Value
+        let e2e = info["e2e"] as? Bool == true
         Task { @MainActor in
-            AppDelegate.shared?.showMainWindow(select: id)
+            // 设备请求解锁加密消息（T50）：打开设置的「加密」页核对后批准
+            if e2e { AppDelegate.shared?.showSettings(tab: .e2e) } else { AppDelegate.shared?.showMainWindow(select: id) }
             completionHandler()
         }
     }

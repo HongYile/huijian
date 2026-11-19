@@ -123,6 +123,11 @@ enum SelfTest {
         }
         check(MDLogic.messageID(URL(string: "huijian://message/9")!) == 9, "App 认 huijian://message/<id> 深链")
 
+        // 端到端加密（离线部分：参数核对、防降级、状态、§4.5、消息与附件解密、核对失败自动拒绝；和独立测试程序共用 E2ESelfTest.swift）
+        step("1c 端到端加密（离线）")
+        await E2ESelfTest.offline { name, good, detail in check(good, good ? name : "\(name)  \(detail)") }
+        await e2eModelTests(workdir: workdir)
+
         // 2. 配对
         step("2 配对")
         let token: String
@@ -1131,10 +1136,122 @@ enum SelfTest {
             m.silent = true
             check(m.silent && got[1].priority == 5, "静默标记会传到通知判断（merge 里跳过）")
 
+            // 端到端加密联网流程（服务端 0.7.0 起）：自动升级、开启加密、三种解锁、设备批准、收加密消息、设置项。
+            // 会改掉账号密码、删除服务器上的明文消息，所以放在账号测试的最后
+            if (try? await c.info())?.features.contains(where: { $0.id == "e2e" }) == true {
+                step("22 端到端加密（联网）")
+                await E2ESelfTest.online({ name, good, detail in check(good, good ? name : "\(name)  \(detail)") },
+                                         server: server, transport: { APIClient(server: server, token: $0) },
+                                         tokenA: r.token, username: "自检用户", password: "selftest-pass-1", pushkey: pushkey)
+            } else {
+                print("    （服务端没有 e2e 功能，跳过端到端加密联网测试）")
+            }
+
             try await c.logout()
             do { _ = try await c.me(); ng("退出登录后 token 应失效") } catch APIError.unauthorized { ok("退出登录：token 立即失效") }
         } catch {
             ng("账号测试失败：\(Updater.describe(error))")
+        }
+    }
+
+    /// 端到端加密接到 AppModel 上：锁定期间收到的消息显示 T60、解锁后自动解开（含附件映射和本地 doc）、写盘读回、退出登录删除钥匙。
+    /// 用内存存储，不碰钥匙串
+    @MainActor static func e2eModelTests(workdir: URL) async {
+        let suite = "io.github.hongyile.huijian.selftest-e2e"
+        UserDefaults().removePersistentDomain(forName: suite)
+        let paths = AppPaths(supportDir: workdir.appendingPathComponent("e2e/support"), cacheDir: workdir.appendingPathComponent("e2e/cache"))
+        let m = AppModel(paths: paths, keychainService: "io.github.hongyile.huijian.selftest-e2e", loadToken: false,
+                         defaults: UserDefaults(suiteName: suite)!)
+        m.notificationsEnabled = false
+        m.useToken("DT_selftest", server: "http://127.0.0.1:9")
+        m.account = APIClient.AccountInfo(id: 7, username: "自检", has_password: true)
+        do {
+            let kp = try Core.keypair()
+            var st = E2E.State()
+            st.enabled = true
+            st.auth_key = true
+            st.has_password_wrap = true
+            st.keys = [E2E.Key(kid: kp.kid, pub: kp.pub, active: true)]
+            m.e2eState = st
+            check(m.e2eLocked && m.e2eAccountEnabled, "账号已开启加密、本机没有私钥：已锁定（列表顶部显示 T10）")
+            let fileKey = try Core.random32()
+            let env = try E2ESelfTest.sealPayload(pub: kp.pub, text: "加密标题", desp: "**正文** ![图](attachment:曲线.png)",
+                                                  atts: [["name": "曲线.png", "mime": "image/png", "size": 321, "key": fileKey]])
+            let json = """
+            {"id": 900001, "topic": "e2e", "priority": 4, "type": "e2e", "text": "🔒 加密消息（请把回笺更新到最新版查看）", "desp": "",
+             "created_at": "2026-11-19T08:00:00Z", "e2e": "\(env)",
+             "attachments": [{"id": "a_e2e_1", "name": "encrypted-1.bin", "mime": "application/octet-stream", "size": 400, "sha256": "ab"}]}
+            """
+            let msg = try JSONCoding.decoder.decode(Message.self, from: Data(json.utf8))
+            check(msg.isE2E && msg.e2eStatus == nil, "解码服务端的加密消息：保留信封 e2e")
+            m.merge(await m.prepareE2E([msg]), notify: false)
+            var got = m.messages.first { $0.id == 900001 }
+            check(got?.text == E2E.T.t60 && got?.desp == "" && got?.e2eStatus == "locked" && got?.attachments.first?.key == nil,
+                  "锁定期间收到：标题 T60、正文为空，附件仍是密文")
+            m.autoDownload(m.messages)
+            check(m.progress["a_e2e_1"] == nil, "还没解开的加密消息不自动下载附件")
+            try m.e2eRing?.addAccountKey(kp.sk)
+            m.loadE2EKeys()
+            check(m.e2eStatus == .unlocked && !m.e2eLocked, "本机有了私钥：已解锁")
+            await m.decryptPending()
+            got = m.messages.first { $0.id == 900001 }
+            check(got?.text == "加密标题" && got?.desp.hasPrefix("**正文**") == true && got?.e2eStatus == "ok" && got?.type == "markdown",
+                  "解锁后自动重新解密：标题、正文")
+            check(got?.attachments.first.map { $0.id == "a_e2e_1" && $0.name == "曲线.png" && $0.size == 321 && $0.key == fileKey && $0.sha256 == "ab" } == true,
+                  "附件：显示载荷里的名字和大小，下载仍用服务端 id 和密文校验值，附件钥匙和消息一起保存")
+            check(got?.renderDoc?.blocks.contains { $0.att == "a_e2e_1" || $0.runs?.contains { $0.att == "a_e2e_1" } == true } == true
+                  && messageSummary(got!).contains("正文"), "本地解析的 doc 引用服务端附件 id，列表摘要用本地 preview")
+            AppModel.flushSaves()
+            let saved = Persistence.load(paths.messagesFile).messages.first { $0.id == 900001 }
+            check(saved?.e2e == env && saved?.text == "加密标题" && saved?.e2eStatus == "ok" && saved?.attachments.first?.key == fileKey,
+                  "写盘读回：信封原文、解密后的内容、附件钥匙都在")
+            // 直接 merge（没经过 prepareE2E）的也会在后台解开
+            let env2 = try E2ESelfTest.sealPayload(pub: kp.pub, text: "第二条", desp: "")
+            let m2 = try JSONCoding.decoder.decode(Message.self, from: Data(json.replacingOccurrences(of: "900001", with: "900002")
+                .replacingOccurrences(of: env, with: env2).utf8))
+            m.merge([m2], notify: false)
+            for _ in 0..<20 where m.messages.first(where: { $0.id == 900002 })?.e2eStatus != "ok" { try? await Task.sleep(nanoseconds: 50_000_000) }
+            check(m.messages.first { $0.id == 900002 }?.text == "第二条", "直接合并的加密消息在后台解开")
+            check(m.e2eSendKey("PK_selftest") == .needsUnlock, "还没钉住账号公钥：不显示加密发送密钥")
+            m.e2eRing?.pinIfNeeded(kp.pub)
+            check(m.e2eSendKey("PK_selftest") == .key("PK_selftest.e2e.\(kp.pub)"), "Pushkey 页的加密发送密钥（用钉住的公钥）")
+            // 别的钥匙加密的
+            let other = try Core.keypair()
+            let env3 = try E2ESelfTest.sealPayload(pub: other.pub, text: "x", desp: "")
+            let m3 = try JSONCoding.decoder.decode(Message.self, from: Data(json.replacingOccurrences(of: "900001", with: "900003")
+                .replacingOccurrences(of: env, with: env3).utf8))
+            check(await m.prepareE2E([m3]).first?.text == E2E.T.t61, "别的钥匙加密的消息：T61")
+            // §6.1：解锁和同步同时进行——一轮解密进行中又合并进来的加密消息，这一轮结束后再解一轮，不会漏
+            let env4 = try E2ESelfTest.sealPayload(pub: kp.pub, text: "第四条", desp: "")
+            let m4 = try JSONCoding.decoder.decode(Message.self, from: Data(json.replacingOccurrences(of: "900001", with: "900004")
+                .replacingOccurrences(of: env, with: env4).utf8))
+            let round = Task { await m.decryptPending() }
+            await Task.yield()
+            m.merge([m4], notify: false)
+            await round.value
+            for _ in 0..<20 where m.e2eDecrypting || m.messages.first(where: { $0.id == 900004 })?.e2eStatus != "ok" {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            check(m.messages.first { $0.id == 900004 }?.text == "第四条" && !m.e2eDecryptAgain, "解密进行中合并进来的加密消息：本轮结束后补解，不会漏")
+            // 删除服务器上的明文（§7.4）：收到 purge 变更时本机保留副本，记为「仅本机保留」；对账跳过；之后 delete 变更照常删除
+            m.merge([SelfTest.msg(900101, "plain", "", 3, "明文 A"), SelfTest.msg(900102, "plain", "", 3, "明文 B")], notify: false)
+            m.applyChanges([APIClient.MsgChange(seq: 1, id: 900101, kind: "purge", state: nil),
+                            APIClient.MsgChange(seq: 2, id: 900102, kind: "purge", state: nil),
+                            APIClient.MsgChange(seq: 3, id: 999999, kind: "purge", state: nil)])
+            check(m.messages.contains { $0.id == 900101 } && m.messages.contains { $0.id == 900102 } && m.e2ePlainKept == [900101, 900102],
+                  "收到 purge：本地副本保留，记为仅本机保留（本地没有的不记）")
+            check(AppModel.withoutKept([900101, 900102, 5], kept: m.e2ePlainKept) == [5], "对账时跳过仅本机保留的消息")
+            m.applyChanges([APIClient.MsgChange(seq: 4, id: 900101, kind: "delete", state: nil)])
+            check(!m.messages.contains { $0.id == 900101 } && m.e2ePlainKept == [900102], "之后的 delete 变更照常删除，并移出保留集合")
+            m.removeLocal([900102])
+            check(m.e2ePlainKept.isEmpty, "本机删除后移出保留集合")
+            // 退出登录：删除本机钥匙
+            m.e2eWipe()
+            check(m.e2eKeys.isEmpty && ((try? m.e2eRing?.accountKeys()) ?? ["x"])?.isEmpty == true, "退出登录：本机私钥全部删除")
+            check(m.messages.first { $0.id == 900001 }?.text == "加密标题", "退出登录不影响本机已解开的消息")
+            check(m.e2eRing?.pinned == kp.pub, "退出登录 / 设备被移除（§8）：钉住的账号公钥保留")
+        } catch {
+            ng("端到端加密模型测试失败：\(error)")
         }
     }
 

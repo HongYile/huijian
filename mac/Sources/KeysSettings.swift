@@ -45,6 +45,7 @@ struct KeysSettings: View {
                     ForEach($drafts) { $d in
                         KeyRow(draft: $d, last: d.id == drafts.last?.id,
                                mode: d.original.flatMap { o in modes.map { $0[o.id] ?? "notify" } },
+                               sendKey: d.original.map { o in o.revoked ? .hidden : model.e2eSendKey(o.key) } ?? .hidden,
                                onMode: { m in if let o = d.original { Task { await setMode(o.id, m) } } },
                                onRevoke: { revokeTarget = d },
                                onDelete: model.support("keys.delete") == .yes ? { deleteTarget = d } : nil,
@@ -81,6 +82,7 @@ struct KeysSettings: View {
             guard !loaded else { return }
             loaded = true
             Task { await reload() }
+            Task { await model.refreshE2E() }     // 加密发送密钥要用账号的公钥
         }
         // 其他设备或管理后台改了 pushkey（服务端 0.6.1 起的设置实时同步）：重新拉取，本地没同步的草稿保留
         .onChange(of: model.keysRevision) { _, _ in
@@ -256,6 +258,8 @@ struct KeyRow: View {
     @Binding var draft: KeyDraft
     let last: Bool
     var mode: String? = nil
+    /// 加密发送密钥 <pushkey>.e2e.<钉住的公钥>（账号开启了端到端加密才显示这一行）
+    var sendKey: E2E.SendKey = .hidden
     var onMode: (String) -> Void = { _ in }
     let onRevoke: () -> Void
     var onDelete: (() -> Void)? = nil
@@ -305,6 +309,32 @@ struct KeyRow: View {
                         .help("这把 key 发来的消息在本机：提醒 = 按通知设置弹出；静默 = 只进列表；不接收 = 本机看不到")
                     }
                 }
+            }
+            if sendKey != .hidden, !draft.revoked {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Label("加密发送密钥", systemImage: "lock.fill")
+                            .font(.system(size: 11.5, weight: .medium)).foregroundStyle(Theme.text2).fixedSize()
+                        switch sendKey {
+                        case .key(let k):
+                            Text(k).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.text2)
+                                .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                            Spacer(minLength: 4)
+                            Button("复制") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(k, forType: .string) }
+                                .buttonStyle(SoftButtonStyle())
+                        case .mismatch:
+                            Text(E2E.T.t43).font(.system(size: 11.5)).foregroundStyle(Theme.danger).fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 4)
+                        default:
+                            Text(E2E.T.t73).font(.system(size: 11.5)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 4)
+                        }
+                    }
+                    if case .key = sendKey {
+                        Text(E2E.T.t70).font(.system(size: 11)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.top, 2)
             }
             if let e = draft.error ?? (draft.dirty ? draft.validationError : nil) {
                 Text(e).font(.system(size: 11)).foregroundStyle(Theme.danger)

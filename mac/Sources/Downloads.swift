@@ -196,7 +196,12 @@ final class AttachmentCache {
         if let old = localURL(att.id) { try? fm.removeItem(at: old) }   // 重新下载：替换旧文件
         let dest = destination(for: att.name)
         try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try fm.moveItem(at: tmp, to: dest)
+        if let key = att.key {
+            // 端到端加密的附件：校验的是密文；解密成真实文件名，成功后删除密文，失败时不留文件（docs/e2ee-client.md §6.4）
+            do { try await E2E.decryptAttachment(key: key, src: tmp, dst: dest) } catch { throw APIError.invalid("解密失败") }
+        } else {
+            try fm.moveItem(at: tmp, to: dest)
+        }
         index[att.id] = Entry(path: dest.path, downloadedAt: Date())
         save()
         return dest

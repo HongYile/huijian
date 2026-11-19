@@ -41,7 +41,12 @@ struct AccountSetupView: View {
 
     var canSubmit: Bool {
         AppModel.normalizeUsername(username).count >= 2 && AppModel.usernameProblem(username) == nil
-            && password.count >= 8 && password == password2
+            && password.count >= 8 && password == password2 && strengthProblem == nil
+    }
+
+    /// 服务端支持新登录协议时，密码强度只能由客户端检查（docs/e2ee-client.md §2.2）
+    var strengthProblem: String? {
+        model.e2eSupported && !password.isEmpty ? Core.passwordProblem(password, username: AppModel.normalizeUsername(username)) : nil
     }
 
     var body: some View {
@@ -114,9 +119,11 @@ struct AccountSetupView: View {
                         .foregroundStyle(AppModel.usernameProblem(username) == nil ? Theme.text3 : Theme.danger)
                 }
             }
-            field("密码") { WarmField(placeholder: "至少 8 位", text: $password, secure: true) }
+            field("密码") { WarmField(placeholder: model.e2eSupported ? "至少 10 位，不要用常见密码" : "至少 8 位", text: $password, secure: true) }
             field("再输入一次密码") { WarmField(placeholder: "确认密码", text: $password2, secure: true) }
-            if !password2.isEmpty && password != password2 {
+            if let p = strengthProblem {
+                Text(p).font(.system(size: 12)).foregroundStyle(Theme.danger)
+            } else if !password2.isEmpty && password != password2 {
                 Text("两次输入的密码不一样").font(.system(size: 12)).foregroundStyle(Theme.danger)
             }
             if let error {
@@ -179,7 +186,9 @@ struct AccountSetupView: View {
         error = nil
         defer { busy = false }
         do {
-            _ = try await model.setCredentials(username: AppModel.normalizeUsername(username), password: password, current: "")
+            let u = AppModel.normalizeUsername(username)
+            // 初始密码只能以原文设置（服务端没有别的接口）：先查「已升级」标记，设置后马上升级到新登录协议
+            _ = try await model.setInitialCredentials(username: u, password: password)
             password = ""; password2 = ""
         } catch APIError.http(403, let m) {
             // 可能是没有管理权限，也可能账号刚在别处设好了密码：刷新后按实际状态显示
@@ -393,8 +402,10 @@ struct AccountView: View {
     }
 
     var credentialForm: some View {
-        let admin = model.canAdmin == true
+        // 账号有密码时，改密码、改用户名一律用当前密码核对（§2.4，管理员设备也不例外：凭证由 prelogin 决定怎么算）
+        let admin = false
         let hasPassword = model.account?.has_password == true
+        let strength = model.e2eSupported && !password.isEmpty ? Core.passwordProblem(password, username: AppModel.normalizeUsername(username)) : nil
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 WarmField(placeholder: "用户名（2–32 位）", text: $username)
@@ -407,6 +418,8 @@ struct AccountView: View {
             HStack {
                 if let p = AppModel.usernameProblem(username) {
                     Text(p).font(.system(size: 12)).foregroundStyle(Theme.danger)
+                } else if let strength {
+                    Text(strength).font(.system(size: 12)).foregroundStyle(Theme.danger)
                 } else if !password2.isEmpty && password != password2 {
                     Text("两次输入的密码不一样").font(.system(size: 12)).foregroundStyle(Theme.danger)
                 }
@@ -415,7 +428,7 @@ struct AccountView: View {
                 Button(saving ? "保存中…" : "保存") { Task { await saveCredentials() } }
                     .buttonStyle(SoftButtonStyle())
                     .disabled(saving || AppModel.normalizeUsername(username).count < 2 || AppModel.usernameProblem(username) != nil || password != password2
-                              || (!password.isEmpty && password.count < 8) || (!hasPassword && password.isEmpty)
+                              || (!password.isEmpty && password.count < 8) || (!hasPassword && password.isEmpty) || strength != nil
                               || (hasPassword && !admin && current.isEmpty))
             }
         }
@@ -430,7 +443,8 @@ struct AccountView: View {
         saving = true
         defer { saving = false }
         do {
-            _ = try await model.setCredentials(username: AppModel.normalizeUsername(username), password: password, current: current)
+            let u = AppModel.normalizeUsername(username)
+            _ = try await model.changeCredentials(username: u, password: password, current: current)
             credMsg = password.isEmpty ? "用户名已保存" : "已保存，新密码立即生效（已登录的设备不受影响）"
             resetForm()
             await load()

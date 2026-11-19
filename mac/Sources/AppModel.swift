@@ -177,6 +177,37 @@ final class AppModel: ObservableObject {
     @Published var autoDownloadLimitMB: Int { didSet { defaults.set(autoDownloadLimitMB, forKey: Self.key("autoDownloadMB")) } }
     @Published private(set) var proxy: ProxyConfig
 
+    // 端到端加密（接线见 E2EModel.swift，逻辑见 E2E.swift）
+    /// GET /v1/e2e 的最近结果；nil = 还没取到（或服务端不支持）
+    @Published var e2eState: E2E.State?
+    /// 本机为当前账号保存的私钥（从钥匙串读出）
+    @Published var e2eKeys: [String] = []
+    /// 钥匙串读写失败的原因（加密页显示）
+    @Published var e2eStorageError: String?
+    /// 登录时关于加密的一句提示（例如私钥对不上 T43），加密页显示
+    @Published var e2eLoginNote: String?
+    /// 登录时解开、但还没取到账号 id 没法保存的私钥（只在内存里，loadE2EKeys 时保存）
+    var e2ePendingLoginKey: (sk: String, keys: [E2E.Key])?
+    /// 开启加密结果不确定时留下的这次钥匙和恢复码（只在内存里，下次「开启」先核对）
+    var e2ePendingSetup: E2E.SetupAttempt?
+    /// 刚生成的恢复码（开启加密或更换后）：放在 App 状态里，关掉设置窗口再打开还在，用户点「完成」才清除
+    @Published var e2eRecoveryCode: String?
+    @Published var e2eRecoveryFromSetup = false
+    /// 本机正在请求其他设备批准（§4.3）
+    @Published var e2eRequest: E2E.ApprovalRequest?
+    @Published var e2eRequestPhase: E2E.ApprovalRequest.Phase?
+    /// 正在批准的其他设备（§5），按 device_id
+    @Published var e2eApprovals: [String: E2E.Approval] = [:]
+    @Published var e2eApprovalPhases: [String: E2E.Approval.Phase] = [:]
+    /// 加密钥匙的安全存储：正常运行用钥匙串；自检、演示用内存（不碰钥匙串）
+    let e2eSecrets: E2ESecrets
+    var e2eRefreshing = false
+    var e2eRefreshAgain = false
+    var e2eDecrypting = false
+    /// 解密进行中又有人要求重新解密：这一轮结束后再跑一轮
+    var e2eDecryptAgain = false
+    private var activeObserver: NSObjectProtocol?
+
     let paths: AppPaths
     let cache: AttachmentCache
     let engine = DownloadEngine()
@@ -228,6 +259,7 @@ final class AppModel: ObservableObject {
         self.paths = paths
         self.keychainService = keychainService
         self.defaults = defaults
+        e2eSecrets = loadToken ? KeychainSecrets(service: keychainService + ".e2e") : E2E.MemorySecrets()
         let s = Persistence.load(paths.messagesFile)
         messages = s.messages.sorted { $0.id < $1.id }
         read = s.read
@@ -473,7 +505,18 @@ final class AppModel: ObservableObject {
     // MARK: 生命周期
 
     func start() {
-        if token != nil { startSync() }
+        if token != nil {
+            loadE2EKeys()
+            // §6.1：启动时把本地缓存里还没解开的消息重新解密一遍（上次退出前正好在解锁 / 同步，或钥匙串读取失败过）
+            if !e2eKeys.isEmpty { Task { await decryptPending() } }
+            startSync()
+        }
+        // 回到前台时刷新加密状态（§3）
+        if activeObserver == nil {
+            activeObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in await self?.refreshE2E() }
+            }
+        }
         if !isDemo { updater.startSchedule() }
         runCleanup()
         cleanupTimer?.invalidate()
@@ -499,11 +542,18 @@ final class AppModel: ObservableObject {
         guard let url = URL(string: trimmed), url.scheme == "http" || url.scheme == "https", url.host != nil else {
             throw APIError.invalid("服务器地址格式不对")
         }
+        // 新登录协议（docs/e2ee-client.md §2）：先取派生参数，在本机算凭证，从不发送密码原文（旧服务端、从未升级的账号除外）
         do {
-            let r = try await APIClient.login(server: url, username: username.trimmingCharacters(in: .whitespaces),
-                                              password: password, name: name, register: register)
-            try adopt(r, server: trimmed)
+            let r = try await E2E.login(server: APIClient(server: url, token: nil), authed: { APIClient(server: url, token: $0) },
+                                        serverID: trimmed, username: username.trimmingCharacters(in: .whitespaces), password: password,
+                                        device: .init(name: name, platform: "macos", fingerprint: DeviceFingerprint.value),
+                                        register: register, marks: e2eMarks, secrets: e2eSecrets)
+            try adopt(try JSONDecoder().decode(APIClient.PairResult.self, from: r.response), server: trimmed)
+            e2eLoginNote = r.note
+            e2ePendingLoginKey = r.pendingKey
         } catch APIError.unsupported {
+            throw APIError.invalid("这个服务端版本较旧，还不支持账号登录（需要 0.5.0 以上），请用配对码配对")
+        } catch let f as E2E.Failure where f.kind == .unsupported {
             throw APIError.invalid("这个服务端版本较旧，还不支持账号登录（需要 0.5.0 以上），请用配对码配对")
         }
     }
@@ -549,6 +599,7 @@ final class AppModel: ObservableObject {
     func logout() async -> Bool {
         var revoked = false
         if let client { revoked = (try? await client.logout()) != nil }
+        e2eWipe()       // §8：删除本机为这个账号保存的私钥（「已升级」标记保留）
         unpair()
         return revoked
     }
@@ -562,8 +613,29 @@ final class AppModel: ObservableObject {
         changesCursor = nil
         changesEpoch = nil
         channelSettings = [:]
+        e2eState = nil
+        e2eRequest = nil
+        e2eRequestPhase = nil
+        e2eApprovals = [:]
+        e2eApprovalPhases = [:]
+        defaults.removeObject(forKey: Self.key("e2eEnabled"))
+        e2ePlainKept = []
         save()
         refreshLocalFiles()
+    }
+
+    /// 「仅本机保留」的消息：服务器的「删除明文消息」删掉了（收到 purge 变更），本机保留副本（docs/e2ee-client.md §7.4）。
+    /// 对账时不当作「别处删除」；之后的 delete 变更或用户手动删除照常删（同时移出这个集合）
+    var e2ePlainKept: Set<Int64> {
+        get { Set((defaults.array(forKey: Self.key("e2ePlainKept")) as? [Int64]) ?? []) }
+        set {
+            if newValue.isEmpty { defaults.removeObject(forKey: Self.key("e2ePlainKept")) }
+            else { defaults.set(Array(newValue), forKey: Self.key("e2ePlainKept")) }
+        }
+    }
+
+    nonisolated static func withoutKept(_ ids: [Int64], kept: Set<Int64>) -> [Int64] {
+        kept.isEmpty ? ids : ids.filter { !kept.contains($0) }
     }
 
     func startSync() {
@@ -587,7 +659,7 @@ final class AppModel: ObservableObject {
             do {
                 if !caughtUp {
                     if state != .connected { state = .connecting }
-                    let hist = try await client.allMessages(since: maxID)
+                    let hist = await prepareE2E(try await client.allMessages(since: maxID))
                     autoDownload(merge(hist, notify: false))
                     caughtUp = true
                     state = .connected
@@ -596,6 +668,7 @@ final class AppModel: ObservableObject {
                     refreshServerInfo()
                     await infoTask?.value      // 先知道服务端支不支持消息管理，第一次长轮询就带上变更游标
                     if support("channels") == .yes { await refreshChannels() }
+                    if support("e2e") == .yes { Task { await refreshE2E() } }   // 功能清单到了才知道服务端有没有端到端加密
                     startPresence()
                     if updater.autoCheck, !isDemo { Task { await updater.check() } }
                     if isDemo { await demoAfterSync() }
@@ -648,14 +721,14 @@ final class AppModel: ObservableObject {
                 if let v = ServerVersionSeen.current, v != serverInfo?.version { refreshServerInfo() }
                 state = .connected
                 backoff = 1
-                autoDownload(merge(fresh, notify: true))
+                autoDownload(merge(await prepareE2E(fresh), notify: true))
                 applyChanges(changes)
                 continue
             } catch let e as APIError {
                 if case .unauthorized = e {
                     // 一次 401 不算数（反向代理、强制门户也可能返回 401）：用 /v1/me 复核，确实失效才停
                     if Task.isCancelled { return }
-                    if await meUnauthorized(client) { state = .unauthorized; return }
+                    if await meUnauthorized(client) { e2eWipe(); state = .unauthorized; return }
                     if Task.isCancelled { return }
                     state = .reconnecting("服务器返回 401，复核登录有效，稍后重试")
                 } else {
@@ -697,6 +770,7 @@ final class AppModel: ObservableObject {
         "markdown.doc": "回笺 Markdown（表格、提示框、正文里的附件图片、进度条）",
         "sync.settings": "设置实时同步（pushkey、设备、账户）",
         "poll.long": "省电的实时接收（按网络自适应等待时长）",
+        "e2e": "端到端加密",
         // 下面三项 Mac 客户端不需要做什么（iPhone 的 Bark 转发和软件源、服务端在管理后台自更新），认识即可，不提示「更新客户端」
         "bark": "iPhone 锁屏通知（Bark 转发）", "ios.source": "iPhone 客户端软件源", "server.update": "服务端一键更新",
     ]
@@ -845,6 +919,7 @@ final class AppModel: ObservableObject {
                 if let prev = defaults.string(forKey: k), prev != cur {
                     defaults.set(cur, forKey: k)
                     resetLocalMessages()
+                    loadE2EKeys()          // 换了账号：读新账号的钥匙
                     startSync()
                     return true
                 }
@@ -854,6 +929,8 @@ final class AppModel: ObservableObject {
             defaults.set(me.name, forKey: Self.key("deviceName"))
             defaults.set(me.device_id, forKey: Self.key("deviceID"))
         }
+        loadE2EKeys()
+        Task { await refreshE2E() }
         return true
     }
 
@@ -891,8 +968,15 @@ final class AppModel: ObservableObject {
     @discardableResult
     func merge(_ incoming: [Message], notify: Bool) -> [Message] {
         let existing = Set(messages.map(\.id))
-        let fresh = incoming.filter { !existing.contains($0.id) }
+        var fresh = incoming.filter { !existing.contains($0.id) }
         guard !fresh.isEmpty else { return [] }
+        // 没经过 prepareE2E 的加密消息：先按「已锁定」显示，之后在后台解密
+        var undecrypted = false
+        for i in fresh.indices where fresh[i].isE2E && fresh[i].e2eStatus == nil {
+            fresh[i].applyE2E(.locked)
+            undecrypted = true
+        }
+        if undecrypted, !e2eKeys.isEmpty { Task { await decryptPending() } }
         messages = (messages + fresh).sorted { $0.id < $1.id }
         save()
         if notify && notificationsEnabled {
@@ -938,7 +1022,7 @@ final class AppModel: ObservableObject {
         if Task.isCancelled { return }
         let sameData = changesEpoch == nil || epoch == nil || epoch == changesEpoch
         if sameData {
-            removeLocal(messages.filter { states[$0.id] == nil }.map(\.id))
+            removeLocal(Self.withoutKept(messages.filter { states[$0.id] == nil }.map(\.id), kept: e2ePlainKept))
         }
         applyArchive(states)
         changesEpoch = epoch
@@ -951,19 +1035,28 @@ final class AppModel: ObservableObject {
     /// 不认识的 kind 忽略
     func applyChanges(_ changes: [APIClient.MsgChange]) {
         guard !changes.isEmpty else { return }
-        var del: [Int64] = [], arch: [Int64: Int] = [:], channelsChanged = false, keys = false, account = false
+        var del: [Int64] = [], purge: [Int64] = [], arch: [Int64: Int] = [:], channelsChanged = false, keys = false, account = false, e2e = false
         for c in changes {
             switch c.kind {
             case "delete": del.append(c.id); arch[c.id] = nil
+            // 「删除服务器上的明文消息」删掉的（0.7.0 起）：服务器上没有了，本机保留副本（docs/e2ee-client.md §7.4）
+            case "purge": purge.append(c.id); arch[c.id] = nil
             case "archive": arch[c.id] = c.state ?? 0
             case "channels": channelsChanged = true
             case "keys": keys = true
             case "devices", "account": account = true
+            case "e2e": e2e = true       // 开启加密、设备请求批准 / 已批准、只接受加密消息（0.7.0 起）
             default: break
             }
         }
+        if e2e { Task { await refreshE2E() } }
         if channelsChanged { Task { await refreshChannels() } }
         if keys || account { noteSettingsChanged(keys: keys, account: account) }
+        if !purge.isEmpty {
+            let local = Set(messages.map(\.id))
+            let keep = purge.filter { local.contains($0) }
+            if !keep.isEmpty { e2ePlainKept = e2ePlainKept.union(keep) }
+        }
         removeLocal(del)
         applyArchive(arch)
     }
@@ -1017,7 +1110,8 @@ final class AppModel: ObservableObject {
                 return
             }
         } catch APIError.unauthorized {
-            if token == tok { markRemoved() }
+            // §8：一次 401 不算数，再请求一次 /v1/me，仍是 401 才按设备被移除处理
+            if await meUnauthorized(client), token == tok { markRemoved() }
             return
         } catch {}
         guard token == tok else { return }
@@ -1031,6 +1125,7 @@ final class AppModel: ObservableObject {
 
     private func markRemoved() {
         stopSync()
+        e2eWipe()
         state = .unauthorized
     }
 
@@ -1049,6 +1144,8 @@ final class AppModel: ObservableObject {
         let set = Set(ids)
         let gone = messages.filter { set.contains($0.id) }
         guard !gone.isEmpty else { return }
+        let kept = e2ePlainKept
+        if !kept.isDisjoint(with: set) { e2ePlainKept = kept.subtracting(set) }
         messages.removeAll { set.contains($0.id) }
         read.subtract(set)
         starred.subtract(set)
@@ -1081,6 +1178,12 @@ final class AppModel: ObservableObject {
     @discardableResult
     func deleteMessages(_ ids: [Int64]) async -> Bool {
         guard !ids.isEmpty, let client = requireManage() else { return false }
+        // 仅本机保留的消息服务器上已经没有了：只删本地
+        let kept = e2ePlainKept
+        let localOnly = ids.filter { kept.contains($0) }
+        if !localOnly.isEmpty { removeLocal(localOnly) }
+        let ids = localOnly.isEmpty ? ids : ids.filter { !kept.contains($0) }
+        guard !ids.isEmpty else { return true }
         do {
             for chunk in stride(from: 0, to: ids.count, by: 1000).map({ Array(ids[$0..<min($0 + 1000, ids.count)]) }) {
                 _ = try await client.deleteMessages(chunk)
@@ -1411,6 +1514,12 @@ final class AppModel: ObservableObject {
         markRead(thread: key)
     }
 
+    /// 加密消息重新解密后整体替换（E2EModel.swift 用；messages 的 setter 只在这个文件里可见）
+    func replaceMessages(_ list: [Message]) {
+        messages = list
+        save()
+    }
+
     /// 写盘放到后台串行队列：几千条消息（带 doc）的全量编码不卡界面；同一个文件排队中只保留最新一次（见 SaveQueue.swift）
     nonisolated static let saver = CoalescingWriter(label: "io.github.hongyile.huijian.save")
 
@@ -1433,7 +1542,7 @@ final class AppModel: ObservableObject {
     /// 新到的消息里，大小在阈值内的附件排队依次下载（一次一个，不抢带宽）
     func autoDownload(_ msgs: [Message]) {
         let now = Date()
-        for m in msgs {
+        for m in msgs where !m.e2eUnreadable {     // 还没解开的加密消息：附件是密文，没有钥匙，不下载
             // 永久保留时，自动下载只补最近 7 天的（刚配对时不会把全部历史附件一次拉下来）
             for a in m.attachments where AutoDownload.should(a, messageDate: m.createdAt, limitMB: autoDownloadLimitMB,
                                                               retentionHours: retentionHours > 0 ? retentionHours : 168,
@@ -1664,6 +1773,17 @@ enum Notifier {
         c.body = "点击打开回笺查看"
         if sound { c.sound = .default }
         let req = UNNotificationRequest(identifier: "summary-\(Date().timeIntervalSince1970)", content: c, trigger: nil)
+        UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
+    }
+
+    /// 有设备请求解锁加密消息（T50），点开进入设置的「加密」页
+    static func postE2ERequest(_ r: E2E.Request) {
+        let c = UNMutableNotificationContent()
+        c.title = "端到端加密"
+        c.body = E2E.T.t50(r.name.isEmpty ? "新设备" : r.name)
+        c.sound = .default
+        c.userInfo = ["e2e": true]
+        let req = UNNotificationRequest(identifier: "e2e-\(r.notifyKey)", content: c, trigger: nil)
         UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
     }
 
