@@ -54,6 +54,8 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.hongyile.huijian.Background
 import io.github.hongyile.huijian.BuildConfig
+import io.github.hongyile.huijian.E2EHub
+import io.github.hongyile.huijian.E2EStatus
 import io.github.hongyile.huijian.Hub
 import io.github.hongyile.huijian.Notifier
 import io.github.hongyile.huijian.ReceiveMode
@@ -87,6 +89,7 @@ fun SettingsScreen(back: () -> Unit, requestNotify: () -> Unit, open: (Screen) -
     LaunchedEffect(dndOk) { if (dndOk) Notifier.setup(ctx) }
     var testMsg by remember { mutableStateOf<String?>(null) }
     var confirmLogout by remember { mutableStateOf(false) }
+    val e2eStatus by E2EHub.status.collectAsStateWithLifecycle()
 
     fun applyMode(m: ReceiveMode, min: Int) {
         mode = m; interval = min
@@ -145,12 +148,20 @@ fun SettingsScreen(back: () -> Unit, requestNotify: () -> Unit, open: (Screen) -
                 }
             }
 
-            Card("管理", "pushkey、设备和频道属于账号，在这里改和在 Mac 上改效果一样。") {
+            Card("管理", "pushkey、设备、频道和加密设置属于账号，在这里改和在 Mac 上改效果一样。") {
                 NavRow("Pushkey", "新建、改名、换 key、吊销，发送示例", Modifier.testTag("openKeys")) { open(Screen.Keys) }
                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                 NavRow("账户与设备", "用户名和密码、配对码、我的设备", Modifier.testTag("openAccount")) { open(Screen.Account) }
                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                 NavRow("频道", "显示名、排序、置顶、静音、隐藏、删除", Modifier.testTag("openChannels")) { open(Screen.Channels) }
+                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                NavRow("端到端加密", when (e2eStatus) {
+                    E2EStatus.UNLOCKED -> "已开启 · 本机已解锁"
+                    E2EStatus.LOCKED -> "已开启 · 本机已锁定，点这里解锁"
+                    E2EStatus.DISABLED -> "未开启：消息只有你的设备能解开"
+                    E2EStatus.UNSUPPORTED -> "更新服务端后可用"
+                    E2EStatus.UNKNOWN -> "开启加密、解锁、批准其他设备"
+                }, Modifier.testTag("openE2E")) { open(Screen.E2E) }
             }
 
             Card("账号", null) {

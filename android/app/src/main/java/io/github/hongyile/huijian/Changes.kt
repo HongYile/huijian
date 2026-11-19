@@ -20,7 +20,11 @@ data class ChangesPage(
 data class MessageStates(val states: Map<Long, Int>, val next: Long, val epoch: String?)
 
 /** 需要重新拉取的账号设置 */
-enum class SettingKind { CHANNELS, KEYS, ACCOUNT }
+enum class SettingKind {
+    CHANNELS, KEYS, ACCOUNT,
+    /** 端到端加密（开启、设备请求批准 / 已批准、只接受加密消息）：重新 GET /v1/e2e */
+    E2E,
+}
 
 /**
  * 多设备变更流（docs/api.md「多设备同步」「设置实时同步」）：解析、按 kind 分发、对账。
@@ -63,27 +67,32 @@ object Changes {
         val archive: Map<Long, Int>,
         /** 要重新拉取的设置（同一批里同一种只拉一次） */
         val refresh: Set<SettingKind>,
+        /** 服务端 0.7.0 起：「删除服务器上的明文消息」删掉的消息（kind purge），本机副本保留、记为「仅本机保留」 */
+        val purged: Set<Long> = emptySet(),
     ) {
-        val isEmpty get() = deleted.isEmpty() && archive.isEmpty() && refresh.isEmpty()
+        val isEmpty get() = deleted.isEmpty() && archive.isEmpty() && refresh.isEmpty() && purged.isEmpty()
     }
 
     /**
      * 按 kind 分发：delete / archive 针对消息（id 0 不是消息，忽略）；channels / keys / devices / account 是设置变更
-     * （devices、account 都重新拉 /v1/account）；不认识的 kind 忽略。按顺序应用：先删除后又出现的归档以删除为准。
+     * （devices、account 都重新拉 /v1/account；e2e 重新拉 /v1/e2e；purge 是服务器删了明文、本机保留）；不认识的 kind 忽略。按顺序应用：先删除后又出现的归档以删除为准。
      */
     fun plan(changes: List<MsgChange>): Plan {
         val del = LinkedHashSet<Long>()
         val arch = LinkedHashMap<Long, Int>()
         val refresh = LinkedHashSet<SettingKind>()
+        val purged = LinkedHashSet<Long>()
         for (c in changes) when (c.kind) {
-            "delete" -> if (c.id > 0) { del += c.id; arch.remove(c.id) }
+            "delete" -> if (c.id > 0) { del += c.id; arch.remove(c.id); purged.remove(c.id) }
+            "purge" -> if (c.id > 0 && c.id !in del) purged += c.id
             "archive" -> if (c.id > 0 && c.id !in del) arch[c.id] = c.state ?: 0
             "channels" -> refresh += SettingKind.CHANNELS
             "keys" -> refresh += SettingKind.KEYS
             "devices", "account" -> refresh += SettingKind.ACCOUNT
+            "e2e" -> refresh += SettingKind.E2E
             else -> {}
         }
-        return Plan(del, arch, refresh)
+        return Plan(del, arch, refresh, purged)
     }
 
     /** 这一页的变更游标还能不能用：changes_reset，或服务端纪元和上次记下的不同，都要重新对账 */

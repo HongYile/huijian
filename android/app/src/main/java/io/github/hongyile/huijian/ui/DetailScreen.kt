@@ -61,6 +61,8 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.hongyile.huijian.Attachment
+import io.github.hongyile.huijian.E2EHub
+import io.github.hongyile.huijian.E2EText
 import io.github.hongyile.huijian.Hub
 import io.github.hongyile.huijian.Markdown
 import io.github.hongyile.huijian.MdDoc
@@ -78,6 +80,7 @@ fun DetailScreen(id: Long, back: () -> Unit, openMessage: (Long) -> Unit = {}) {
     val scope = rememberCoroutineScope()
     val messages by Hub.messages.collectAsStateWithLifecycle()
     val m = messages.firstOrNull { it.id == id }
+    val e2eState by E2EHub.state.collectAsStateWithLifecycle()
     LaunchedEffect(id) { Hub.markRead(listOf(id)); Notifier.cancel(ctx, id) }
     val atts = remember(id) { AttLoader(ctx, scope) }
     var viewer by remember { mutableStateOf<ImageBitmap?>(null) }
@@ -128,8 +131,14 @@ fun DetailScreen(id: Long, back: () -> Unit, openMessage: (Long) -> Unit = {}) {
                 item { Text(m.title, Modifier.padding(top = 10.dp), fontSize = 22.sp, fontWeight = FontWeight.SemiBold) }
                 item {
                     DisableSelection {
+                        // 元信息行：加密消息「🔒 端到端加密」；账号开了加密、这条是明文时 T63（e2ee-client.md §6.3）
+                        val mark = when {
+                            m.encrypted -> E2EText.ENCRYPTED
+                            e2eState?.enabled == true -> E2EText.T63
+                            else -> ""
+                        }
                         Text(
-                            listOf(m.source, fullTime(m.createdAt), "#${m.id}").filter { it.isNotBlank() }.joinToString(" · "),
+                            listOf(m.source, fullTime(m.createdAt), "#${m.id}", mark).filter { it.isNotBlank() }.joinToString(" · "),
                             Modifier.padding(top = 10.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
@@ -140,7 +149,11 @@ fun DetailScreen(id: Long, back: () -> Unit, openMessage: (Long) -> Unit = {}) {
                     doc != null -> docItems(items, env)
                     else -> item { Box(Modifier.padding(top = 10.dp)) { MarkdownView(m.desp) } }
                 }
-                if (m.attachments.isNotEmpty()) item {
+                if (m.sealed && m.attachments.isNotEmpty()) item {
+                    Text("附件 ${m.attachments.size} 个（解锁后查看）", Modifier.padding(top = 16.dp), fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (!m.sealed && m.attachments.isNotEmpty()) item {
                     DisableSelection {
                         Column(Modifier.padding(top = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Attachments(m, atts, inline) { viewer = it }

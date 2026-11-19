@@ -10,10 +10,14 @@ data class Attachment(
     val mime: String,
     val size: Long,
     val sha256: String,
+    /** 加密附件的钥匙（载荷 atts[i].key，base64url）；空 = 明文附件。name / mime / size 已换成载荷里的真实值，sha256 是密文的 */
+    val key: String = "",
 ) {
     val isImage get() = mime.startsWith("image/")
+    val encrypted get() = key.isNotEmpty()
 
     fun toJson() = JSONObject().put("id", id).put("name", name).put("mime", mime).put("size", size).put("sha256", sha256)
+        .apply { if (key.isNotEmpty()) put("key", key) }
 
     companion object {
         fun from(o: JSONObject) = Attachment(
@@ -22,6 +26,7 @@ data class Attachment(
             mime = o.optString("mime", "application/octet-stream"),
             size = o.optLong("size"),
             sha256 = o.optString("sha256"),
+            key = o.optString("key"),
         )
     }
 }
@@ -45,8 +50,17 @@ data class Message(
     val doc: String? = null,
     /** 服务端生成的纯文本预览（≤200 字），列表摘要和通知优先用它 */
     val preview: String = "",
+    /** 端到端加密的信封原文（hje1.…）；明文消息为 null。解开后仍保留，换钥匙、重新解密时要用 */
+    val e2e: String? = null,
+    /** 加密消息的解密结果：ok / locked / wrong_key / format（E2EMessages）；空 = 还没处理（刚从服务端拉到） */
+    val e2eStatus: String = "",
 ) {
     val title get() = text.ifBlank { attachments.firstOrNull()?.name ?: "（无标题）" }
+
+    /** 端到端加密的消息 */
+    val encrypted get() = e2e != null
+    /** 加密消息还没解开（已锁定、或解不开）：标题是说明文字，正文为空，附件是密文 */
+    val sealed get() = e2e != null && e2eStatus != E2EMessages.OK
 
     fun toJson(): JSONObject = JSONObject()
         .put("id", id).put("topic", topic).put("thread", thread).put("priority", priority)
@@ -55,11 +69,21 @@ data class Message(
         .put("attachments", JSONArray().apply { attachments.forEach { put(it.toJson()) } })
         .put("silent", silent).put("silent_reason", silentReason).put("archive", archive)
         .apply { if (doc != null) put("doc", doc); if (preview.isNotEmpty()) put("preview", preview) }   // 本地缓存里 doc 存成字符串
+        .apply { if (e2e != null) put("e2e", e2e); if (e2eStatus.isNotEmpty()) put("e2e_status", e2eStatus) }
 
     /** 列表摘要 / 通知正文：优先用服务端的 preview，旧服务端或旧缓存退回本地去标记 */
     fun summary(): String = preview.ifBlank { if (type == "text") desp.trim() else Markdown.plain(desp) }
 
     companion object {
+        /**
+         * 解码服务端发来的消息：只在本机产生的字段（解密状态、附件钥匙）一律清空，只能由本机解密写入。
+         * 否则被攻破的服务器可以带上「已解密」和自己写的文字，冒充一条 🔒 消息（e2ee-client.md §1）
+         */
+        fun fromServer(o: JSONObject): Message = from(o).let { m ->
+            m.copy(e2eStatus = "", attachments = m.attachments.map { if (it.key.isEmpty()) it else it.copy(key = "") })
+        }
+
+        /** 解码本地缓存（messages.json）；服务端响应要用 fromServer */
         fun from(o: JSONObject): Message {
             val atts = o.optJSONArray("attachments")
             return Message(
@@ -79,6 +103,8 @@ data class Message(
                 // 服务端下发的是对象；本地缓存里是字符串（0.2.0 开发版缓存过对象，两种都认）
                 doc = when (val d = o.opt("doc")) { is JSONObject -> d.toString(); is String -> d.ifBlank { null }; else -> null },
                 preview = o.optString("preview"),
+                e2e = o.optString("e2e").ifBlank { null },
+                e2eStatus = o.optString("e2e_status"),
             )
         }
     }

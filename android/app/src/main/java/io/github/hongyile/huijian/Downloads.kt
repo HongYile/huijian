@@ -36,6 +36,10 @@ class SingleFlight<K>(private val scope: CoroutineScope) {
 object AttDownloads {
     const val LOADING = "下载中…"
     const val DONE = "done"
+    /** 加密附件解密失败（附件卡片显示这几个字） */
+    const val DECRYPT_FAILED = "解密失败"
+
+    private class DecryptFailed : IOException(DECRYPT_FAILED)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val flight = SingleFlight<String>(scope)
@@ -53,14 +57,24 @@ object AttDownloads {
         set(a.id, LOADING)
         try {
             dest.parentFile?.mkdirs()
-            (Hub.api() ?: throw IOException("未登录")).download(a, dest)
+            val api = Hub.api() ?: throw IOException("未登录")
+            if (a.encrypted) {
+                // 加密附件（e2ee-client.md §6.4）：先下载密文并校验密文的 sha256，再用载荷里的钥匙解密到真实文件名，最后删掉密文
+                val enc = File.createTempFile("att", ".enc", dest.parentFile)
+                try {
+                    api.download(a, enc)
+                    try { E2EHub.decryptFile(a.key, enc, dest) } catch (e: Exception) { throw DecryptFailed() }
+                } finally {
+                    enc.delete()
+                }
+            } else api.download(a, dest)
             if (Hub.session != session) { dest.delete(); throw IOException("已退出登录") }
             set(a.id, DONE)
             Hub.trimAttachments()
         } catch (e: CancellationException) {
             set(a.id, null); throw e
         } catch (e: Exception) {
-            set(a.id, "失败：${e.message}"); throw e
+            set(a.id, if (e is DecryptFailed) DECRYPT_FAILED else "失败：${e.message}"); throw e
         }
     }
 

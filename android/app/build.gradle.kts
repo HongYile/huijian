@@ -77,6 +77,12 @@ val buildCore by tasks.registering(Exec::class) {
 }
 tasks.named("preBuild") { dependsOn(buildCore) }
 
+// 可选的本机端到端测试（E2EHostTest）：HUIJIAN_CORE_HOST_LIB 指向本机编译的核心库目录（libhuijian_core.dylib，带 JNI 导出），
+// 单元测试就能加载真实的共用核心；没设置时 E2EHostTest 自动跳过。用法见 E2EHostTest 的注释
+tasks.withType<Test>().configureEach {
+    System.getenv("HUIJIAN_CORE_HOST_LIB")?.let { systemProperty("java.library.path", it) }
+}
+
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2025.11.00")
     implementation(composeBom)

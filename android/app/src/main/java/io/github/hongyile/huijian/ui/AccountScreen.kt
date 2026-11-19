@@ -43,6 +43,8 @@ import androidx.compose.ui.unit.sp
 import io.github.hongyile.huijian.AccountDetail
 import io.github.hongyile.huijian.ApiException
 import io.github.hongyile.huijian.DeviceInfo
+import io.github.hongyile.huijian.E2EError
+import io.github.hongyile.huijian.E2EHub
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.hongyile.huijian.Hub
 import io.github.hongyile.huijian.Manage
@@ -80,7 +82,9 @@ fun AccountScreen(back: () -> Unit) {
             canAdmin = runCatching { api { it.me() } }.getOrNull()?.let { if (it.has("can_admin")) it.optBoolean("can_admin") else null } ?: canAdmin
         }
     }
-    LaunchedEffect(Unit) { load() }
+    LaunchedEffect(Unit) { load(); E2EHub.refreshAsync() }
+    // 服务端有 e2e（读到了加密状态）：改密码走新协议（e2ee-client.md §7.5），从不发送密码原文
+    val e2eState by E2EHub.state.collectAsStateWithLifecycle()
     // 其他设备改了账户或设备（变更流 devices / account）：同步服务已经拉好最新的，直接显示，再复核本机的管理权限
     val pushed by Hub.account.collectAsStateWithLifecycle()
     LaunchedEffect(pushed) {
@@ -141,14 +145,28 @@ fun AccountScreen(back: () -> Unit) {
     }
 
     if (editCred) detail?.account?.let { a ->
-        CredentialsDialog(a.username, a.hasPassword, admin = canAdmin == true, onDismiss = { editCred = false }) { u, pw, cur, done ->
+        val st = e2eState
+        CredentialsDialog(a.username, a.hasPassword, admin = canAdmin == true, newProtocol = st != null,
+            onDismiss = { editCred = false }) { u, pw, cur, done ->
             scope.launch {
                 try {
-                    val saved = api { it.setCredentials(u, pw, cur) }
-                    if (saved.username.isNotBlank()) Hub.store.username = saved.username
+                    val server = Hub.store.server
+                    // 账号有密码时一律先算「当前密码」凭证，只有 prelogin 是纯文本 404 且没有「已升级」标记时才按旧接口发原文；
+                    // 设置初始密码只能发原文，本机标记了「已升级」时拒绝（e2ee-client.md §2.1 第 4 条、§2.4）。
+                    // 加密状态还没读到（st == null）时由 changeCredentials 自己读，不按「没开启」处理
+                    E2EHub.work {
+                        val net = Hub.api() ?: throw java.io.IOException("未登录")
+                        if (!a.hasPassword) E2EHub.logic.setInitialPassword(net, server, u, pw)
+                        else E2EHub.logic.changeCredentials(net, server, a.username, u, cur, pw.ifEmpty { null },
+                            st?.enabled, E2EHub.activeSk())
+                        if (u.isNotBlank()) { Hub.store.username = u; Hub.store.loginUsername = u }
+                    }
                     say(if (pw.isEmpty()) "用户名已保存" else "已保存，新密码立即生效（已登录的设备不受影响）")
                     editCred = false
                     load()
+                    E2EHub.refreshAsync()
+                } catch (e: E2EError) {
+                    say(e.message ?: "保存失败")
                 } catch (e: Exception) {
                     say("保存失败：${describe(e)}")
                 } finally { done() }
@@ -302,7 +320,7 @@ private fun ThisDeviceCard(serverName: String?, say: (String) -> Unit, onRenamed
 /** 设置 / 修改用户名和密码（规则和服务端一致：已有密码时要当前密码，「允许管理」的设备可以直接重设） */
 @Composable
 private fun CredentialsDialog(
-    username0: String, hasPassword: Boolean, admin: Boolean, onDismiss: () -> Unit,
+    username0: String, hasPassword: Boolean, admin: Boolean, newProtocol: Boolean, onDismiss: () -> Unit,
     onSave: (username: String, password: String, current: String, done: () -> Unit) -> Unit,
 ) {
     var username by remember { mutableStateOf(username0) }
@@ -311,7 +329,8 @@ private fun CredentialsDialog(
     var pw2 by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var tick by remember { mutableIntStateOf(0) }
-    val needCurrent = hasPassword && !admin
+    // 账号有密码时一律核对当前密码（在本机算成凭证，不发原文），「允许管理」的设备也一样（e2ee-client.md §2.4）
+    val needCurrent = hasPassword
     val uErr = if (Manage.normalizeUsername(username).isEmpty()) "请填写用户名" else Manage.usernameProblem(username)
     val pErr = Manage.passwordProblem(pw, pw2, required = !hasPassword)
     val cErr = if (needCurrent && current.isEmpty()) "请填写当前密码" else null
@@ -331,7 +350,7 @@ private fun CredentialsDialog(
                     singleLine = true, visualTransformation = PasswordVisualTransformation())
                 val shown = uErr.takeIf { username != username0 || tick > 0 } ?: pErr.takeIf { pw2.isNotEmpty() || tick > 0 } ?: cErr.takeIf { tick > 0 }
                 shown?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp) }
-                if (hasPassword && admin) Text("本机有「允许管理」权限，可以不填当前密码直接重设。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (hasPassword && newProtocol) Text("新密码至少 10 位，不要用常见密码。密码只在本机派生成登录凭证，不会发给服务器。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         },
         confirmButton = {

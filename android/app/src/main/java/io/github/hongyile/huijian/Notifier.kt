@@ -22,16 +22,21 @@ import androidx.core.content.ContextCompat
  */
 object Notifier {
     const val CH_SERVICE = "service"
+    const val CH_E2E = "e2e"
     const val CH_P5 = "p5"
     const val CH_P4 = "p4"
     const val CH_P3 = "p3"
     const val ID_SERVICE = 1
     private const val ID_SUMMARY = 2
+    private const val ID_E2E = 3
+    private const val TAG_E2E = "e2e:"
     private const val ID_MESSAGE_BASE = 1000
     private const val TAG_URGENT = "p5"
     /** 单独显示的普通消息通知最多几条（小米系统每个 App 大约十几条就开始挤掉旧的） */
     private const val MAX_SINGLE = 6
     const val EXTRA_MESSAGE_ID = "message_id"
+    /** 点「设备请求解锁」的通知：打开加密页 */
+    const val EXTRA_OPEN_E2E = "open_e2e"
 
     fun setup(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
@@ -51,6 +56,9 @@ object Notifier {
                 description = "一般进展，只进通知栏，不出声"
                 setSound(null, null)
                 enableVibration(false)
+            },
+            NotificationChannel(CH_E2E, "设备请求解锁", NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "账号的另一台设备请求解锁加密消息，需要在这里核对后批准"
             },
             NotificationChannel(CH_SERVICE, "后台连接", NotificationManager.IMPORTANCE_MIN).apply {
                 description = "保持和回笺服务器的连接（系统要求常驻显示）"
@@ -190,8 +198,38 @@ object Notifier {
     @Synchronized
     fun cancelMessages(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
-        for (n in nm.activeNotifications) if (n.id != ID_SERVICE) nm.cancel(n.tag, n.id)
+        for (n in nm.activeNotifications) if (n.id != ID_SERVICE && n.id != ID_E2E) nm.cancel(n.tag, n.id)   // 设备请求解锁的通知留着
         summaryCount = 0
+    }
+
+    /** 有设备请求批准（T50）：同一个请求只通知一次（E2EHub 记着），点开进加密页 */
+    fun postE2ERequest(ctx: Context, r: E2ERequest) {
+        if (!canPost(ctx)) return
+        val i = Intent(ctx, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(EXTRA_OPEN_E2E, true)
+        }
+        val pi = PendingIntent.getActivity(ctx, 900_000_001, i, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val text = E2EText.t50(r.name.ifBlank { r.deviceId })
+        val n = NotificationCompat.Builder(ctx, CH_E2E)
+            .setSmallIcon(R.drawable.ic_stat_huijian)
+            .setContentTitle("设备请求解锁")
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setContentIntent(pi)
+            .build()
+        try { NotificationManagerCompat.from(ctx).notify(TAG_E2E + r.deviceId, ID_E2E, n) } catch (_: SecurityException) {}
+        ensureService(ctx)
+    }
+
+    /** 请求已处理（批准、拒绝、取消）：撤掉它的通知 */
+    fun cancelE2ERequest(ctx: Context, deviceId: String) = NotificationManagerCompat.from(ctx).cancel(TAG_E2E + deviceId, ID_E2E)
+
+    fun cancelE2ERequests(ctx: Context) {
+        val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
+        runCatching { for (n in nm.activeNotifications) if (n.id == ID_E2E) nm.cancel(n.tag, n.id) }
     }
 
     private fun notificationId(id: Long) = ID_MESSAGE_BASE + (id % 1_000_000).toInt()

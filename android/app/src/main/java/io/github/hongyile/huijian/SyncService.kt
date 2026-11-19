@@ -195,6 +195,7 @@ class SyncService : Service() {
                     busy { catchUp(a, session) }
                     caughtUp = true
                     busy { refreshChannels(a, session) }
+                    busy { refreshE2E(a, session) }
                 }
                 if (store.mode == ReceiveMode.INTERVAL) {
                     busy { poll(a, wait = 0, session = session) }
@@ -240,6 +241,10 @@ class SyncService : Service() {
                 throw e
             } catch (e: UnauthorizedException) {
                 currentCoroutineContext().ensureActive()
+                // 服务端只在 token 无效或已吊销时返回 401（不会自然过期）：再用 /v1/me 核对一次，仍是 401 就是本机已被移除，
+                // 删除本机的加密私钥和设备钥匙对（「已升级」标记、钉住的账号公钥保留；用密码重新登录时可以自动解锁）。
+                // 本机读不出 token（Keystore）不算
+                if (Hub.session == session && confirmRemoved()) E2EHub.wipe(keepVault = false)
                 Hub.setState(ConnState.Unauthorized, session)
                 notice("登录已失效，请打开回笺重新登录", session)
                 stopSelf()
@@ -275,7 +280,8 @@ class SyncService : Service() {
         val store = Hub.store
         if (!store.initialSyncDone) {
             val page = a.messages(since = null, limit = 50)
-            Hub.merge(page.messages, session)
+            Hub.merge(E2EHub.decrypt(page.messages), session)
+            E2EHub.healLocked()
             Hub.markRead(page.messages.map { it.id }, session)
             Hub.saveNow()
             Hub.inSession(session) {
@@ -428,7 +434,8 @@ class SyncService : Service() {
         val r = a.messageStates()
         if (Hub.session != session) return
         val (del, arch) = Changes.reconcile(Hub.messages.value, r.states, upTo, Changes.sameData(store.changesEpoch, r.epoch))
-        Hub.removeMessages(del, session)
+        // 「仅本机保留」的消息服务器上本来就没有，对账时跳过
+        Hub.removeMessages(if (del.isEmpty()) del else del - store.keepLocal, session)
         Hub.applyArchive(arch, session)
         Hub.saveNow()
         Hub.inSession(session) {
@@ -443,6 +450,7 @@ class SyncService : Service() {
         if (kinds.isEmpty() || Hub.session != session) return
         if (SettingKind.CHANNELS in kinds) refreshChannels(a, session)
         if (SettingKind.KEYS in kinds) Hub.keysChanged()
+        if (SettingKind.E2E in kinds) refreshE2E(a, session)
         if (SettingKind.ACCOUNT in kinds) {
             val d = try { a.account() } catch (e: UnauthorizedException) { throw e } catch (e: Exception) { null } ?: return
             Hub.setAccount(d, session)
@@ -482,8 +490,11 @@ class SyncService : Service() {
         val incoming = if (plan.deleted.isEmpty()) page.messages else page.messages.filter { it.id !in plan.deleted }
         val fresh = if (incoming.isEmpty()) emptyList() else {
             wakeLock.acquire(WAKE_MS)
-            Hub.merge(incoming, session)
+            // 加密消息在合并前解开（已锁定时标题是 T60，解锁后重新解密）：通知用解密后的标题和预览
+            Hub.merge(E2EHub.decrypt(incoming), session).also { E2EHub.healLocked() }
         }
+        // 「删除服务器上的明文消息」删掉的（purge）：本机副本保留；普通删除照常删（包括以前保留的）
+        Hub.keepLocally(plan.purged, session)
         Hub.removeMessages(plan.deleted, session)
         Hub.applyArchive(plan.archive, session)
         // 无条件写盘：上一轮写盘失败时这批消息已在内存里，这一轮 fresh 为空，不写就推进游标会丢消息。
@@ -498,6 +509,18 @@ class SyncService : Service() {
             nextChanges?.let { store.changesCursor = it }
         }
         return if (ok) plan.refresh else null
+    }
+
+    /** 收到 401 后用 /v1/me 再核对一次：仍是 401 → 本机已被移除；网络错误等 → 不确定，按没有移除处理 */
+    private fun confirmRemoved(): Boolean {
+        val a = Hub.api() ?: return false
+        return try { a.me(); false } catch (_: UnauthorizedException) { true } catch (_: Exception) { false }
+    }
+
+    /** 重新读取加密状态（登录后、App 启动、变更流 kind "e2e"）；失败不影响收消息 */
+    private fun refreshE2E(a: Api, session: Long) {
+        if (Hub.session != session) return
+        try { E2EHub.refresh(a) } catch (e: UnauthorizedException) { throw e } catch (e: Exception) { if (a.wasCancelled) throw e }
     }
 
     private fun refreshChannels(a: Api, session: Long) {

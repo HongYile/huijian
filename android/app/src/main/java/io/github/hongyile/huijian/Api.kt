@@ -31,7 +31,7 @@ data class MessagePage(val messages: List<Message>, val nextSince: Long?, val la
  * 回笺设备接口（docs/api.md）。长轮询的读超时 = wait + 20 秒；
  * 手机睡眠时 OkHttp 的超时计时会暂停，所以连接是否卡死由 SyncService 的看门狗闹钟兜底。
  */
-class Api(val server: String, private val token: String?) {
+class Api(val server: String, private val token: String?) : E2ENet {
 
     /** 最近一次响应头 X-Huijian-Server 里的服务端版本：变了说明服务端升级 / 降级过，同步服务据此重新读取 /v1/info */
     @Volatile var serverVersion: String? = null
@@ -82,11 +82,43 @@ class Api(val server: String, private val token: String?) {
 
     fun info(): JSONObject = json(req("/v1/info").build())
 
-    /** register=true 时注册新账号（服务端开放注册时才可用，否则 403） */
+    /**
+     * 旧协议：发送密码原文。App 里的登录、注册都走 E2ELogic（新协议，只有服务端没有 e2e 功能时才发原文），这里只留给测试用。
+     * register=true 时注册新账号（服务端开放注册时才可用，否则 403）
+     */
     fun login(username: String, password: String, name: String, fingerprint: String, register: Boolean = false) = loginResult(
         json(post(if (register) "/v1/register" else "/v1/login", JSONObject().put("username", username).put("password", password)
             .put("name", name).put("platform", "android").put("fingerprint", fingerprint)))
     )
+
+    // ---------- 新登录协议、端到端加密（服务端 0.7.0 起；逻辑在 E2E.kt） ----------
+
+    /** 登录前取密码派生参数；旧服务端是纯文本 404（ApiException.oldServer） */
+    override fun prelogin(username: String): JSONObject =
+        json(req(server.toHttpUrl().newBuilder().addPathSegments("v1/prelogin").addQueryParameter("username", username).build()).build())
+
+    /** 登录 / 注册，请求体由 E2ELogic 拼好（auth_key / password_key，旧服务端才带 password），返回原始响应（含 e2e） */
+    override fun loginRaw(body: JSONObject, register: Boolean): JSONObject =
+        json(post(if (register) "/v1/register" else "/v1/login", body))
+
+    override fun e2eState(): JSONObject = json(req("/v1/e2e").build())
+    override fun e2eSetup(body: JSONObject): JSONObject = json(post("/v1/e2e/setup", body))
+    override fun e2eUnlock(authKey: String): JSONObject = json(post("/v1/e2e/unlock", JSONObject().put("auth_key", authKey)))
+    override fun e2eDevice(pub: String, request: Boolean, commit: String?): JSONObject =
+        json(req("/v1/e2e/device").put(JSONObject().put("pub", pub).put("request", request)
+            .apply { if (commit != null) put("commit", commit) }.toString().toRequestBody(JSON)).build())
+    override fun e2eChallenge(deviceId: String, nonce: String) { json(post("/v1/e2e/challenge", JSONObject().put("device_id", deviceId).put("nonce", nonce))) }
+    override fun e2eReveal(nonce: String) { json(post("/v1/e2e/reveal", JSONObject().put("nonce", nonce))) }
+    override fun e2eGrant(deviceId: String, pub: String, grant: String) {
+        json(post("/v1/e2e/grant", JSONObject().put("device_id", deviceId).put("pub", pub).put("grant", grant)))
+    }
+    override fun e2eDeny(deviceId: String) { json(post("/v1/e2e/deny", JSONObject().put("device_id", deviceId))) }
+    override fun e2eRecovery(body: JSONObject) { json(req("/v1/e2e/recovery").put(body.toString().toRequestBody(JSON)).build()) }
+    override fun e2eSetOnly(only: Boolean): JSONObject =
+        json(req("/v1/e2e").patch(JSONObject().put("e2e_only", only).toString().toRequestBody(JSON)).build())
+    override fun e2eDeletePlain(): Int = json(post("/v1/e2e/delete-plain", JSONObject().put("confirm", true)), readTimeoutSec = 120).optInt("deleted")
+    override fun accountAuth(body: JSONObject): JSONObject = json(req("/v1/account/auth").put(body.toString().toRequestBody(JSON)).build())
+    override fun credentials(body: JSONObject): JSONObject = json(post("/v1/account/credentials", body))
 
     fun pair(code: String, name: String, fingerprint: String) = loginResult(
         json(post("/v1/pair", JSONObject().put("code", code).put("name", name)
@@ -142,7 +174,7 @@ class Api(val server: String, private val token: String?) {
         exec(req(q).build(), readTimeoutSec = wait + 20L, track = true, onSent = onSent).use { resp ->
             val o = JSONObject(resp.body?.string().orEmpty())
             val arr = o.optJSONArray("messages")
-            val list = if (arr == null) emptyList() else List(arr.length()) { Message.from(arr.getJSONObject(it)) }
+            val list = if (arr == null) emptyList() else List(arr.length()) { Message.fromServer(arr.getJSONObject(it)) }
             return MessagePage(
                 messages = list,
                 nextSince = if (o.has("next_since")) o.optLong("next_since") else null,

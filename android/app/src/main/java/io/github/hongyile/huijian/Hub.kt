@@ -99,6 +99,9 @@ object Hub {
             if (g.isEmpty()) return emptyList()
             _messages.value = _messages.value.filter { it.id !in ids }
             _read.update { it - ids }
+            // 「仅本机保留」的消息被删除（普通的删除变更、本机删频道）：从保留集合里去掉
+            val keep = store.keepLocal
+            if (keep.any { it in ids }) store.keepLocal = keep - ids
             version++
             scheduleSave()
             g
@@ -110,6 +113,21 @@ object Hub {
             scope.launch { store.deleteAttachmentFiles(atts) }
         }
         return gone
+    }
+
+    /**
+     * 服务器上已删除、本机保留的消息（变更 kind purge，「删除服务器上的明文消息」）：本地有的记为「仅本机保留」，
+     * 对账时不当作被删除（e2ee-client.md §7.4）
+     */
+    @Synchronized
+    fun keepLocally(ids: Set<Long>, session: Long) {
+        if (ids.isEmpty() || session != this.session) return
+        val have = _messages.value.mapNotNullTo(HashSet()) { m -> m.id.takeIf { it in ids } }
+        if (have.isEmpty()) return
+        val keep = store.keepLocal
+        // 顺带去掉已经不在本地（超过 3000 条被淘汰）的 id，集合不会只增不减
+        val local = _messages.value.mapTo(HashSet()) { it.id }
+        store.keepLocal = keep.filterTo(HashSet()) { it in local } + have
     }
 
     /** 按服务端改归档状态（id → 0/1/2）；返回是否有变化 */
@@ -135,12 +153,14 @@ object Hub {
         if (::store.isInitialized) return
         app = ctx.applicationContext
         store = Store(app)
+        E2EHub.init(app)
         val s = store.load()
         _messages.value = s.messages.sortedBy { it.id }
         _read.value = s.read
         _lastContact.value = store.lastContact
         _state.value = if (store.hasToken) ConnState.Connecting else ConnState.LoggedOut
         trimAttachments()      // 进程启动时检查一次附件缓存（以前的版本没有上限）
+        E2EHub.onStart()       // 上次停在「解锁后查看」的消息：本机有私钥就重新解一遍（后台）
     }
 
     /**
@@ -185,6 +205,26 @@ object Hub {
         return fresh
     }
 
+    /**
+     * 写回重新解密的结果（E2EHub.redecryptAll）：只替换解密得到的字段，归档等其他状态用锁内的当前值，
+     * 不会被解密前抓的旧快照覆盖；期间已经解开、或信封变了的消息不动
+     */
+    @Synchronized
+    fun applyDecrypted(updated: Map<Long, Message>, session: Long) {
+        if (updated.isEmpty() || session != this.session) return
+        var changed = false
+        val next = _messages.value.map { m ->
+            val u = updated[m.id]
+            if (u == null || !m.sealed || m.e2e != u.e2e) m
+            else m.copy(text = u.text, desp = u.desp, type = u.type, attachments = u.attachments, doc = u.doc,
+                preview = u.preview, e2eStatus = u.e2eStatus).takeIf { it != m }?.also { changed = true } ?: m
+        }
+        if (!changed) return
+        _messages.value = next
+        version++
+        scheduleSave()
+    }
+
     @Synchronized
     fun markRead(ids: Collection<Long>) {
         if (ids.all { it in _read.value }) return
@@ -218,15 +258,20 @@ object Hub {
         store.deviceId = r.deviceId
         store.deviceName = r.name
         store.username = username
+        store.loginUsername = username      // 配对码登录时为空，E2EHub.ensureAccount 用 /v1/me 的补上
         // 状态由调用方在主线程切换（切换后登录页离开界面，它的协程会被取消）
     }
 
-    /** 界面上的「退出登录」：先停同步服务，再在后台清数据（写盘、Keystore 不放主线程），最后通知服务器 */
-    fun logout(ctx: Context, notifyServer: Boolean) {
+    /**
+     * 界面上的「退出登录」：先停同步服务，再在后台清数据（写盘、Keystore 不放主线程），最后通知服务器。
+     * keepE2EKeys：登录失效（401）后重新登录时保留本机的加密私钥——同一台设备重新登录后核对通过还能用；
+     * 换了账号或服务器时 signedIn 会删掉。用户主动退出登录时删除（e2ee-client.md §8）
+     */
+    fun logout(ctx: Context, notifyServer: Boolean, keepE2EKeys: Boolean = false) {
         val api = if (notifyServer) api() else null
         SyncService.stop(ctx)
         scope.launch {
-            signedOut()
+            signedOut(keepE2EKeys)
             Notifier.cancelAll(ctx)
             runCatching { api?.logout() }
         }
@@ -234,10 +279,10 @@ object Hub {
 
     /** 退出登录：清除凭证和本地消息。调用前先停掉同步服务 */
     @Synchronized
-    fun signedOut() {
+    fun signedOut(keepE2EKeys: Boolean = false) {
         session++
         store.token = null
-        resetLocal()
+        resetLocal(keepE2EKeys)
         _state.value = ConnState.LoggedOut
     }
 
@@ -263,7 +308,8 @@ object Hub {
     private var trimAgain = false
     private const val ATT_CACHE_MAX = 300L * 1024 * 1024
 
-    private fun resetLocal() {
+    private fun resetLocal(keepE2EKeys: Boolean = false) {
+        E2EHub.wipe(keepVault = keepE2EKeys)       // 本机为上一个账号保存的私钥、设备钥匙对（「已升级」标记保留）
         saveJob?.cancel()
         writer.clear { store.clearMessages() }     // 等正在进行的写盘结束再删，避免删完又被写回来
         AttDownloads.reset()

@@ -45,7 +45,10 @@ import androidx.compose.ui.unit.sp
 import io.github.hongyile.huijian.Api
 import io.github.hongyile.huijian.BuildConfig
 import io.github.hongyile.huijian.ConnState
+import io.github.hongyile.huijian.E2EError
+import io.github.hongyile.huijian.E2EHub
 import io.github.hongyile.huijian.Hub
+import io.github.hongyile.huijian.LoginOutcome
 import io.github.hongyile.huijian.Manage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
@@ -68,6 +71,8 @@ fun LoginScreen(onSignedIn: () -> Unit) {
     var name by rememberSaveable { mutableStateOf(defaultName) }
     var busy by rememberSaveable { mutableStateOf(false) }
     var error by rememberSaveable { mutableStateOf<String?>(null) }
+    /** 密码强度不够（注册时核心库检查的结果）：显示在密码框下面 */
+    var passwordError by rememberSaveable { mutableStateOf<String?>(null) }
     // 注册新账号：服务端开放注册时才显示（填好服务器地址后查 /v1/info）
     var registerOpen by remember { mutableStateOf(false) }
     var register by rememberSaveable { mutableStateOf(false) }
@@ -89,19 +94,27 @@ fun LoginScreen(onSignedIn: () -> Unit) {
             !usePair && (username.isBlank() || password.isEmpty()) -> { error = "请填写用户名和密码"; return }
             registering -> (Manage.usernameProblem(username) ?: Manage.passwordProblem(password, password2, required = true))?.let { error = it; return }
         }
-        busy = true; error = null
+        busy = true; error = null; passwordError = null
         scope.launch {
             try {
                 val api = Api(url, null)
                 val fp = Hub.store.fingerprint()
-                val r = withContext(Dispatchers.IO) {
-                    if (usePair) api.pair(code.trim(), name.trim(), fp)
-                    else api.login(if (registering) Manage.normalizeUsername(username) else username.trim(), password, name.trim(), fp, register = registering)
+                val dev = name.trim()
+                // 账号密码登录、注册走新协议（e2ee-client.md §2）：在本机派生凭证，从不发送密码原文；Argon2id 在后台线程算
+                val o = if (usePair) withContext(Dispatchers.IO) { LoginOutcome(api.pair(code.trim(), dev, fp)) }
+                else E2EHub.work {
+                    if (registering) E2EHub.logic.register(api, url, Manage.normalizeUsername(username), password, dev, fp)
+                    else E2EHub.logic.login(api, url, username.trim(), password, dev, fp) { Api(url, it) }
                 }
-                withContext(Dispatchers.IO) { Hub.signedIn(url, r, if (usePair) "" else username.trim()) }  // Keystore 加密、同步写入，不放主线程
+                withContext(Dispatchers.IO) {      // Keystore 加密、同步写入，不放主线程
+                    Hub.signedIn(url, o.result, if (usePair) "" else if (registering) Manage.normalizeUsername(username) else username.trim())
+                    E2EHub.afterLogin(o, Api(url, o.result.token))   // 取账号 id，保存登录时顺带解开的私钥（账号已开启加密时）
+                }
                 password = ""; password2 = ""; code = ""
                 onSignedIn()
                 Hub.setState(ConnState.Connecting)
+            } catch (e: E2EError) {
+                if (e.kind == E2EError.Kind.WEAK_PASSWORD) passwordError = e.message else error = e.message
             } catch (e: Exception) {
                 error = when (e) {
                     is java.net.UnknownHostException -> "找不到服务器，请检查地址"
@@ -146,15 +159,17 @@ fun LoginScreen(onSignedIn: () -> Unit) {
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
             )
             OutlinedTextField(
-                password, { password = it }, Modifier.fillMaxWidth().testTag("password"),
+                password, { password = it; passwordError = null }, Modifier.fillMaxWidth().testTag("password"),
                 label = { Text("密码") }, singleLine = true, visualTransformation = PasswordVisualTransformation(),
+                isError = passwordError != null,
+                supportingText = passwordError?.let { { Text(it) } },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = if (registering) ImeAction.Next else ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { submit() }),
             )
             if (registering) OutlinedTextField(
                 password2, { password2 = it }, Modifier.fillMaxWidth().testTag("password2"),
                 label = { Text("再输入一次密码") }, singleLine = true, visualTransformation = PasswordVisualTransformation(),
-                supportingText = { Text("用户名 2–32 个字（中文、字母、数字、空格、_ . -），密码至少 8 位") },
+                supportingText = { Text("用户名 2–32 个字（中文、字母、数字、空格、_ . -）；密码至少 10 位，不要用常见密码") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { submit() }),
             )

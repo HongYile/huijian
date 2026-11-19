@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -58,6 +59,9 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.hongyile.huijian.Background
 import io.github.hongyile.huijian.ConnState
+import io.github.hongyile.huijian.E2EHub
+import io.github.hongyile.huijian.E2EStatus
+import io.github.hongyile.huijian.E2EText
 import io.github.hongyile.huijian.Hub
 import io.github.hongyile.huijian.Manage
 import io.github.hongyile.huijian.SyncService
@@ -68,12 +72,16 @@ import kotlinx.coroutines.delay
 private enum class Filter(val label: String) { ALL("全部"), UNREAD("未读"), IMPORTANT("重要") }
 
 @Composable
-fun HomeScreen(open: (Long) -> Unit, openSettings: () -> Unit) {
+fun HomeScreen(open: (Long) -> Unit, openSettings: () -> Unit, openE2E: () -> Unit = {}) {
     val ctx = LocalContext.current
     val messages by Hub.messages.collectAsStateWithLifecycle()
     val read by Hub.read.collectAsStateWithLifecycle()
     val state by Hub.state.collectAsStateWithLifecycle()
     val channels by Hub.channels.collectAsStateWithLifecycle()
+    val e2eStatus by E2EHub.status.collectAsStateWithLifecycle()
+    val e2eState by E2EHub.state.collectAsStateWithLifecycle()
+    /** 账号已开启加密：明文消息标「未加密」 */
+    val e2eOn = e2eState?.enabled == true
     var filter by rememberSaveable { mutableStateOf(Filter.ALL) }
     var topic by rememberSaveable { mutableStateOf<String?>(null) }
     // 回到前台时重新检查权限（用户可能刚去系统设置里改过）
@@ -124,10 +132,13 @@ fun HomeScreen(open: (Long) -> Unit, openSettings: () -> Unit) {
         Column(Modifier.padding(pad).fillMaxSize()) {
             if (state == ConnState.Unauthorized) {
                 Banner("登录已失效（设备可能已被移除），请重新登录", "重新登录") {
-                    Hub.logout(ctx, notifyServer = false)
+                    Hub.logout(ctx, notifyServer = false, keepE2EKeys = true)   // 同一台设备重新登录后加密私钥还能用
                 }
             } else if (!setupOk) {
                 Banner("后台运行还没设置好，锁屏后可能收不到消息", "去设置", openSettings)
+            }
+            if (state != ConnState.Unauthorized && e2eStatus == E2EStatus.LOCKED) {
+                LockBanner(openE2E)
             }
             LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(Filter.entries) { f -> FilterChip(filter == f, { filter = f }, { Text(f.label) }) }
@@ -148,7 +159,7 @@ fun HomeScreen(open: (Long) -> Unit, openSettings: () -> Unit) {
                     items(shown, key = { it.id }) { m ->
                         // 频道显示名从这里传进去：频道设置变了（包括别的设备改的）消息行跟着更新
                         val ch = channels[m.topic]?.alias?.takeIf { it.isNotBlank() } ?: m.topic
-                        MessageRow(m, ch, unread = m.id !in read, clock = clock) { open(m.id) }
+                        MessageRow(m, ch, unread = m.id !in read, clock = clock, e2eOn = e2eOn) { open(m.id) }
                         HorizontalDivider(Modifier.padding(start = 30.dp), color = MaterialTheme.colorScheme.surfaceVariant)
                     }
                 }
@@ -158,13 +169,21 @@ fun HomeScreen(open: (Long) -> Unit, openSettings: () -> Unit) {
 }
 
 @Composable
-private fun MessageRow(m: Message, channel: String, unread: Boolean, clock: Int, onClick: () -> Unit) {
+private fun MessageRow(m: Message, channel: String, unread: Boolean, clock: Int, e2eOn: Boolean, onClick: () -> Unit) {
     Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 11.dp)) {
         Box(Modifier.padding(top = 6.dp).size(9.dp).clip(CircleShape)
             .background(if (unread) priorityColor(m.priority) else MaterialTheme.colorScheme.surfaceVariant))
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // 加密消息：标题前一个小锁（弱化颜色）；账号开了加密、这条却是明文：「未加密」灰色小徽章（e2ee-client.md §6.3）
+                if (m.encrypted) {
+                    Icon(Icons.Default.Lock, "端到端加密", Modifier.size(13.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                    Spacer(Modifier.width(4.dp))
+                } else if (e2eOn) {
+                    PlainBadge()
+                    Spacer(Modifier.width(5.dp))
+                }
                 Text(
                     m.title, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
                     fontWeight = if (unread) FontWeight.SemiBold else FontWeight.Normal, fontSize = 16.sp,
@@ -184,6 +203,27 @@ private fun MessageRow(m: Message, channel: String, unread: Boolean, clock: Int,
             }.joinToString(" · ")
             Text(meta, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f))
         }
+    }
+}
+
+/** 「未加密」灰色小徽章 */
+@Composable
+private fun PlainBadge() {
+    Surface(shape = RoundedCornerShape(4.dp), color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f)) {
+        Text("未加密", Modifier.padding(horizontal = 4.dp), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** 加密消息已锁定（T10）：整条可点，进入解锁页 */
+@Composable
+private fun LockBanner(onClick: () -> Unit) {
+    Surface(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp).clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick)
+            .testTag("e2eLocked"),
+        shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.secondaryContainer,
+    ) {
+        Text(E2EText.T10, Modifier.padding(horizontal = 14.dp, vertical = 11.dp), fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSecondaryContainer)
     }
 }
 

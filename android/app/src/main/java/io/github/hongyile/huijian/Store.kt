@@ -37,6 +37,13 @@ class Store(private val ctx: Context) {
     var username: String
         get() = prefs.getString("username", "") ?: ""
         set(v) = prefs.edit().putString("username", v).apply()
+    /**
+     * 本机登录时记下的用户名（账号密码登录、注册时输入的；配对码登录时用第一次 /v1/me 的；在本机改用户名成功后更新）。
+     * 不随服务器 /v1/account 返回的变：判断「已升级」标记时用它，服务器换一个用户名绕不过去（e2ee-client.md §2.1 第 4 条）
+     */
+    var loginUsername: String
+        get() = prefs.getString("loginUsername", "") ?: ""
+        set(v) = prefs.edit().putString("loginUsername", v).commit().let { }
     var mode: ReceiveMode
         get() = ReceiveMode.of(prefs.getString("mode", null))
         set(v) = prefs.edit().putString("mode", v.key).apply()
@@ -63,6 +70,14 @@ class Store(private val ctx: Context) {
     var lastContact: Long
         get() = prefs.getLong("lastContact", 0)
         set(v) = prefs.edit().putLong("lastContact", v).apply()
+
+    /**
+     * 「仅本机保留」的消息 id：服务器上已被「删除服务器上的明文消息」删掉（变更 kind purge），本机副本保留，
+     * 对账时不当作被删除（e2ee-client.md §7.4）。之后普通删除时移出。换账号、退出登录时清掉
+     */
+    var keepLocal: Set<Long>
+        get() = prefs.getString("keepLocal", "").orEmpty().split(',').mapNotNullTo(HashSet()) { it.toLongOrNull() }
+        set(v) = prefs.edit().putString("keepLocal", v.joinToString(",")).apply()
 
     @Volatile private var tokenCache: String? = null
     val hasToken get() = tokenCache != null || prefs.contains("tokenEnc")
@@ -130,7 +145,7 @@ class Store(private val ctx: Context) {
     fun clearMessages() {
         file.delete()
         File(ctx.cacheDir, "att").deleteRecursively()     // 附件缓存：换账号后不能留着上一个账号的文件
-        prefs.edit().remove("cursor").remove("initialSyncDone").remove("changesCursor").remove("changesEpoch").commit()
+        prefs.edit().remove("cursor").remove("initialSyncDone").remove("changesCursor").remove("changesEpoch").remove("keepLocal").remove("accountId").commit()
     }
 
     /** 删除这些附件已下载的文件（消息被其他设备删除、或超过 3000 条被淘汰时） */
@@ -159,6 +174,69 @@ class Store(private val ctx: Context) {
             if (e.dir.deleteRecursively()) { total -= e.size; removed += e.dir.name }
         }
         return removed
+    }
+
+    // ---- 端到端加密：账号私钥、等待批准时的设备钥匙对（和 token 一样用 Keystore 加密）、「已升级」标记 ----
+
+    /** 本机保存的加密钥匙。owner = 规范化的服务器地址 + 账号 id，对不上的当作没有 */
+    data class E2EVault(val keys: List<LocalKey>, val device: Core.KeyPair?)
+
+    /** 读取；Keystore 解不开时抛异常（调用方当作「未解锁」并显示原因） */
+    @Synchronized
+    fun e2eLoad(owner: String): E2EVault {
+        val enc = prefs.getString("e2eEnc", null) ?: return E2EVault(emptyList(), null)
+        val o = JSONObject(decrypt(enc))
+        if (o.optString("owner") != owner) return E2EVault(emptyList(), null)
+        val arr = o.optJSONArray("keys") ?: JSONArray()
+        val keys = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+            .map { LocalKey(it.optString("kid"), it.optString("pub"), it.optString("sk")) }.filter { it.sk.isNotEmpty() }
+        val d = o.optJSONObject("device")?.let { Core.KeyPair(it.optString("sk"), it.optString("pub"), it.optString("kid")) }
+        return E2EVault(keys, d?.takeIf { it.sk.isNotEmpty() })
+    }
+
+    @Synchronized
+    fun e2eSave(owner: String, v: E2EVault) {
+        if (v.keys.isEmpty() && v.device == null) { e2eClear(); return }
+        val o = JSONObject().put("owner", owner)
+            .put("keys", JSONArray().apply { v.keys.forEach { put(JSONObject().put("kid", it.kid).put("pub", it.pub).put("sk", it.sk)) } })
+        v.device?.let { o.put("device", JSONObject().put("sk", it.sk).put("pub", it.pub).put("kid", it.kid)) }
+        check(prefs.edit().putString("e2eEnc", encrypt(o.toString())).commit()) { "保存加密钥匙失败" }
+    }
+
+    /** 退出登录、设备被移除：删除本机为这个账号保存的全部私钥和设备钥匙对（「已升级」标记不删） */
+    @Synchronized
+    fun e2eClear() { prefs.edit().remove("e2eEnc").remove("e2eNotified").commit() }
+
+    /** 已经发过系统通知的批准请求（device_id@requested_at），同一个请求只通知一次 */
+    var e2eNotified: Set<String>
+        get() = prefs.getStringSet("e2eNotified", null)?.toSet() ?: emptySet()
+        set(v) = prefs.edit().putStringSet("e2eNotified", v).apply()
+
+    /** 当前账号的 id（GET /v1/me 的 account.id）；0 = 还不知道。本机私钥、钉住的公钥按「服务器 + 账号 id」记 */
+    var accountId: Long
+        get() = prefs.getLong("accountId", 0)
+        set(v) = prefs.edit().putLong("accountId", v).apply()
+
+    /** 钉住的账号公钥（§1）：owner = 规范化的服务器地址 + 账号 id。第一次保存私钥时写入，之后不改；退出登录也不删 */
+    fun pinnedPub(owner: String): String? = prefs.getString("e2ePin:$owner", null)?.takeIf { it.isNotEmpty() }
+
+    fun pin(owner: String, pub: String) {
+        if (pinnedPub(owner) == null) prefs.edit().putString("e2ePin:$owner", pub).commit()
+    }
+
+    /** 「这个服务器上的这个账号已升级」（UpgradeFlags.key）：退出登录也不删 */
+    val upgradeFlags: UpgradeFlags = object : UpgradeFlags {
+        override fun isUpgraded(server: String, username: String) =
+            prefs.getStringSet("e2eUpgraded", null)?.contains(UpgradeFlags.key(server, username)) == true
+
+        override fun markUpgraded(server: String, username: String) {
+            if (username.isBlank()) return
+            synchronized(this) {
+                val cur = prefs.getStringSet("e2eUpgraded", null)?.toSet() ?: emptySet()
+                val k = UpgradeFlags.key(server, username)
+                if (k !in cur) prefs.edit().putStringSet("e2eUpgraded", cur + k).commit()
+            }
+        }
     }
 
     // ---- token 加密 ----

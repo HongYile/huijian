@@ -45,6 +45,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.hongyile.huijian.E2EHub
+import io.github.hongyile.huijian.E2EText
 import io.github.hongyile.huijian.Hub
 import io.github.hongyile.huijian.Manage
 import io.github.hongyile.huijian.PushKey
@@ -104,6 +106,9 @@ fun KeysScreen(back: () -> Unit) {
     }
     // 打开时加载；其他设备改了 pushkey（变更流 keys）或本机接收规则（devices）时立即重新加载
     val keysTick by Hub.keysTick.collectAsStateWithLifecycle()
+    // 账号开启了加密：每把 key 下面多一行「加密发送密钥」（e2ee-client.md §7.1）
+    val e2eState by E2EHub.state.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { E2EHub.refreshAsync() }
     val account by Hub.account.collectAsStateWithLifecycle()
     LaunchedEffect(keysTick, account) { reload() }
 
@@ -125,6 +130,8 @@ fun KeysScreen(back: () -> Unit) {
                     if (i > 0) HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                     KeyRow(
                         k, modes?.let { it[k.id] ?: "notify" },
+                        sendKey = if (k.revoked || e2eState?.enabled != true) null else E2EHub.sendKey(k.key),
+                        onCopySendKey = { copyText(ctx, "加密发送密钥", it, sensitive = true) },
                         onMode = { m ->
                             val old = modes
                             modes = modes?.plus(k.id to m)
@@ -207,7 +214,7 @@ fun KeysScreen(back: () -> Unit) {
 
 @Composable
 private fun KeyRow(
-    k: PushKey, mode: String?, onMode: (String) -> Unit, onCopy: () -> Unit, onExample: () -> Unit,
+    k: PushKey, mode: String?, sendKey: io.github.hongyile.huijian.SendKey?, onCopySendKey: (String) -> Unit, onMode: (String) -> Unit, onCopy: () -> Unit, onExample: () -> Unit,
     onRename: () -> Unit, onReplace: () -> Unit, onRevoke: () -> Unit, onDelete: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
@@ -251,6 +258,25 @@ private fun KeyRow(
             if (mode != null) {
                 Box(Modifier.weight(1f))
                 ModePicker(mode, onMode)
+            }
+        }
+        if (sendKey != null) {
+            // 只显示本机钉住的公钥（e2ee-client.md §7 第 1 项）：没钉住显示 T73，和服务器的不同显示 T43
+            Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)) {
+                Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    val key = sendKey.key
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("🔒 加密发送密钥", Modifier.weight(1f), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                        if (key != null) TextButton({ onCopySendKey(key) }, contentPadding = ZeroPadding) { Text("复制") }
+                    }
+                    if (key != null) {
+                        SelectionContainer { Text(key, fontFamily = FontFamily.Monospace, fontSize = 12.sp) }
+                        Text(E2EText.T70, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        Text(sendKey.note.orEmpty(), fontSize = 12.sp,
+                            color = if (sendKey.note == E2EText.T43) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
             }
         }
     }
