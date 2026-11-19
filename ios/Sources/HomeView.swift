@@ -12,6 +12,8 @@ struct HomeView: View {
     var body: some View {
         // inbox 由模型缓存（消息 / 已读 / 频道变了才重算）；没有筛选时直接用，不再过一遍
         let inbox = model.inbox
+        // 账号开启了端到端加密：明文消息标「未加密」（docs/e2ee-client.md §6.3）
+        let e2eOn = model.e2eAccountEnabled
         let shown = topic == nil && filter == .all ? inbox : inbox.filter { m in
             (topic == nil || m.topic == topic) && {
                 switch filter {
@@ -31,6 +33,8 @@ struct HomeView: View {
                     Banner(text: model.update.map { "回笺 \($0.version) 可以更新了" } ?? "回笺有新版本", action: "查看",
                            color: Theme.accent) { model.settingsAnchor = "about"; model.path = [.settings] }
                 }
+                // 账号已开启加密、这台设备还没有解锁（T10）：点开进入「端到端加密」页
+                if model.e2eLocked && model.conn != .unauthorized { E2ELockedBanner() }
                 if shown.isEmpty && !model.loaded {
                     ProgressView("正在加载消息…")
                         .frame(maxWidth: .infinity)
@@ -47,7 +51,7 @@ struct HomeView: View {
                 }
                 ForEach(shown) { m in
                     NavigationLink(value: Route.message(m.id)) {
-                        MessageRow(m: m, unread: model.isUnread(m), channel: model.channelName(m.topic))
+                        MessageRow(m: m, unread: model.isUnread(m), channel: model.channelName(m.topic), e2eAccount: e2eOn)
                     }
                     .listRowBackground(Theme.bg)
                     .swipeActions(edge: .leading) {
@@ -170,6 +174,8 @@ struct MessageRow: View {
     let m: Message
     let unread: Bool
     let channel: String
+    /// 账号开启了端到端加密：明文消息显示「未加密」小徽章
+    var e2eAccount = false
 
     var body: some View {
         let style = PriorityStyle.of(m.priority)
@@ -180,10 +186,22 @@ struct MessageRow: View {
                 .padding(.top, 7)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    if m.isE2E {
+                        // 加密消息：标题前一个小锁（只表示内容加密了，不表示来源可信）
+                        Image(systemName: "lock.fill").font(.caption2).foregroundStyle(Theme.text3)
+                            .accessibilityLabel("端到端加密")
+                    }
                     Text(m.title)
                         .font(.body.weight(unread ? .semibold : .regular))
                         .foregroundStyle(m.priority >= 5 ? Theme.danger : Theme.text)
                         .lineLimit(1)
+                    if !m.isE2E && e2eAccount {
+                        Text("未加密").font(.caption2.weight(.medium)).foregroundStyle(Theme.text3)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(Theme.surface2))
+                            .fixedSize()
+                            .accessibilityLabel(E2E.T.t63)
+                    }
                     Spacer(minLength: 4)
                     RelativeTime(date: m.createdAt).font(.caption).foregroundStyle(Theme.text3).fixedSize()
                 }

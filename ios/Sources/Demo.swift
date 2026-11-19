@@ -52,6 +52,7 @@ enum Demo {
             case "keys": model.path = [.settings, .keys]
             case "account": model.path = [.settings, .account]
             case "channels": model.path = [.settings, .channels]
+            case "e2e": model.path = [.settings, .account, .e2e]
             default: break
             }
         }

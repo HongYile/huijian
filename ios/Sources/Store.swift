@@ -169,6 +169,30 @@ struct Settings {
         nonmutating set { d.set(newValue, forKey: "changesEpoch") }
     }
 
+    /// 账号 id（GET /v1/me）：端到端加密的钥匙按「服务器 + 账号 id」存，启动时还没请求 /v1/me 也要能先读出钥匙
+    var accountID: Int64? {
+        get { (d.object(forKey: "accountID") as? NSNumber)?.int64Value }
+        nonmutating set { if let newValue { d.set(NSNumber(value: newValue), forKey: "accountID") } else { d.removeObject(forKey: "accountID") } }
+    }
+    /// 账号开启了端到端加密（上次 GET /v1/e2e 的结果）：离线时明文消息也能标「未加密」
+    var e2eEnabled: Bool {
+        get { d.bool(forKey: "e2eEnabled") }
+        nonmutating set { if newValue { d.set(true, forKey: "e2eEnabled") } else { d.removeObject(forKey: "e2eEnabled") } }
+    }
+    /// 「仅本机保留」的消息：服务器的「删除明文消息」删掉了（收到 purge 变更），本机保留副本（docs/e2ee-client.md §7.4）。
+    /// 对账时不当作「别处删除」；之后的 delete 变更或本机删除照常删（同时移出这个集合）
+    var e2ePlainKept: Set<Int64> {
+        get { Set((d.array(forKey: "e2ePlainKept") as? [NSNumber])?.map(\.int64Value) ?? []) }
+        nonmutating set {
+            if newValue.isEmpty { d.removeObject(forKey: "e2ePlainKept") } else { d.set(newValue.map { NSNumber(value: $0) }, forKey: "e2ePlainKept") }
+        }
+    }
+    /// 已经通知过的设备批准请求（T50，同一个请求只通知一次）
+    var e2eNotified: [String] {
+        get { d.stringArray(forKey: "e2eNotified") ?? [] }
+        nonmutating set { d.set(Array(newValue.suffix(50)), forKey: "e2eNotified") }
+    }
+
     var token: String? {
         get { Keychain.load(account: "device-token") }
         nonmutating set {
@@ -179,7 +203,7 @@ struct Settings {
     /// 退出登录 / 换账号：清掉和账号有关的状态（保留服务器地址和用户名，方便重新登录）
     func resetAccountState() {
         for k in ["cursor", "initialSyncDone", "lastContact", "barkOn", "barkURL", "barkEncrypted", "deviceID", "deviceName",
-                  "changesCursor", "changesEpoch", "serverFeatures", "serverVersion"] {
+                  "changesCursor", "changesEpoch", "serverFeatures", "serverVersion", "accountID", "e2eEnabled", "e2ePlainKept"] {
             d.removeObject(forKey: k)
         }
         Keychain.delete(account: "bark-cipher")
@@ -217,6 +241,55 @@ enum BarkCipherStore {
             for x in b where x < 248 && out.count < n { out.append(alphabet[Int(x) % 62]) }   // 248 = 62 × 4
         }
         return out
+    }
+}
+
+/// 端到端加密的私钥存钥匙串（E2E.swift 的 E2ESecrets）：仅本机（AfterFirstUnlockThisDeviceOnly），不同步 iCloud，
+/// 也不像登录 token 那样写一份私有文件兜底（私钥只放钥匙串）。和设备 token 分开放在 <service>.e2e 下，按名字（含服务器和账号 id）区分账号。
+/// 读写失败时抛错：界面当作「未解锁」并在加密页显示原因（重签换了证书后旧的钥匙串项读不到，重新解锁一次即可）
+struct KeychainSecrets: E2ESecrets {
+    let service: String
+
+    struct Failure: LocalizedError {
+        let status: OSStatus
+        var errorDescription: String? {
+            let msg = SecCopyErrorMessageString(status, nil) as String? ?? ""
+            return "钥匙串读写失败（\(status)）" + (msg.isEmpty ? "" : "：\(msg)")
+        }
+    }
+
+    private func base(_ name: String) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: service,
+         kSecAttrAccount as String: name]
+    }
+
+    func read(_ name: String) throws -> Data? {
+        var q = base(name)
+        q[kSecReturnData as String] = true
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+        var out: CFTypeRef?
+        let s = SecItemCopyMatching(q as CFDictionary, &out)
+        if s == errSecItemNotFound { return nil }
+        guard s == errSecSuccess else { throw Failure(status: s) }
+        return out as? Data
+    }
+
+    func write(_ name: String, _ value: Data) throws {
+        let s = SecItemUpdate(base(name) as CFDictionary, [kSecValueData as String: value] as CFDictionary)
+        if s == errSecSuccess { return }
+        guard s == errSecItemNotFound else { throw Failure(status: s) }
+        var q = base(name)
+        q[kSecValueData as String] = value
+        q[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        q[kSecAttrSynchronizable as String] = false
+        let a = SecItemAdd(q as CFDictionary, nil)
+        guard a == errSecSuccess else { throw Failure(status: a) }
+    }
+
+    func remove(_ name: String) throws {
+        let s = SecItemDelete(base(name) as CFDictionary)
+        guard s == errSecSuccess || s == errSecItemNotFound else { throw Failure(status: s) }
     }
 }
 

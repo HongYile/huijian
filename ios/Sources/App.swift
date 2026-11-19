@@ -23,12 +23,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         completionHandler([.banner, .list, .sound])
     }
 
-    /// 点通知：打开那条消息
+    /// 点通知：打开那条消息；设备请求解锁加密消息（T50）的通知打开「端到端加密」页核对后批准
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
-        let id = (response.notification.request.content.userInfo[Notifier.messageIDKey] as? NSNumber)?.int64Value
+        let info = response.notification.request.content.userInfo
+        let id = (info[Notifier.messageIDKey] as? NSNumber)?.int64Value
+        let e2e = info[Notifier.e2eKey] as? Bool == true
         Task { @MainActor in
-            if let id { AppModel.shared.openMessage(id) }
+            if e2e { AppModel.shared.openE2E() } else if let id { AppModel.shared.openMessage(id) }
             completionHandler()
         }
     }
@@ -74,6 +76,7 @@ struct RootView: View {
                         case .keys: KeysView()
                         case .account: AccountManageView()
                         case .channels: ChannelsView()
+                        case .e2e: E2EView()
                         }
                     }
             }

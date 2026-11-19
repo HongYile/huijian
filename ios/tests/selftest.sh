@@ -28,9 +28,11 @@ xcrun simctl uninstall "$UDID" $BID 2>/dev/null
 xcrun simctl install "$UDID" build/sim/Huijian.app
 BKEY=HyTestKey0123456789abcdefABCDEF0; BIV=HyTestIV01234567
 xcrun simctl launch --console-pty "$UDID" $BID -selfTest YES -demoServer $PUB -demoUser $DEMO_USER -demoPass $DEMO_PASS \
-  -demoBarkURL $BARK_URL -demoBarkKey $BKEY -demoBarkIV $BIV -demoUpdateBuild $NEXT > $T/selftest.log 2>&1 &
+  -demoBarkURL $BARK_URL -demoBarkKey $BKEY -demoBarkIV $BIV -demoUpdateBuild $NEXT \
+  -demoE2EUser $E2E_USER -demoE2EPass $E2E_PASS > $T/selftest.log 2>&1 &
 L=$!
-for i in $(seq 1 180); do kill -0 $L 2>/dev/null || break; sleep 1; done
+# 端到端加密的联网流程要做十几次 Argon2id（每次 0.1–0.4 秒），比原来多给两分钟
+for i in $(seq 1 300); do kill -0 $L 2>/dev/null || break; sleep 1; done
 kill $L 2>/dev/null
 grep -E '^(✅|❌|—|SELFTEST|回笺|（|BARK_)' $T/selftest.log
 grep -q 'SELFTEST PASS' $T/selftest.log; RESULT=$?

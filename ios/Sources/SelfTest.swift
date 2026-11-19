@@ -54,6 +54,9 @@ final class SelfTest {
         unitTests()
         updateVerifyUnitTests()
         await MDSelfTest.runAsync { check($0, $1, $2) }
+        // 端到端加密（离线部分：参数核对、防降级、状态、§4.5、消息与附件解密、核对失败自动拒绝；和 Mac 共用 E2ESelfTest.swift）
+        out("— 端到端加密（离线）")
+        await E2ESelfTest.offline { check($0, $1, $2) }
         if Demo.server != nil { await integration() }
         out("SELFTEST \(fail == 0 ? "PASS" : "FAIL") \(pass)/\(pass + fail)")
         let f = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("selftest.txt")
@@ -339,12 +342,13 @@ final class SelfTest {
         } catch { check("管理：pushkey", false, shortError(error)) }
 
         // 账户：当前密码不对 → 服务端说明，用户名不变；没有管理权限不能移除有管理权限的设备
+        // 登录时账号已自动升级到新登录协议：改用户名用当前密码派生的凭证核对，服务端 403 显示 T3
         do {
-            _ = try await model.setCredentials(username: user + "x", password: "", current: pass + "wrong")
+            _ = try await model.changeCredentials(username: user + "x", password: "", current: pass + "wrong")
             check("管理：当前密码不对应失败", false)
         } catch {
-            check("管理：当前密码不对 → 显示服务端说明，用户名不变（\(shortError(error))）",
-                  shortError(error) == "当前密码不对" && model.settings.username == user)
+            check("管理：当前密码不对 → 「\(shortError(error))」，用户名不变",
+                  [E2E.T.t3, "当前密码不对"].contains(shortError(error)) && model.settings.username == user)
         }
         do {
             let d = try await api.account()
@@ -379,7 +383,8 @@ final class SelfTest {
 
         // 注册：服务端没开放时显示服务端说明，本机登录状态不变
         do {
-            try await model.register(server: server, username: "selftest-new", password: "selftest-pass", name: "x")
+            // 注册的密码强度在本机检查（新登录协议），这里用一个合格的密码，看服务端的说明
+            try await model.register(server: server, username: "selftest-new", password: "Selftest-Register-Strong-9", name: "x")
             check("管理：没开放注册应失败", false)
         } catch {
             check("管理：没开放注册 → 服务端说明，仍保持登录（\(shortError(error))）", shortError(error).contains("没有开放注册") && model.loggedIn)
@@ -472,6 +477,9 @@ final class SelfTest {
         check("首次同步：游标推进、标记完成", model.settings.cursor >= (first.last?.id ?? 1) && model.settings.initialSyncDone)
         let onDisk = Persistence.load()
         check("首次同步：已落盘", onDisk.messages.count == first.count)
+        check("登录：旧账号（PBKDF2）登录后自动升级到新登录协议，记下「已升级」",
+              E2E.UpgradeMarks(defaults: .standard).isUpgraded(server: model.settings.server, username: user)
+              && model.settings.accountID != nil, "accountID=\(String(describing: model.settings.accountID))")
         check("频道显示名（train → 训练）", model.channelName("train") == "训练", model.channelName("train"))
         check("频道设置已落盘（后台冷启动可用）", model.settings.channels.contains { $0.topic == "train" && $0.alias == "训练" }
               && model.settings.channels.contains { $0.topic == "debug" && $0.hidden })
@@ -545,6 +553,9 @@ final class SelfTest {
         } else {
             check("演示数据里有图片附件", false)
         }
+
+        // 端到端加密接到 AppModel 上（内存存储，不碰钥匙串）
+        await e2eModelTests()
 
         // 更新检查（服务端还没有 iOS 版本时返回 null，不报错）
         do {
@@ -674,6 +685,198 @@ final class SelfTest {
             _ = try await API(server: api.server, token: token).me()
             check("退出后旧 token 失效", false)
         } catch { check("退出后旧 token 失效", (error as? APIError) == .unauthorized, "\(error)") }
+
+        // 端到端加密联网流程：用 tests/hub.sh 另建的账号（旧方式设置的密码），会改掉它的密码、删掉它服务器上的明文消息，不影响上面的演示账号
+        await e2eOnlineTests(server: server)
+    }
+
+    // MARK: 端到端加密
+
+    /// 端到端加密接到 AppModel 上：锁定期间收到的消息显示 T60、解锁后自动解开（含附件映射和本地 doc）、写盘读回、
+    /// 加密附件解密失败不留文件、删除明文后本机保留、退出登录删除钥匙。钥匙放内存（不碰钥匙串），测完恢复
+    private func e2eModelTests() async {
+        out("— 端到端加密：接到 AppModel 上")
+        guard model.settings.accountID != nil else { check("端到端加密：取到账号 id", false, "/v1/me 没有账号 id"); return }
+        let savedSecrets = model.e2eSecrets
+        model.e2eSecrets = E2E.MemorySecrets()
+        let base = model.settings.cursor + 300_000
+        let ids = [base + 1, base + 2, base + 4, base + 5]
+        do {
+            model.loadE2EKeys()
+            let kp = try Core.keypair()
+            var st = E2E.State()
+            st.enabled = true
+            st.auth_key = true
+            st.has_password_wrap = true
+            st.keys = [E2E.Key(kid: kp.kid, pub: kp.pub, active: true)]
+            model.e2eState = st
+            check("账号已开启加密、本机没有私钥：已锁定（列表顶部显示 T10）", model.e2eLocked && model.e2eAccountEnabled)
+            let fileKey = try Core.random32()
+            let env = try E2ESelfTest.sealPayload(pub: kp.pub, text: "加密标题", desp: "**正文** ![图](attachment:曲线.png)",
+                                                  atts: [["name": "曲线.png", "mime": "image/png", "size": 321, "key": fileKey]])
+            func msg(_ id: Int64, _ env: String) throws -> Message {
+                let json = """
+                {"id": \(id), "topic": "e2e", "priority": 4, "type": "e2e", "text": "🔒 加密消息（请把回笺更新到最新版查看）", "desp": "",
+                 "created_at": "2026-11-19T08:00:00Z", "e2e": "\(env)",
+                 "attachments": [{"id": "a_e2e_\(id)", "name": "encrypted-1.bin", "mime": "application/octet-stream", "size": 400, "sha256": "ab"}]}
+                """
+                return try JSONCoding.decoder.decode(Message.self, from: Data(json.utf8))
+            }
+            let m1 = try msg(ids[0], env)
+            check("解码服务端的加密消息：保留信封 e2e", m1.isE2E && m1.e2eStatus == nil)
+            model.merge(await model.prepareE2E([m1]))
+            var got = model.message(ids[0])
+            check("锁定期间收到：标题 T60、正文为空，附件仍是密文", got?.text == E2E.T.t60 && got?.desp == "" && got?.e2eStatus == "locked"
+                  && got?.attachments.first?.key == nil, "\(String(describing: got?.text))")
+            if let g = got { _ = PreviewCache.summary(g) }     // 先缓存锁定时的摘要，解开后应当作废
+            check("从没解锁过（没有钉住的公钥）：加密发送密钥显示 T73", model.e2eSendKey("PK_selftest") == .needsUnlock)
+            guard let ring = model.e2eRing else { throw E2E.Failure(.server, "没有 KeyRing") }
+            // 进行中的开启（§4.1）：新钥匙对和恢复码存在钥匙串里，每次刷新状态都核对
+            let stranger = try Core.keypair()
+            try ring.savePendingSetup(E2E.SetupAttempt(sk: stranger.sk, pub: stranger.pub, code: "X"))
+            model.checkE2ESetup(st, ring: ring)
+            check("进行中的开启、服务端用的是别的钥匙：删除", (try? ring.pendingSetup()) == nil && model.e2eRecovery == nil)
+            try ring.savePendingSetup(E2E.SetupAttempt(sk: kp.sk, pub: kp.pub, code: "SELFTEST-CODE"))
+            var notOn = st
+            notOn.enabled = false
+            model.checkE2ESetup(notOn, ring: ring)
+            check("进行中的开启、服务端还没开启：保留，开启页提示重试",
+                  model.e2ePendingSetup?.pub == kp.pub && (try? ring.pendingSetup()) != nil && model.e2eRecovery == nil)
+            let savedPath = model.path
+            model.checkE2ESetup(st, ring: ring)      // §4.5 核对后保存私钥，并钉住公钥
+            check("服务端已用这把钥匙开启：保存私钥、钉住公钥、显示恢复码页",
+                  model.e2eRecovery?.code == "SELFTEST-CODE" && model.e2eKeys == [kp.sk] && ring.pinned == kp.pub && model.e2ePendingSetup == nil)
+            model.e2eRecovery = nil
+            model.checkE2ESetup(st, ring: ring)
+            check("没点「完成」就被关掉：再刷新（相当于重启）仍回到恢复码页", model.e2eRecovery?.code == "SELFTEST-CODE")
+            model.e2eFinishRecovery()
+            check("点「完成」：恢复码从 App 状态和钥匙串里删除", model.e2eRecovery == nil && (try? ring.pendingSetup()) == nil)
+            // 更换恢复码（§7 第 3 项）：还没确认的不显示；已确认、没点「完成」→ 读钥匙时（相当于重启）回到恢复码页；「完成」后删除
+            try ring.savePendingRecovery(E2E.RecoveryAttempt(code: "ROTATE-CODE", wrap: "hjr1.x", confirmed: false))
+            model.loadE2EKeys()
+            check("更换恢复码还没确认：不显示恢复码页", model.e2eRecovery == nil)
+            try ring.savePendingRecovery(E2E.RecoveryAttempt(code: "ROTATE-CODE", wrap: "hjr1.x", confirmed: true))
+            model.loadE2EKeys()
+            check("更换恢复码已确认、没点「完成」：重启后回到恢复码页", model.e2eRecovery?.code == "ROTATE-CODE" && model.e2eRecovery?.fromSetup == false)
+            model.e2eFinishRecovery()
+            check("点「完成」：更换的恢复码从钥匙串删除", model.e2eRecovery == nil && (try? ring.pendingRecovery()) == nil)
+            model.path = savedPath
+            model.loadE2EKeys()
+            check("本机有了私钥：已解锁", model.e2eStatus == .unlocked && !model.e2eLocked)
+            await model.decryptPending()
+            got = model.message(ids[0])
+            check("解锁后自动重新解密：标题、正文", got?.text == "加密标题" && got?.desp.hasPrefix("**正文**") == true && got?.e2eStatus == "ok"
+                  && got?.type == "markdown", "\(String(describing: got?.text))")
+            check("附件：显示载荷里的名字和大小，下载仍用服务端 id 和密文校验值，附件钥匙和消息一起保存",
+                  got?.attachments.first.map { $0.id == "a_e2e_\(ids[0])" && $0.name == "曲线.png" && $0.size == 321 && $0.key == fileKey && $0.sha256 == "ab" } == true)
+            check("本地解析的 doc 引用服务端附件 id，列表摘要换成解开后的（旧摘要缓存作废）",
+                  got?.renderDoc?.blocks.contains { $0.att == "a_e2e_\(ids[0])" || $0.runs?.contains { $0.att == "a_e2e_\(ids[0])" } == true } == true
+                  && got.map { PreviewCache.summary($0).contains("正文") } == true, got.map { PreviewCache.summary($0) } ?? "nil")
+            try await model.persistNow()
+            let saved = Persistence.load().messages.first { $0.id == ids[0] }
+            check("写盘读回：信封原文、解密后的内容、附件钥匙都在", saved?.e2e == env && saved?.text == "加密标题" && saved?.e2eStatus == "ok"
+                  && saved?.attachments.first?.key == fileKey)
+            // 直接 merge（没经过 prepareE2E）的也会在后台解开
+            let m2 = try msg(ids[1], try E2ESelfTest.sealPayload(pub: kp.pub, text: "第二条", desp: ""))
+            model.merge([m2])
+            for _ in 0..<20 where model.message(ids[1])?.e2eStatus != "ok" { try? await Task.sleep(nanoseconds: 50_000_000) }
+            check("直接合并的加密消息在后台解开", model.message(ids[1])?.text == "第二条")
+            // 解密进行中又合并进来的加密消息：这一轮结束后补解，不会漏（§6.1）
+            var m4 = try msg(base + 4, try E2ESelfTest.sealPayload(pub: kp.pub, text: "第四条", desp: ""))
+            m4.applyE2E(.locked)
+            model.merge([m4])
+            let running = Task { await model.decryptPending() }
+            await Task.yield()
+            model.merge([try msg(base + 5, try E2ESelfTest.sealPayload(pub: kp.pub, text: "第五条", desp: ""))])
+            await running.value
+            for _ in 0..<20 where model.message(base + 5)?.e2eStatus != "ok" { try? await Task.sleep(nanoseconds: 50_000_000) }
+            check("解密进行中合并进来的加密消息：本轮结束后补解，不会漏", model.message(base + 4)?.text == "第四条"
+                  && model.message(base + 5)?.text == "第五条" && !model.e2eDecryptAgain)
+            check("Pushkey 页的加密发送密钥（用钉住的公钥）", model.e2eSendKey("PK_selftest") == .key("PK_selftest.e2e.\(kp.pub)"))
+            var st2 = st
+            st2.keys = [E2E.Key(kid: "x", pub: try Core.keypair().pub, active: true)]
+            model.e2eState = st2
+            check("服务器的有效钥匙和钉住的不同：不显示密钥，显示 T43", model.e2eSendKey("PK_selftest") == .mismatch)
+            model.e2eState = st
+            // 别的钥匙加密的
+            let other = try Core.keypair()
+            let m3 = try msg(base + 3, try E2ESelfTest.sealPayload(pub: other.pub, text: "x", desp: ""))
+            check("别的钥匙加密的消息：T61", await model.prepareE2E([m3]).first?.text == E2E.T.t61)
+            // 加密附件下载：拿一个真实的（明文）附件冒充密文，解密必然失败：卡片显示「解密失败」，不留文件
+            if var a = model.messages.flatMap(\.attachments).first(where: { $0.name == "metrics.xlsx" }) {
+                a.key = fileKey
+                await model.download(a)
+                check("加密附件解密失败：显示「解密失败」，不留文件", model.attState(a) == .failed("解密失败")
+                      && !FileManager.default.fileExists(atPath: AppPaths.attachmentFile(a).path), "\(model.attState(a))")
+            } else {
+                check("演示数据里有 metrics.xlsx 附件", false)
+            }
+            // 删除服务器上的明文（§7.4）：收到 purge 变更时本机保留副本，记为「仅本机保留」；对账跳过；之后 delete 变更照常删除
+            func plain(_ id: Int64) throws -> Message {
+                try JSONCoding.decoder.decode(Message.self, from: Data(#"{"id":\#(id),"priority":3,"text":"明文 \#(id)","created_at":"2026-11-19T08:00:00Z"}"#.utf8))
+            }
+            let (p1, p2) = (base + 11, base + 12)
+            model.merge([try plain(p1), try plain(p2)])
+            let ch = { (id: Int64, kind: String) in MsgChange(seq: nil, id: id, kind: kind, state: nil) }
+            _ = model.applyChanges([ch(p1, "purge"), ch(p2, "purge"), ch(base + 99, "purge")])
+            check("收到 purge：本地副本保留，记为仅本机保留（本地没有的不记）",
+                  model.message(p1) != nil && model.message(p2) != nil && model.settings.e2ePlainKept == [p1, p2], "\(model.settings.e2ePlainKept)")
+            check("对账时跳过仅本机保留的消息", AppModel.withoutKept([p1, p2, 5], kept: model.settings.e2ePlainKept) == [5])
+            // 离线超过 90 天收不到 purge（§7.4）：账号开了加密时，对账发现本地明文消息不在服务器上 → 记入保留；加密消息照常删除
+            let (q1, q2) = (try plain(base + 13), try msg(base + 14, "hje1.x"))
+            let on = AppModel.reconcileMissing([q1, q2, try plain(p1)], e2eAccount: true, kept: [p1])
+            check("对账（已开启加密）：明文记入仅本机保留、加密照删、已保留的跳过",
+                  on.remove == [q2.id] && on.keep == [q1.id], "\(on)")
+            let off = AppModel.reconcileMissing([q1, q2], e2eAccount: false, kept: [])
+            check("对账（没开启加密）：服务器上没有的都删", off.remove == [q1.id, q2.id] && off.keep.isEmpty, "\(off)")
+            _ = model.applyChanges([ch(p1, "delete")])
+            check("之后的 delete 变更照常删除，并移出保留集合", model.message(p1) == nil && model.settings.e2ePlainKept == [p2])
+            model._testRemove([p2])
+            check("本机删除后移出保留集合", model.settings.e2ePlainKept.isEmpty)
+            // 退出登录：删除本机钥匙
+            model.e2eWipe()
+            check("退出登录：本机私钥全部删除", model.e2eKeys.isEmpty && ((try? model.e2eRing?.accountKeys()) ?? ["x"])?.isEmpty == true
+                  && model.e2eState == nil && !model.settings.e2eEnabled)
+            check("退出登录不影响本机已解开的消息", model.message(ids[0])?.text == "加密标题")
+        } catch {
+            check("端到端加密模型测试", false, "\(error)")
+        }
+        model._testRemove(ids)
+        model.e2eWipe()
+        // 测试钉住的假公钥不留下（钉住的公钥退出登录也不删，这里是自检自己清理）
+        if let scope = model.e2eRing?.scope, var pins = UserDefaults.standard.dictionary(forKey: "huijian.e2e.pinned") {
+            pins[scope] = nil
+            UserDefaults.standard.set(pins, forKey: "huijian.e2e.pinned")
+        }
+        model.e2eSecrets = savedSecrets
+        model.loadE2EKeys()
+        try? await model.persistNow()
+    }
+
+    /// 对本地 hub 跑完整的端到端加密流程（和 Mac 共用 E2ESelfTest.online）：自动升级、开启加密、三种解锁、设备批准、
+    /// 收加密消息（含附件）、设置项。需要 -demoE2EUser / -demoE2EPass（tests/hub.sh 用管理后台建的账号，旧方式设置的密码）
+    private func e2eOnlineTests(server: String) async {
+        let d = UserDefaults.standard
+        guard let user = d.string(forKey: "demoE2EUser"), let pass = d.string(forKey: "demoE2EPass"), let url = URL(string: server) else {
+            out("（跳过端到端加密联网测试：没有 -demoE2EUser / -demoE2EPass）")
+            return
+        }
+        let open = API(server: url, token: nil)
+        guard (try? await open.info())?.features?.contains(where: { $0.id == "e2e" }) == true else {
+            out("（服务端没有 e2e 功能，跳过端到端加密联网测试）")
+            return
+        }
+        out("— 端到端加密（联网）")
+        do {
+            // 旧方式登录（这个账号还没升级），拿一台设备的 token 和一把 pushkey；之后的流程全部走新协议
+            let fp = (0..<32).map { _ in String(format: "%02x", Int.random(in: 0...255)) }.joined()
+            let r = try await open.login(username: user, password: pass, name: "自检 e2e 设备 A", fingerprint: fp)
+            let k = try await API(server: url, token: r.token).createKey(name: "e2e 自检")
+            await E2ESelfTest.online({ check($0, $1, $2) }, server: url, transport: { API(server: url, token: $0) },
+                                     tokenA: r.token, username: user, password: pass, pushkey: k.key)
+        } catch {
+            check("端到端加密联网测试：准备账号", false, shortError(error))
+        }
     }
 
     private func changesTests(_ api: API) async {

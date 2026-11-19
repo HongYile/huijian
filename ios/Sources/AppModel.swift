@@ -41,6 +41,8 @@ enum Route: Hashable {
     case keys
     case account
     case channels
+    /// 设置 → 账户 →「端到端加密」
+    case e2e
 }
 
 enum AttState: Equatable {
@@ -48,6 +50,12 @@ enum AttState: Equatable {
     case downloading
     case done
     case failed(String)
+}
+
+/// 正在显示的恢复码；fromSetup：刚开启加密（完成后提示 T22），否则是更换恢复码
+struct E2ERecoveryShow: Equatable {
+    let code: String
+    let fromSetup: Bool
 }
 
 /// 串行写盘（不占主线程）。退出登录后，之前排队的写入一律作废，不会把清掉的消息写回来
@@ -80,7 +88,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var read: Set<Int64> = [] { didSet { readGen &+= 1; saveGen &+= 1 } }
     /// 消息文件读完了（启动时在后台读）。读完之前首页显示「正在加载」，同步和写盘都等它
     @Published private(set) var loaded = false
-    @Published private(set) var conn: ConnState = .loggedOut
+    @Published private(set) var conn: ConnState = .loggedOut {
+        // 确认登录失效（/v1/me 也 401：设备被移除或已退出）：删除本机为这个账号保存的加密钥匙（docs/e2ee-client.md §8）
+        didSet { if conn == .unauthorized && oldValue != .unauthorized { e2eWipe() } }
+    }
     @Published private(set) var lastContact: Date?
     @Published private(set) var channels: [String: ChannelSetting] = [:] { didSet { msgGen &+= 1 } }
     @Published private(set) var loggedIn = false
@@ -100,6 +111,37 @@ final class AppModel: ObservableObject {
     @Published private(set) var notifyAuth: UNAuthorizationStatus = .notDetermined
     @Published private(set) var attStates: [String: AttState] = [:]
     @Published var path: [Route] = []
+
+    // 端到端加密（接线见 E2EModel.swift，逻辑见 E2E.swift，和 Mac 共用）
+    /// GET /v1/e2e 的最近结果；nil = 还没取到（或服务端不支持）
+    @Published var e2eState: E2E.State?
+    /// 本机为当前账号保存的私钥（从钥匙串读出）
+    @Published var e2eKeys: [String] = []
+    /// 钥匙串读写失败的原因（加密页显示）
+    @Published var e2eStorageError: String?
+    /// 登录时关于加密的一句提示（例如私钥对不上 T43），加密页显示
+    @Published var e2eLoginNote: String?
+    /// 本机正在请求其他设备批准（§4.3）
+    @Published var e2eRequest: E2E.ApprovalRequest?
+    @Published var e2eRequestPhase: E2E.ApprovalRequest.Phase?
+    /// 正在批准的其他设备（§5），按 device_id
+    @Published var e2eApprovals: [String: E2E.Approval] = [:]
+    @Published var e2eApprovalPhases: [String: E2E.Approval.Phase] = [:]
+    /// 正在显示的恢复码（开启加密或更换恢复码后只显示这一次）。放在 App 状态里：离开页面再回来还在，点「完成」才清除（§4.1）
+    @Published var e2eRecovery: E2ERecoveryShow?
+    /// 更换恢复码结果不确定（T.recoveryUncertain）：加密页顶部提示，确认成功后自动显示恢复码页
+    @Published var e2eRecoveryNote: String?
+    /// 加密钥匙的安全存储：正常运行用钥匙串；自检换成内存（不碰钥匙串）
+    var e2eSecrets: E2ESecrets = KeychainSecrets(service: Keychain.service + ".e2e")
+    /// 登录时解开并核对过、但还没取到账号 id 没法保存的私钥（只在内存里），拿到账号 id 后保存（§2.1）
+    var e2ePendingLoginKey: (sk: String, keys: [E2E.Key])?
+    /// 进行中的开启（新钥匙对和恢复码存在钥匙串里）结果还没确认、服务端也还没开启：开启页提示重试（§4.1）
+    @Published var e2ePendingSetup: E2E.SetupAttempt?
+    var e2eRefreshing = false
+    var e2eRefreshAgain = false
+    var e2eDecrypting = false
+    /// decryptPending 进行中又被调用：这一轮结束后再跑一轮
+    var e2eDecryptAgain = false
 
     /// 登录会话编号：每次登录、退出都加一。还在路上的旧请求结果核对编号后直接作废
     private(set) var session = 0
@@ -157,6 +199,7 @@ final class AppModel: ObservableObject {
         bark = settings.barkOn ? BarkConfig(url: settings.barkURL, encrypted: settings.barkEncrypted) : nil
         serverFeatures = settings.serverFeatures
         serverVersion = settings.serverVersion
+        if loggedIn { loadE2EKeys() }
     }
 
     /// 消息文件读完：并入内存。读完之前已经有的改动（例如点通知打开消息标的已读）保留
@@ -177,6 +220,8 @@ final class AppModel: ObservableObject {
             // 内存和盘上一致：不用再写一遍
             if clean { savedGen = saveGen }
             if loggedIn { updateBadge() }
+            // 上次锁定时收到的加密消息：本机已经有钥匙了（例如离线启动、还没取到加密状态）就先解开
+            if !e2eKeys.isEmpty, messages.contains(where: \.e2eUnreadable) { Task { await decryptPending() } }
         case .failure:
             // 消息文件损坏：游标之前的消息拉不回来了，清掉游标，下次按首次同步重新拉最新 50 条
             settings.cursor = 0
@@ -254,6 +299,8 @@ final class AppModel: ObservableObject {
             active = true
             startMonitor()
             Task { await refreshNotifyAuth() }
+            // 回到前台时刷新加密状态（docs/e2ee-client.md §3），顺便提醒等待批准的设备（T50）
+            if loggedIn { Task { await refreshE2E() } }
             if conn == .paused { conn = .connecting }
             // 上次被判定为登录失效：回到前台再用 /v1/me 复核一次（可能只是代理 / 强制门户返回的 401）
             if conn == .unauthorized { Task { await recheckAuth() } } else { startSync() }
@@ -383,7 +430,8 @@ final class AppModel: ObservableObject {
             if conn == .unauthorized { conn = .connecting }
             startSync(force: true)
         } catch {
-            if gen == session && error.isUnauthorized { conn = .unauthorized }
+            // 一次 401 不算数（§8）：再问一次 /v1/me，仍是 401 才判定登录失效（会删除本机加密钥匙）
+            if gen == session, error.isUnauthorized, await confirmUnauthorized(api), gen == session { conn = .unauthorized }
         }
     }
 
@@ -399,7 +447,9 @@ final class AppModel: ObservableObject {
             let page = try await api.messages(since: nil, limit: 50)
             guard gen == session else { throw CancellationError() }
             touchContact()
-            _ = merge(page.messages)
+            let msgs = await prepareE2E(page.messages)      // 加密消息在后台线程解密
+            guard gen == session else { throw CancellationError() }
+            _ = merge(msgs)
             read.formUnion(page.messages.map(\.id))
             try await persistNow()
             guard gen == session else { throw CancellationError() }
@@ -456,7 +506,10 @@ final class AppModel: ObservableObject {
         }
         // 同一页里既有新消息又有删除它的变更：先去掉再合并，不提醒
         let deleted = Set(changes.filter { $0.kind == "delete" }.map(\.id))
-        let fresh = merge(page.messages.filter { !deleted.contains($0.id) })
+        // 加密消息先在后台线程解密，通知和列表用解开后的标题（未解锁时是 T60）
+        let incoming = await prepareE2E(page.messages.filter { !deleted.contains($0.id) })
+        guard gen == session else { throw CancellationError() }
+        let fresh = merge(incoming)
         if !fresh.isEmpty {
             notifyNew(fresh)
             updateBadge()
@@ -478,8 +531,14 @@ final class AppModel: ObservableObject {
     func merge(_ incoming: [Message]) -> [Message] {
         let have = Set(messages.map(\.id))
         var seen = Set<Int64>()
-        let fresh = incoming.filter { !have.contains($0.id) && seen.insert($0.id).inserted }
+        var fresh = incoming.filter { !have.contains($0.id) && seen.insert($0.id).inserted }
         if fresh.isEmpty { return [] }
+        // 没经过 prepareE2E 的加密消息：先按「已锁定」显示，之后在后台解密
+        for i in fresh.indices where fresh[i].isE2E && fresh[i].e2eStatus == nil {
+            fresh[i].applyE2E(.locked)
+        }
+        // 有没解开的（包括 prepareE2E 时还锁着、合并时已经解锁的）且本机有钥匙：合并后在后台补解（§6.1）
+        if !e2eKeys.isEmpty, fresh.contains(where: \.e2eUnreadable) { Task { await decryptPending() } }
         var all = messages + fresh
         all.sort { $0.id < $1.id }
         if all.count > Persistence.maxKeep {
@@ -526,10 +585,21 @@ final class AppModel: ObservableObject {
         let gen = session
         // 只处理请求前已经同步到的消息：快照请求期间并发合并进来的新消息（id 比这个大）不在快照里，但不是被删了
         let upTo = settings.cursor
+        // 账号是否开启了加密（§7.4）：还没取到状态时先问一次服务器（离线很久回来，可能期间在别处开启了），取不到用上次记下的
+        var e2eOn = e2eState?.enabled ?? settings.e2eEnabled
+        if e2eState == nil, e2eSupported, let st = try? await E2E.API(api).state() {
+            guard gen == session else { return }
+            e2eOn = st.enabled
+        }
         let r = try await api.messageStates()
         guard gen == session else { return }
         let sameData = settings.changesEpoch == nil || r.epoch == nil || r.epoch == settings.changesEpoch
-        if sameData { removeLocal(messages.filter { $0.id <= upTo && r.states[$0.id] == nil }.map(\.id)) }
+        if sameData {
+            let missing = messages.filter { $0.id <= upTo && r.states[$0.id] == nil }
+            let (remove, keep) = Self.reconcileMissing(missing, e2eAccount: e2eOn, kept: settings.e2ePlainKept)
+            if !keep.isEmpty { settings.e2ePlainKept = settings.e2ePlainKept.union(keep) }
+            removeLocal(remove)
+        }
         applyArchive(r.states)
         try await persistNow()
         guard gen == session else { return }
@@ -542,26 +612,52 @@ final class AppModel: ObservableObject {
     @discardableResult
     func applyChanges(_ changes: [MsgChange]) -> Bool {
         guard !changes.isEmpty else { return false }
-        var del: [Int64] = [], arch: [Int64: Int] = [:], channelsChanged = false, keysChanged = false, accountChanged = false
+        var del: [Int64] = [], purge: [Int64] = [], arch: [Int64: Int] = [:]
+        var channelsChanged = false, keysChanged = false, accountChanged = false, e2eChanged = false
         for c in changes {
             switch c.kind {
             case "delete": del.append(c.id); arch[c.id] = nil
+            // 「删除服务器上的明文消息」删掉的（服务端 0.7.0 起）：服务器上没有了，本机保留副本（docs/e2ee-client.md §7.4）
+            case "purge": purge.append(c.id); arch[c.id] = nil
             case "archive": arch[c.id] = c.state ?? 0
             case "channels": channelsChanged = true
             // 设置实时同步（服务端 0.6.1 起）：pushkey、设备、账户在别处变了，重新拉取
             case "keys": keysChanged = true
             case "devices", "account": accountChanged = true
+            // 开启加密、设备请求批准 / 已批准、只接受加密消息（服务端 0.7.0 起）
+            case "e2e": e2eChanged = true
             default: break   // 不认识的 kind 忽略
             }
         }
+        if e2eChanged { Task { await refreshE2E() } }
         if channelsChanged, let api = api() {
             let gen = session
             Task { if let c = try? await api.channels(), gen == session { setChannels(c) } }
         }
         if keysChanged || accountChanged { noteSettingsChanged(keys: keysChanged, account: accountChanged) }
+        if !purge.isEmpty {
+            // 本地有的记为「仅本机保留」，不删；对账时跳过它们。之后的 delete 变更照常删除（removeLocal 里移出集合）
+            let local = Set(messages.map(\.id))
+            let keep = purge.filter { local.contains($0) }
+            if !keep.isEmpty { settings.e2ePlainKept = settings.e2ePlainKept.union(keep) }
+        }
         let a = removeLocal(del)
         let b = applyArchive(arch)
         return a || b
+    }
+
+    /// 对账时跳过「仅本机保留」的消息（服务器的「删除明文消息」删掉了、本机保留副本，docs/e2ee-client.md §7.4）
+    nonisolated static func withoutKept(_ ids: [Int64], kept: Set<Int64>) -> [Int64] {
+        kept.isEmpty ? ids : ids.filter { !kept.contains($0) }
+    }
+
+    /// 对账时本地有、服务器上没有的消息怎么处理（§7.4）：「仅本机保留」的跳过；账号开启了加密时，本地的明文消息记入「仅本机保留」不删
+    /// （变更记录只留 90 天，离线更久的设备收不到 purge），加密消息照常删除。返回（要删的，要新记入保留的）
+    nonisolated static func reconcileMissing(_ missing: [Message], e2eAccount: Bool, kept: Set<Int64>) -> (remove: [Int64], keep: [Int64]) {
+        let ids = withoutKept(missing.map(\.id), kept: kept)
+        guard e2eAccount else { return (ids, []) }
+        let plain = Set(missing.filter { !$0.isE2E }.map(\.id))
+        return (ids.filter { !plain.contains($0) }, ids.filter { plain.contains($0) })
     }
 
     private func setChannels(_ list: [ChannelSetting]) {
@@ -588,6 +684,8 @@ final class AppModel: ObservableObject {
         let set = Set(ids)
         let gone = messages.filter { set.contains($0.id) }
         guard !gone.isEmpty else { return false }
+        let kept = settings.e2ePlainKept
+        if !kept.isDisjoint(with: set) { settings.e2ePlainKept = kept.subtracting(set) }
         messages.removeAll { set.contains($0.id) }
         read.subtract(set)
         for a in gone.flatMap(\.attachments) {
@@ -623,6 +721,8 @@ final class AppModel: ObservableObject {
             Heartbeat.shared.serverMax = serverFeatures?.contains("poll.long") == true ? (i.long_poll_max ?? Heartbeat.oldServerMax) : Heartbeat.oldServerMax
             serverVersion = i.version ?? ""
             settings.serverVersion = serverVersion
+            // 功能清单到了才知道服务端有没有端到端加密
+            if supports("e2e") == true { Task { await refreshE2E() } }
         }
         if c != nil && m != nil && i != nil { auxFetchedAt = Date() }
         await checkUpdate()
@@ -636,6 +736,14 @@ final class AppModel: ObservableObject {
         settings.deviceName = m.name
         canAdmin = m.can_admin
         accountHasPassword = m.account?.has_password
+        if let id = m.account?.id, id > 0 { noteAccountID(id) }
+    }
+
+    /// 记下账号 id（加密钥匙按「服务器 + 账号 id」存）；变了就重新读钥匙
+    private func noteAccountID(_ id: Int64) {
+        guard settings.accountID != id else { return }
+        settings.accountID = id
+        loadE2EKeys()
     }
 
     /// 下拉刷新：补拉一次、刷新频道和账号；正在退避等待时立即重连；之前判定为登录失效时先复核
@@ -1115,6 +1223,7 @@ final class AppModel: ObservableObject {
     func noteAccount(_ a: AccountInfo) {
         if !a.username.isEmpty { settings.username = a.username }
         accountHasPassword = a.has_password
+        if a.id > 0 { noteAccountID(a.id) }
     }
 
     /// 本机所有消息里出现过的频道（含隐藏的），按「置顶 → 手动顺序 → 最近活跃」排序
@@ -1202,9 +1311,9 @@ final class AppModel: ObservableObject {
         if let p = ManageRules.usernameProblem(u) { throw APIError.invalid(p) }
         if u.isEmpty { throw APIError.invalid("请填写用户名") }
         if password.isEmpty { throw APIError.invalid("请设置密码") }
-        if let p = ManageRules.passwordProblem(password) { throw APIError.invalid(p) }
-        let r = try await API(server: url, token: nil).register(username: u, password: password, name: name, fingerprint: DeviceFingerprint.value)
-        signedIn(server: s, r, username: u)
+        // 服务器拿不到密码，强度只能在本机检查（docs/e2ee-client.md §2.2）
+        if let p = Core.passwordProblem(password, username: u) { throw APIError.invalid(p) }
+        try await passwordSignIn(server: s, url: url, username: u, password: password, name: name, register: true)
     }
 
     // MARK: 登录 / 退出
@@ -1212,20 +1321,49 @@ final class AppModel: ObservableObject {
     func login(server raw: String, username: String, password: String, code: String, usePair: Bool, name: String) async throws {
         let s = API.normalize(raw)
         guard let url = URL(string: s), let host = url.host, !host.isEmpty else { throw APIError.invalid("服务器地址格式不对") }
-        let api = API(server: url, token: nil)
-        let fp = DeviceFingerprint.value
-        let r = usePair ? try await api.pair(code: code, name: name, fingerprint: fp)
-                        : try await api.login(username: username, password: password, name: name, fingerprint: fp)
-        signedIn(server: s, r, username: usePair ? "" : username)
+        if usePair {
+            let r = try await API(server: url, token: nil).pair(code: code, name: name, fingerprint: DeviceFingerprint.value)
+            signedIn(server: s, r, username: "")
+        } else {
+            try await passwordSignIn(server: s, url: url, username: username, password: password, name: name, register: false)
+        }
     }
 
-    /// 登录成功。换了服务器或设备记录（换账号）时清掉旧消息和游标，不会混在一起
-    func signedIn(server: String, _ r: LoginResult, username: String) {
+    /// 账号密码登录 / 注册，新登录协议（docs/e2ee-client.md §2）：先取派生参数，在本机算凭证，从不发送密码原文
+    /// （旧服务端、从未升级的账号除外）；旧账号登录后自动升级；登录响应里带了用密码锁住的私钥时解开、核对后存进钥匙串
+    private func passwordSignIn(server s: String, url: URL, username: String, password: String, name: String, register: Bool) async throws {
+        let r: E2E.LoginResult
+        do {
+            r = try await E2E.login(server: API(server: url, token: nil), authed: { API(server: url, token: $0) as E2ETransport },
+                                    serverID: s, username: username, password: password,
+                                    device: .init(name: name, platform: "ios", fingerprint: DeviceFingerprint.value),
+                                    register: register, marks: e2eMarks, secrets: e2eSecrets)
+        } catch let f as E2E.Failure where f.kind == .unsupported {
+            if register { throw APIError.unsupported }
+            throw APIError.invalid("这个服务端版本较旧，还不支持账号登录（需要 0.5.0 以上），请用配对码配对")
+        }
+        let lr: LoginResult
+        do { lr = try JSONCoding.decoder.decode(LoginResult.self, from: r.response) } catch { throw APIError.invalid("服务器返回的数据格式不对") }
+        e2ePendingLoginKey = r.pendingKey
+        signedIn(server: s, lr, username: username, accountID: r.accountID)
+        e2eLoginNote = r.note
+    }
+
+    /// 登录成功。换了服务器或设备记录（换账号）时清掉旧消息和游标，不会混在一起。
+    /// accountID：登录时已经取到的账号 id（加密钥匙按它存）；配对码登录时为 nil，之后从 /v1/me 取
+    func signedIn(server: String, _ r: LoginResult, username: String, accountID: Int64? = nil) {
         stopSync()
         session += 1
         resetUpdateDownload()
         let same = settings.server == server && settings.deviceID == r.device_id
-        if !same { resetLocal() }
+        if !same {
+            // §8：换了账号 / 服务器才删旧账号的加密钥匙。服务器地址只是换了写法（规范化后相同）且是同一台设备记录、
+            // 或者登录时已知的账号 id 和原来相同，钥匙属于同一个账号，保留
+            let oldScope = e2eRing?.scope
+            let sameAccount = (E2E.normalizeServer(server) == e2eServerID && settings.deviceID == r.device_id)
+                || (accountID.map { E2E.scope(server: server, accountID: $0) } == oldScope && oldScope != nil)
+            resetLocal(keepE2EKeys: sameAccount)
+        }
         settings.server = server
         settings.token = r.token
         tokenCache = r.token
@@ -1233,9 +1371,11 @@ final class AppModel: ObservableObject {
         settings.deviceName = r.name
         // 同一台设备用配对码重新登录时，保留之前记下的用户名
         if !same || !username.isEmpty { settings.username = username }
+        if let accountID { settings.accountID = accountID }
         auxFetchedAt = nil
         loggedIn = true
         conn = .connecting
+        loadE2EKeys()
         Task { await requestNotifyPermission() }
         startSync(force: true)
     }
@@ -1256,6 +1396,8 @@ final class AppModel: ObservableObject {
     /// 退出登录：先停同步，再清本地数据和通知，最后通知服务器让 token 失效
     func logout(notifyServer: Bool) {
         let api = notifyServer ? self.api() : nil
+        // §8：删除本机为这个账号保存的私钥和设备钥匙对（「已升级」标记保留）。要在清掉服务器地址、账号 id 之前
+        e2eWipe()
         stopSync()
         session += 1
         settings.token = nil
@@ -1271,7 +1413,7 @@ final class AppModel: ObservableObject {
         if let api { Task { try? await api.logout() } }
     }
 
-    private func resetLocal() {
+    private func resetLocal(keepE2EKeys: Bool = false) {
         saveTask?.cancel()
         localResets += 1
         auxFetchedAt = nil
@@ -1300,6 +1442,27 @@ final class AppModel: ObservableObject {
         settingsRefreshTask = nil
         pendingKeysRefresh = false
         pendingAccountRefresh = false
+        // 端到端加密（§8）：换账号、换服务器、读不到凭证回登录页后登录了另一个账号时，旧账号的私钥、设备钥匙对、
+        // 进行中的开启都删掉。这时服务器地址和账号 id 还是旧的。正在进行的批准流程先停下（之后不再写钥匙串），再删
+        e2eRequest?.stop()
+        for a in e2eApprovals.values { a.stop() }
+        if !keepE2EKeys, let ring = e2eRing {
+            do { try ring.removeAll() } catch { NSLog("回笺 删除旧账号的加密钥匙失败: \(error.localizedDescription)") }
+        }
+        e2eState = nil
+        e2eKeys = []
+        e2eStorageError = nil
+        e2eLoginNote = nil
+        e2eRequest = nil
+        e2eRequestPhase = nil
+        e2eApprovals = [:]
+        e2eApprovalPhases = [:]
+        e2eRecovery = nil
+        e2eRecoveryNote = nil
+        e2ePendingSetup = nil
+        settings.accountID = nil
+        settings.e2eEnabled = false
+        settings.e2ePlainKept = []
         latestBuild = 0
         lastContact = nil
         settings.cursor = 0
@@ -1353,7 +1516,22 @@ final class AppModel: ObservableObject {
         let file = AppPaths.attachmentFile(a)
         attStates[a.id] = .downloading
         do {
-            try await api.download(a, to: file)
+            if let key = a.key {
+                // 端到端加密的附件（docs/e2ee-client.md §6.4）：先下载密文（照常校验密文的 sha256），再解密成真实文件名；
+                // 成功后删除密文，失败时不留文件，卡片显示「解密失败」
+                let fm = FileManager.default
+                let enc = fm.temporaryDirectory.appendingPathComponent("e2e-att-\(UUID().uuidString)")
+                defer { try? fm.removeItem(at: enc) }
+                try await api.download(a, to: enc)
+                try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? fm.removeItem(at: file)
+                do { try await E2E.decryptAttachment(key: key, src: enc, dst: file) } catch {
+                    try? fm.removeItem(at: file)
+                    throw APIError.invalid("解密失败")
+                }
+            } else {
+                try await api.download(a, to: file)
+            }
             // 下载期间退出了登录 / 换了账号：附件不属于现在的账号，删掉
             guard gen == session else { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()); return }
             attStates[a.id] = .done
@@ -1361,6 +1539,22 @@ final class AppModel: ObservableObject {
             guard gen == session else { return }
             attStates[a.id] = .failed(shortError(error))
         }
+    }
+
+    /// 加密消息重新解密后整体替换（E2EModel.swift 用；messages 的 setter 只在这个文件里可见）。
+    /// 内容变了的消息清掉列表摘要缓存，再排队写盘
+    func replaceMessages(_ list: [Message]) {
+        let old = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { _, b in b })
+        PreviewCache.forget(list.filter { m in old[m.id].map { $0 != m } ?? false }.map(\.id))
+        messages = list
+        updateBadge()
+        scheduleSave()
+    }
+
+    /// 打开设置 → 账户 →「端到端加密」（列表顶部的锁定横幅、设备请求批准的通知）
+    func openE2E() {
+        guard loggedIn else { return }
+        path = [.settings, .account, .e2e]
     }
 
     // MARK: 测试推送

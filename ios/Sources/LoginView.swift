@@ -20,6 +20,11 @@ struct LoginView: View {
     private enum Mode: Hashable { case password, pair, register }
     private var usePair: Bool { mode == .pair }
 
+    /// 注册时的密码强度：服务器拿不到密码，只能在本机检查（docs/e2ee-client.md §2.2）
+    private var registerProblem: String? {
+        mode == .register && !password.isEmpty ? Core.passwordProblem(password, username: ManageRules.normalizeUsername(username)) : nil
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -78,7 +83,7 @@ struct LoginView: View {
                             .focused($focus, equals: .username)
                             .submitLabel(.next)
                             .onSubmit { focus = .password }
-                        SecureField("密码，至少 8 位", text: $password)
+                        SecureField("密码，至少 10 位，不要用常见密码", text: $password)
                             .textContentType(.newPassword)
                             .focused($focus, equals: .password)
                             .submitLabel(.next)
@@ -91,9 +96,13 @@ struct LoginView: View {
                     } header: {
                         Text("注册新账号")
                     } footer: {
-                        Text((ManageRules.usernameProblem(username) ?? "用户名" + ManageRules.usernameRule)
-                             + "。注册后在「设置 → Pushkey」新建 pushkey，就可以开始发消息。")
-                            .foregroundStyle(ManageRules.usernameProblem(username) == nil ? Theme.text2 : Theme.danger)
+                        if let p = registerProblem {
+                            Text(p).foregroundStyle(Theme.danger)
+                        } else {
+                            Text((ManageRules.usernameProblem(username) ?? "用户名" + ManageRules.usernameRule)
+                                 + "。注册后在「设置 → Pushkey」新建 pushkey，就可以开始发消息。")
+                                .foregroundStyle(ManageRules.usernameProblem(username) == nil ? Theme.text2 : Theme.danger)
+                        }
                     }
                 } else {
                     Section {
@@ -180,7 +189,7 @@ struct LoginView: View {
         if usePair && code.count != 6 { error = "配对码是 6 位数字"; return }
         if !usePair && (username.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty) { error = "请填写用户名和密码"; return }
         if mode == .register {
-            if let p = ManageRules.usernameProblem(username) ?? ManageRules.passwordProblem(password) { error = p; return }
+            if let p = ManageRules.usernameProblem(username) ?? registerProblem { error = p; return }
             if password != password2 { error = "两次输入的密码不一样"; return }
         }
         let deviceName = name.trimmingCharacters(in: .whitespaces).isEmpty ? UIDevice.current.name : name.trimmingCharacters(in: .whitespaces)

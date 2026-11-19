@@ -199,6 +199,7 @@ struct API {
 
     func info() async throws -> ServerInfo { try await decode(ServerInfo.self, "/v1/info", authed: false) }
 
+    /// 旧登录协议（发送密码原文）。App 登录已改走 E2E.login（新登录协议，docs/e2ee-client.md §2），这里只留给自检准备测试账号
     func login(username: String, password: String, name: String, fingerprint: String) async throws -> LoginResult {
         try await decode(LoginResult.self, "/v1/login", method: "POST", json: [
             "username": username, "password": password, "name": name, "platform": "ios", "fingerprint": fingerprint,
@@ -236,7 +237,9 @@ struct API {
         }
         let r: R
         do { r = try JSONCoding.decoder.decode(R.self, from: data) } catch { throw APIError.invalid("服务器返回的消息格式不对") }
-        return MessagePage(messages: r.messages ?? [], nextSince: r.next_since,
+        // 解密状态、附件钥匙只能由本机写入：服务端带来的一律丢弃
+        let msgs = (r.messages ?? []).map { m -> Message in var x = m; x.dropLocalFields(); return x }
+        return MessagePage(messages: msgs, nextSince: r.next_since,
                            latestBuild: h.legacyHeader("Latest-Build").flatMap { Int($0) },
                            changes: r.changes ?? [], changesNext: r.changes_next, changesReset: r.changes_reset ?? false,
                            changesEpoch: (r.changes_epoch?.isEmpty ?? true) ? nil : r.changes_epoch)
@@ -377,6 +380,20 @@ struct API {
         var hasher = SHA256()
         while let chunk = try h.read(upToCount: 1 << 20), !chunk.isEmpty { hasher.update(data: chunk) }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// 端到端加密的网络接入（E2E.swift）：照常带设备凭证、走同源跳转限制；HTTP 状态不在这里抛错，由 E2E.API 解释
+extension API: E2ETransport {
+    func e2eSend(_ method: String, _ path: String, query: [URLQueryItem], body: Data?) async throws -> E2E.Response {
+        var r = request(path, query: query, method: method)
+        if let body {
+            r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            r.httpBody = body
+        }
+        let (data, resp) = try await API.session.data(for: r)
+        guard let h = resp as? HTTPURLResponse else { throw APIError.invalid("非 HTTP 响应") }
+        return E2E.Response(status: h.statusCode, data: data, contentType: h.value(forHTTPHeaderField: "Content-Type") ?? "")
     }
 }
 

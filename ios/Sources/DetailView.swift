@@ -61,11 +61,16 @@ struct DetailView: View {
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(m.priority >= 5 ? Theme.danger : Theme.text)
                     .textSelection(.enabled)
-                Text([m.source, TimeText.full(m.createdAt), "#\(m.id)"].filter { !$0.isEmpty }.joined(separator: " · "))
+                // 端到端加密标记（docs/e2ee-client.md §6.3）：加密消息「🔒 端到端加密」；账号开启了加密、这条却是明文时显示 T63
+                Text(([m.source, TimeText.full(m.createdAt), "#\(m.id)"]
+                      + (m.isE2E ? ["🔒 端到端加密"] : model.e2eAccountEnabled ? [E2E.T.t63] : []))
+                    .filter { !$0.isEmpty }.joined(separator: " · "))
                     .font(.caption)
                     .foregroundStyle(Theme.text3)
                 Divider()
-                if let doc = m.renderDoc {
+                if m.e2eUnreadable {
+                    E2ELockedBody(message: m)
+                } else if let doc = m.renderDoc {
                     // 服务端 0.6.0 起：按解析好的 doc 绘制（表格、提示框、正文里的附件图片……）
                     DocView(doc: doc)
                         .environment(\.mdActions, stableActions(m, proxy: proxy))
@@ -73,7 +78,8 @@ struct DetailView: View {
                 } else if !m.desp.isEmpty {
                     MarkdownView(source: m.desp, plain: m.type == "text")
                 }
-                if !m.attachments.isEmpty {
+                // 还没解开的加密消息：附件是密文，没有钥匙，不显示也不下载
+                if !m.attachments.isEmpty && !m.e2eUnreadable {
                     Text("附件 \(m.attachments.count) 个").font(.footnote.weight(.medium)).foregroundStyle(Theme.text2)
                         .padding(.top, 6)
                     // 正文里已经显示过的图片，附件区照常列出但不再显示大图
@@ -232,7 +238,7 @@ struct AttachmentCard: View {
 
     private func status(_ s: AttState) -> String {
         switch s {
-        case .failed(let e): return "下载失败：\(e)"
+        case .failed(let e): return e == "解密失败" ? e : "下载失败：\(e)"
         case .downloading: return humanSize(a.size) + " · 下载中…"
         case .done: return humanSize(a.size) + " · 已校验"
         case .idle: return humanSize(a.size)

@@ -145,7 +145,7 @@ func messageSummary(_ m: Message, limit: Int = 160) -> String {
     return plainSummary(m.desp, type: m.type, limit: limit)
 }
 
-/// 列表预览缓存：消息内容不会变，按 id 缓存摘要，列表每次刷新（相对时间每 30 秒走一次）不再重新解析 Markdown
+/// 列表预览缓存：消息内容不会变（加密消息解开时由 forget 作废），按 id 缓存摘要，列表每次刷新（相对时间每 30 秒走一次）不再重新解析 Markdown
 enum PreviewCache {
     private static let cache: NSCache<NSNumber, NSString> = {
         let c = NSCache<NSNumber, NSString>()
@@ -157,6 +157,11 @@ enum PreviewCache {
     static func clear() { cache.removeAllObjects() }
 
     static func cached(_ id: Int64) -> Bool { cache.object(forKey: NSNumber(value: id)) != nil }
+
+    /// 内容变了的消息（加密消息解锁后解开）：丢掉旧摘要，下次重新算
+    static func forget(_ ids: [Int64]) {
+        for id in ids { cache.removeObject(forKey: NSNumber(value: id)) }
+    }
 
     static func summary(_ m: Message) -> String {
         if let s = cache.object(forKey: NSNumber(value: m.id)) { return s as String }

@@ -185,7 +185,8 @@ extension API {
     /// 给本机改名（0.4.2 起）
     func renameMe(_ name: String) async throws -> Me { try await decode(Me.self, "/v1/me", method: "PATCH", json: ["name": name]) }
 
-    /// 注册新账号（管理员开放注册后才可用，否则 403 并带说明）
+    /// 注册新账号（管理员开放注册后才可用，否则 403 并带说明）。旧协议（发送密码原文）：
+    /// App 注册已改走 E2E.login(register: true)（新登录协议，docs/e2ee-client.md §2.2），这个接口目前没有调用方
     func register(username: String, password: String, name: String, fingerprint: String) async throws -> LoginResult {
         try await decode(LoginResult.self, "/v1/register", method: "POST", json: [
             "username": username, "password": password, "name": name, "platform": "ios", "fingerprint": fingerprint,

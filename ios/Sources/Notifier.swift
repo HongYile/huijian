@@ -124,6 +124,20 @@ enum Notifier {
         }
     }
 
+    /// userInfo 里的标记：设备请求解锁加密消息（T50），点开进入设置 → 账户 →「端到端加密」
+    static let e2eKey = "e2e"
+
+    /// 有设备请求解锁加密消息（T50，docs/e2ee-client.md §5）。同一个请求只通知一次（调用方记录）
+    static func postE2ERequest(_ r: E2E.Request) {
+        let c = UNMutableNotificationContent()
+        c.title = "端到端加密"
+        c.body = E2E.T.t50(r.name.isEmpty ? "新设备" : r.name)
+        c.sound = .default
+        c.interruptionLevel = .active
+        c.userInfo = [e2eKey: true]
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "e2e-\(r.notifyKey)", content: c, trigger: nil))
+    }
+
     /// 打开了某条消息：撤掉它的通知和汇总
     static func opened(_ id: Int64) {
         UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [identifier(id), summaryID])

@@ -114,7 +114,7 @@ struct KeysView: View {
                     ForEach(active) { k in
                         NavigationLink {
                             KeyDetailView(key: k)
-                        } label: { KeyRow(key: k, mode: modes?[k.id]) }
+                        } label: { KeyRow(key: k, mode: modes?[k.id], sendKey: model.e2eSendKey(k.key)) }
                         .swipeActions(edge: .trailing) {
                             Button("吊销") { revokeTarget = k }.tint(Theme.danger)
                         }
@@ -123,6 +123,11 @@ struct KeysView: View {
                         }
                         .contextMenu {
                             Button { copySecret(k.key) } label: { Label("复制 key", systemImage: "doc.on.doc") }
+                            if case .key(let sk) = model.e2eSendKey(k.key) {
+                                Button { copySecret(sk); notice = .init(text: "已复制「\(k.name)」的加密发送密钥（只在本机，5 分钟后清除）") } label: {
+                                    Label("复制加密发送密钥", systemImage: "lock")
+                                }
+                            }
                             Button(role: .destructive) { revokeTarget = k } label: { Label("吊销…", systemImage: "nosign") }
                         }
                     }
@@ -167,7 +172,9 @@ struct KeysView: View {
         .refreshable { await reload() }
         .task {
             // 每次打开都拉一次（之前拉过的先显示着）
+            async let e2e: Void = model.refreshE2E()      // 加密发送密钥要用账号的公钥
             await reload()
+            await e2e
             if UserDefaults.standard.bool(forKey: "demoNewKey") { showNew = true }
         }
         .sheet(isPresented: $showNew) {
@@ -232,6 +239,8 @@ struct KeysView: View {
 private struct KeyRow: View {
     let key: PushKey
     let mode: String?
+    /// 加密发送密钥 <pushkey>.e2e.<钉住的公钥>（账号开启了端到端加密才有；没钉住 / 对不上时只显示说明）
+    var sendKey: E2E.SendKey = .hidden
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -242,6 +251,17 @@ private struct KeyRow: View {
             }
             Text(key.key).font(.caption.monospaced()).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.middle)
                 .strikethrough(key.isRevoked)
+            if !key.isRevoked, sendKey != .hidden {
+                Label {
+                    switch sendKey {
+                    case .key(let k): Text(k).font(.caption.monospaced()).lineLimit(1).truncationMode(.middle)
+                    case .mismatch: Text(E2E.T.t43).font(.caption).foregroundStyle(Theme.danger).lineLimit(2)
+                    default: Text("加密发送密钥：" + E2E.T.t73).font(.caption).lineLimit(2)
+                    }
+                } icon: { Image(systemName: "lock.fill") }
+                    .font(.caption).foregroundStyle(Theme.text2)
+                    .accessibilityLabel("加密发送密钥")
+            }
             if !key.isRevoked {
                 Text(key.last_used.map { "最近使用 " + TimeText.relative($0) } ?? "从未使用").font(.caption).foregroundStyle(Theme.text2)
             }
@@ -361,6 +381,10 @@ struct KeyDetailView: View {
                 }
             } header: { Text("Key") } footer: {
                 Text("创建于 \(key.created_at.map { TimeText.full($0) } ?? "—")；" + (key.last_used.map { "最近使用 \(TimeText.full($0))" } ?? "从未使用"))
+            }
+            // 账号开启了端到端加密：加密发送密钥 <pushkey>.e2e.<钉住的公钥>（docs/e2ee-client.md §7 第 1 项）
+            if !key.isRevoked && !gone {
+                E2ESendKeySection(sendKey: model.e2eSendKey(key.key)) { CopyField(text: $0, lines: 3) }
             }
             if let m = mode, !key.isRevoked, !gone {
                 Section {
@@ -522,6 +546,7 @@ struct AccountManageView: View {
             } else {
                 NoticeSection(notice: notice)
                 accountSection
+                if model.loggedIn { E2EEntrySection() }
                 PairCodeSection(onUsed: { Task { await load() } })
                 devicesSection
             }
@@ -534,7 +559,9 @@ struct AccountManageView: View {
         .refreshable { await load() }
         .task {
             if nameDraft.isEmpty { nameDraft = model.settings.deviceName }
+            async let e2e: Void = model.refreshE2E()
             await load()
+            await e2e
         }
         // 本机名在别处改了（设备列表随变更流刷新）：输入框里没改过的话跟着更新
         .onChange(of: currentName) { old, new in if nameDraft == old { nameDraft = new } }
@@ -567,7 +594,15 @@ struct AccountManageView: View {
                 }
             }
             .padding(.vertical, 2)
-            if hasPassword == true || model.canAdmin != false {
+            if hasPassword == nil {
+                // 还不知道账号有没有密码（/v1/me、账号详情都还没返回）：不能当成「设置初始密码」，先禁用（审查 M1）
+                HStack {
+                    Text("修改用户名和密码").foregroundStyle(Theme.text3)
+                    Spacer()
+                    ProgressView()
+                }
+                .accessibilityLabel("正在读取账号信息")
+            } else if hasPassword == true || model.canAdmin != false {
                 NavigationLink {
                     CredentialsView(hasPassword: hasPassword == true, initialName: name) { a in
                         notice = .init(text: "已保存")
@@ -778,14 +813,21 @@ private struct CredentialsView: View {
     @State private var busy = false
     @State private var error: String?
 
-    /// 已有密码、本机没有「允许管理」时，服务端要求当前密码
-    private var needCurrent: Bool { hasPassword && model.canAdmin != true }
+    /// 账号已有密码时一律要当前密码：改密码、改用户名都用当前密码派生的凭证核对（管理权限也不能免，docs/e2ee-client.md §2.4）
+    private var needCurrent: Bool { hasPassword }
+
+    /// 服务端支持新登录协议时，密码强度只能由客户端检查（服务器拿不到密码，docs/e2ee-client.md §2.2）
+    private var strengthProblem: String? {
+        guard !password.isEmpty else { return nil }
+        if model.e2eSupported { return Core.passwordProblem(password, username: ManageRules.normalizeUsername(username)) }
+        return ManageRules.passwordProblem(password)
+    }
 
     private var problem: String? {
         if let p = ManageRules.usernameProblem(username) { return p }
         if ManageRules.normalizeUsername(username).isEmpty { return "请填写用户名" }
-        if !hasPassword && password.isEmpty { return "请设置密码（至少 8 位）" }
-        if let p = ManageRules.passwordProblem(password) { return p }
+        if !hasPassword && password.isEmpty { return model.e2eSupported ? "请设置密码（至少 10 位，不要用常见密码）" : "请设置密码（至少 8 位）" }
+        if let p = strengthProblem { return p }
         if password != password2 { return "两次输入的密码不一样" }
         if needCurrent && current.isEmpty { return "请输入当前密码" }
         return nil
@@ -803,10 +845,16 @@ private struct CredentialsView: View {
                 }
             }
             Section {
-                SecureField(hasPassword ? "新密码（留空只改用户名）" : "密码，至少 8 位", text: $password).textContentType(.newPassword)
+                SecureField(hasPassword ? "新密码（留空只改用户名）" : (model.e2eSupported ? "密码，至少 10 位，不要用常见密码" : "密码，至少 8 位"),
+                            text: $password).textContentType(.newPassword)
                 SecureField("再输入一次", text: $password2).textContentType(.newPassword)
             } header: { Text(hasPassword ? "新密码" : "密码") } footer: {
-                Text(hasPassword ? "改密码后，已经登录的设备不受影响。" : "设置后可以在新设备上用用户名和密码登录。")
+                if let p = strengthProblem {
+                    Text(p).foregroundStyle(Theme.danger)
+                } else {
+                    Text(hasPassword ? (model.e2eAccountEnabled ? "改密码后，已经登录的设备不受影响；已开启加密时，新密码会重新锁住本机的钥匙。" : "改密码后，已经登录的设备不受影响。")
+                         : "设置后可以在新设备上用用户名和密码登录。")
+                }
             }
             if let error {
                 Section { Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(Theme.danger).font(.subheadline) }
@@ -833,7 +881,14 @@ private struct CredentialsView: View {
         error = nil
         defer { busy = false }
         do {
-            let a = try await model.setCredentials(username: username, password: password, current: needCurrent ? current : "")
+            let a: AccountInfo
+            if hasPassword {
+                // 服务端支持新登录协议时：不发密码原文，已开启加密时用新密码重新锁住本机的钥匙
+                a = try await model.changeCredentials(username: username, password: password, current: current)
+            } else {
+                // 初始密码只能以原文设置（服务端没有别的接口）：本机标记过「已升级」时拒绝（T1），否则设置后马上升级到新登录协议
+                a = try await model.setInitialCredentials(username: username, password: password)
+            }
             onSaved(a)
             dismiss()
         } catch {

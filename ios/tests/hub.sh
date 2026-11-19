@@ -2,7 +2,8 @@
 # 临时数据目录、127.0.0.1:28790（公网 API）/ 28791（管理后台），账号 me / demo-pass-1，
 # 4 把 pushkey、十几条演示消息（含图片、PDF、压缩包附件；一条覆盖全部回笺 Markdown 语法的报告，tests/markdown_demo.md），频道设置（train 改名「训练」并置顶、infra 静音、debug 隐藏），
 # 外加一个模拟 Bark 服务器（127.0.0.1:28799，请求记录在 $T/bark.log）。
-# 导出：PUB ADM DEMO_USER DEMO_PASS BARK_URL T HUB BARK_PID
+# 另有一个只给端到端加密联网自检用的账号 e2etest（管理后台创建，旧方式的密码；自检会开启加密、改掉它的密码）。
+# 导出：PUB ADM DEMO_USER DEMO_PASS E2E_USER E2E_PASS BARK_URL T HUB BARK_PID
 set -u
 B=../server/bin/huijian
 (cd ../server && GOTOOLCHAIN=local go build -o bin/huijian .) || { echo "❌ 服务端编译失败"; exit 1; }
@@ -27,6 +28,8 @@ key(){ curl -s -b $J -o /dev/null -w '%{redirect_url}' -H "Origin: $ADM" --data-
   | python3 -c "import sys,urllib.parse as u;print(u.parse_qs(u.urlparse(sys.stdin.read()).query)['key'][0])"; }
 K_TRAIN=$(key "训练脚本"); K_MON=$(key "服务器监控"); K_REP=$(key "周报机器人"); K_JOB=$(key "数据采集")
 curl -s -b $J -o /dev/null -H "Origin: $ADM" --data-urlencode "username=$DEMO_USER" -d password=$DEMO_PASS $ADM/accounts/1/credentials
+E2E_USER=e2etest; E2E_PASS=e2e-old-pass-1
+curl -s -b $J -o /dev/null -H "Origin: $ADM" --data-urlencode "username=$E2E_USER" -d password=$E2E_PASS $ADM/accounts
 p(){ $B push -u $PUB "$@" >/dev/null; }
 p -k $K_REP -p 3 -topic report -d "本周实验周报已生成" "周报已生成（10/06–10/12）"
 p -k $K_MON -p 2 -topic infra "nightly backup ok · 1.9 GB → NAS"

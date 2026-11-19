@@ -2,10 +2,14 @@ import Foundation
 
 struct Attachment: Codable, Hashable, Identifiable {
     let id: String
-    let name: String
-    let mime: String
-    let size: Int64
+    // 加密消息解开后，名字、类型、大小换成载荷里的（见 Message.applyE2E）
+    var name: String
+    var mime: String
+    var size: Int64
+    /// 服务端文件的 sha256（加密附件是密文的），下载后校验
     let sha256: String
+    /// 端到端加密的附件钥匙（来自解密后的载荷，和消息一起保存）；明文附件为 nil
+    var key: String? = nil
 
     var isImage: Bool {
         let ext = (name as NSString).pathExtension.lowercased()
@@ -23,6 +27,7 @@ struct Attachment: Codable, Hashable, Identifiable {
         mime = (try? c.decodeIfPresent(String.self, forKey: .mime)) ?? "application/octet-stream"
         size = (try? c.decodeIfPresent(Int64.self, forKey: .size)) ?? 0
         sha256 = (try? c.decodeIfPresent(String.self, forKey: .sha256)) ?? ""
+        key = try? c.decodeIfPresent(String.self, forKey: .key)
     }
 }
 
@@ -31,12 +36,13 @@ struct Message: Codable, Hashable, Identifiable {
     let topic: String
     let thread: String
     let priority: Int
-    let type: String
-    let text: String
-    let desp: String
+    // 加密消息解开后，标题、正文、类型、附件换成载荷里的（见 applyE2E）
+    var type: String
+    var text: String
+    var desp: String
     let source: String
     let createdAt: Date
-    let attachments: [Attachment]
+    var attachments: [Attachment]
     /// 发送这条消息的 pushkey（系统消息为 nil）
     var pushkeyID: Int64?
     /// 服务端按本机规则（key 设为静默、频道静音 / 隐藏、在别的设备上使用中）标记为不提醒
@@ -48,6 +54,51 @@ struct Message: Codable, Hashable, Identifiable {
     var doc: MDDoc?
     /// 服务端 0.6.0 起：纯文本预览（≤200 字），列表摘要优先用它
     var preview = ""
+    /// 0.7.0 起：端到端加密的信封（hje1.…）。保留原文，锁定期间收到的消息解锁后重新解密
+    var e2e: String?
+    /// 本机解密结果：ok 已解开 / locked 本机没有私钥 / wrong_key 别的钥匙加密的 / format 已损坏；nil = 还没处理（或明文消息）
+    var e2eStatus: String?
+
+    /// 端到端加密的消息
+    var isE2E: Bool { !(e2e ?? "").isEmpty }
+    /// 加密消息还没解开（标题是 T60 / T61 / T62，附件是密文）
+    var e2eUnreadable: Bool { isE2E && e2eStatus != "ok" }
+
+    /// 套用解密结果（docs/e2ee-client.md §6.1）：解开时用载荷里的标题、正文、类型和附件（下载仍用服务端的 id 和密文 sha256），
+    /// 本地解析的 doc / preview；解不开时标题显示占位文字、正文为空，服务端的附件（密文）原样保留，解锁后重新解密
+    mutating func applyE2E(_ r: E2E.OpenResult) {
+        e2eStatus = r.code
+        guard case .ok(let o) = r else {
+            text = E2E.placeholder(r.code)
+            desp = ""
+            doc = nil
+            preview = ""
+            return
+        }
+        text = o.text
+        desp = o.desp
+        type = o.type
+        doc = o.doc.flatMap { try? JSONDecoder().decode(MDDoc.self, from: $0) }
+        preview = o.preview
+        attachments = attachments.map { a in
+            guard let x = o.atts.first(where: { $0.id == a.id }) else { return a }
+            var b = a
+            b.name = x.name
+            b.mime = x.mime
+            b.size = x.size
+            b.key = x.key
+            return b
+        }
+    }
+
+    /// 服务端响应里的消息：丢掉只能在本机产生的字段（解密状态、附件钥匙），docs/e2ee-client.md §1「本地字段不能来自服务器」。
+    /// 否则被攻破的服务器可以带上 e2e_status=ok 和自己写的文字，冒充一条已解开的 🔒 消息
+    mutating func dropLocalFields() {
+        e2eStatus = nil
+        if attachments.contains(where: { $0.key != nil }) {
+            attachments = attachments.map { var a = $0; a.key = nil; return a }
+        }
+    }
 
     /// 正文按服务端的 doc 绘制（type=text 的消息一律按纯文本）。doc 里一个认识的块都没有时退回本地解析 desp（和安卓一致）
     var renderDoc: MDDoc? {
@@ -58,8 +109,9 @@ struct Message: Codable, Hashable, Identifiable {
     var title: String { text.isEmpty ? (attachments.first?.name ?? "（无标题）") : text }
 
     enum CodingKeys: String, CodingKey {
-        case id, topic, thread, priority, type, text, desp, source, attachments, silent, archive, doc, preview
+        case id, topic, thread, priority, type, text, desp, source, attachments, silent, archive, doc, preview, e2e
         case createdAt = "created_at"
+        case e2eStatus = "e2e_status"
         case pushkeyID = "pushkey_id"
         case silentReason = "silent_reason"
     }
@@ -84,6 +136,9 @@ struct Message: Codable, Hashable, Identifiable {
         archive = (try? c.decodeIfPresent(Int.self, forKey: .archive)) ?? 0
         doc = try? c.decodeIfPresent(MDDoc.self, forKey: .doc)
         preview = (try? c.decodeIfPresent(String.self, forKey: .preview)) ?? ""
+        e2e = try? c.decodeIfPresent(String.self, forKey: .e2e)
+        if e2e?.isEmpty == true { e2e = nil }
+        e2eStatus = try? c.decodeIfPresent(String.self, forKey: .e2eStatus)
     }
 }
 
