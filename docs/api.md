@@ -164,12 +164,13 @@ iPhone 客户端用 GBox 等工具自签安装，用不了苹果推送。锁屏�
 
 **设备批准的核对码**（先承诺、后揭晓，防止服务器挑选能碰出相同核对码的公钥冒充新设备）：
 
-1. 新设备 B 生成随机 32 字节 `nb`，`PUT /v1/e2e/device {"pub", "request": true, "commit"}`，`commit` = SHA-256(`huijian e2e v1 commit` ‖ B 公钥 ‖ nb)；
+1. 新设备 B 生成随机 32 字节 `nb`，`PUT /v1/e2e/device {"pub", "request": true, "commit"}`，`commit` = SHA-256(`huijian e2e v1 commit` ‖ B 公钥 ‖ 账号公钥 ‖ nb)。「账号公钥」是 B 认定的账号公钥（`keys` 里唯一一把 active 钥匙，或 B 以前钉住的那把）；揭晓时服务端用账号当前 active 的钥匙核对承诺；
 2. 已解锁的设备 A 在 `requests` 里看到请求（带 `commit`），生成随机 32 字节 `na`，`POST /v1/e2e/challenge`。A 必须只用**自己生成**的 na；
 3. B 在 `device.challenge` 里看到 na 后 `POST /v1/e2e/reveal {nonce: nb}`。每个 nb 只揭晓一次：揭晓之后 na 变了，就整个请求重来（新的 nb）；
-4. A 在 `requests[].reveal` 里拿到 nb，先核对 commit，两边各自显示核对码 = SHA-256(`huijian e2e v1 sas` ‖ B 公钥 ‖ na ‖ nb) 前 4 字节大端整数 mod 10⁶，补足 6 位。用户核对一致后 A 才 `grant`。
+4. A 在 `requests[].reveal` 里拿到 nb，用**自己私钥算出的**账号公钥核对 commit，两边各自显示核对码 = SHA-256(`huijian e2e v1 sas` ‖ B 公钥 ‖ 账号公钥 ‖ na ‖ nb) 前 4 字节大端整数 mod 10⁶，补足 6 位。用户核对一致后 A 才 `grant`；
+5. B 只在揭晓之后才接受 grant，而且解开的私钥对应的公钥必须等于承诺里的账号公钥。这样服务器既不能冒充 B，也不能伪造 grant 塞给 B 一把自己的私钥。
 
-公钥、na、nb 都是 32 字节，base64url 传输。测试向量里的 `sas_*` 字段可以用来核对实现。
+公钥、账号公钥、na、nb 都是 32 字节，base64url 传输。测试向量里的 `sas_*` 字段可以用来核对实现。
 
 | 请求 | 说明 |
 |---|---|

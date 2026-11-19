@@ -29,10 +29,10 @@
  "recovery_code_bytes": "6875696a69616e2d7265636f76657279",
  "recovery_key": "2d0d65f46986a95be4169431c0e8b0f1b670267a4531acc15062ab1452bc0752",
  "recovery_wrap": "hjr1.Zml4ZWQtbm9uY2Uhz87_YFYuyYddWA-8J66N0Bq4XvdtYeEGI3n8BRGHemf_fc653WJqxTcE4lz3Bp71",
- "sas_code": "426708",
- "sas_commit": "9a37972248b56a7005db0712930a2a184058506f392a0aa386295d933531861c",
+ "sas_code": "872494",
+ "sas_commit": "4959f02d6d13750dcb894c664efaa142dce5f88865cd449533004ba72ee8a749",
  "sas_nonce_a": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
  "sas_nonce_b": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
- "sas_rule": "commit = SHA-256(\"huijian e2e v1 commit\" ‖ device_pk ‖ nb)；code = SHA-256(\"huijian e2e v1 sas\" ‖ device_pk ‖ na ‖ nb) 前 4 字节大端 mod 1000000，补足 6 位",
+ "sas_rule": "commit = SHA-256(\"huijian e2e v1 commit\" ‖ device_pk ‖ account_pk ‖ nb)；code = SHA-256(\"huijian e2e v1 sas\" ‖ device_pk ‖ account_pk ‖ na ‖ nb) 前 4 字节大端 mod 1000000，补足 6 位",
  "wrap_nonce": "66697865642d6e6f6e636521"
 }

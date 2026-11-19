@@ -166,8 +166,8 @@ fn dispatch(m: &Map<String, Value>) -> R {
             }
             Ok(json!({"data": b64(&sk)}))
         }
-        "sas_commit" => Ok(json!({"commit": b64(&crypto::sas_commit(&key32(m, "pub")?, &key32(m, "nonce")?))})),
-        "sas_code" => Ok(json!({"code": crypto::sas_code(&key32(m, "pub")?, &key32(m, "na")?, &key32(m, "nb")?)})),
+        "sas_commit" => Ok(json!({"commit": b64(&crypto::sas_commit(&key32(m, "pub")?, &key32(m, "account")?, &key32(m, "nonce")?))})),
+        "sas_code" => Ok(json!({"code": crypto::sas_code(&key32(m, "pub")?, &key32(m, "account")?, &key32(m, "na")?, &key32(m, "nb")?)})),
 
         // ---------- 消息与附件 ----------
         "open_message" => {

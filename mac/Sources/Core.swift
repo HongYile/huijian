@@ -100,13 +100,14 @@ enum Core {
         try str(try call("grant_open", ["sk": deviceSK, "grant": grant]), "data")
     }
 
-    static func sasCommit(pub: String, nonce: String) throws -> String {
-        try str(try call("sas_commit", ["pub": pub, "nonce": nonce]), "commit")
+    /// 核对码的承诺。pub 是新设备公钥；account 是新设备看到的账号公钥（批准设备用自己私钥算出的公钥）
+    static func sasCommit(pub: String, account: String, nonce: String) throws -> String {
+        try str(try call("sas_commit", ["pub": pub, "account": account, "nonce": nonce]), "commit")
     }
 
     /// 6 位核对码（字符串，保留前导 0）
-    static func sasCode(pub: String, na: String, nb: String) throws -> String {
-        try str(try call("sas_code", ["pub": pub, "na": na, "nb": nb]), "code")
+    static func sasCode(pub: String, account: String, na: String, nb: String) throws -> String {
+        try str(try call("sas_code", ["pub": pub, "account": account, "na": na, "nb": nb]), "code")
     }
 
     // MARK: 消息与附件

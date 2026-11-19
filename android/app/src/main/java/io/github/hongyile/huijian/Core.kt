@@ -86,10 +86,13 @@ object Core {
     /** 本机（设备私钥 deviceSk）解开转交来的账号私钥 */
     fun grantOpen(deviceSk: String, grant: String): String = call("grant_open", mapOf("sk" to deviceSk, "grant" to grant)).str("data")
 
-    fun sasCommit(pub: String, nonce: String): String = call("sas_commit", mapOf("pub" to pub, "nonce" to nonce)).str("commit")
+    /** 核对码的承诺。pub 是新设备公钥；account 是新设备看到的账号公钥（批准设备用自己私钥算出的公钥） */
+    fun sasCommit(pub: String, account: String, nonce: String): String =
+        call("sas_commit", mapOf("pub" to pub, "account" to account, "nonce" to nonce)).str("commit")
 
     /** 6 位核对码（字符串，保留前导 0） */
-    fun sasCode(pub: String, na: String, nb: String): String = call("sas_code", mapOf("pub" to pub, "na" to na, "nb" to nb)).str("code")
+    fun sasCode(pub: String, account: String, na: String, nb: String): String =
+        call("sas_code", mapOf("pub" to pub, "account" to account, "na" to na, "nb" to nb)).str("code")
 
     // ---------- 消息与附件 ----------
 

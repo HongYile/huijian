@@ -398,8 +398,17 @@ func (s *Store) RevealNonce(d *Device, nb []byte) error {
 		return errors.New("现在不能揭晓：请求不存在、还没有设备接手，或已经揭晓过（请重新请求）")
 	}
 	raw, err := b64.DecodeString(pub)
-	if err != nil || b64.EncodeToString(e2eCommit(raw, nb)) != commit {
+	if err != nil {
 		return errors.New("随机数和承诺对不上")
+	}
+	match := false // 承诺里含新设备看到的账号公钥：必须是账号现在启用的某把钥匙
+	for _, k := range s.E2EKeys(d.UserID) {
+		if acc, err := b64.DecodeString(k.Pub); err == nil && k.Active && b64.EncodeToString(e2eCommit(raw, acc, nb)) == commit {
+			match = true
+		}
+	}
+	if !match {
+		return errors.New("随机数和承诺对不上（或者新设备看到的账号公钥不对）")
 	}
 	res, err := s.db.Exec(`UPDATE devices SET e2e_nb=? WHERE id=? AND e2e_na=? AND e2e_nb=''`, b64.EncodeToString(nb), d.ID, na)
 	if err != nil {

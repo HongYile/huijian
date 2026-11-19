@@ -220,25 +220,30 @@ func e2eCipherSize(n int64) int64 {
 //
 // 只用「新设备公钥的哈希」算 6 位码不安全：被攻破的服务器可以生成大量自己的密钥对，几秒内挑出核对码相同的一个冒充新设备。
 // 所以用「先承诺、后揭晓」（ZRTP / Signal 的做法）：
-//  1. 新设备生成随机数 nb，只交出承诺 commit = SHA-256("huijian e2e v1 commit" ‖ 公钥 ‖ nb)；
+//  1. 新设备生成随机数 nb，只交出承诺 commit = SHA-256("huijian e2e v1 commit" ‖ 公钥 ‖ 账号公钥 ‖ nb)；
 //  2. 批准设备看到承诺后，生成自己的随机数 na 交给对方（只用自己生成的这个 na，不用服务器给的）；
 //  3. 新设备看到 na 后揭晓 nb（每个 nb 只揭晓一次：na 变了就整个请求重来）；
-//  4. 两边都算 sas = SHA-256("huijian e2e v1 sas" ‖ 公钥 ‖ na ‖ nb) 前 4 字节大端 mod 10⁶，补足 6 位。
+//  4. 两边都算 sas = SHA-256("huijian e2e v1 sas" ‖ 公钥 ‖ 账号公钥 ‖ na ‖ nb) 前 4 字节大端 mod 10⁶，补足 6 位。
 // 中间人必须在看到 na 之前定下自己的 nb，没法反复试，每次冒充只有百万分之一的机会，而且失败会被用户看到。
-// 公钥、na、nb 都固定 32 字节。
+// 「账号公钥」是新设备发请求时从服务器读到的账号公钥，批准设备用自己私钥算出的公钥核对：
+// 服务器给新设备看假的账号公钥时，承诺对不上、批准设备自动拒绝；新设备只接受私钥和这把公钥配对的 grant，
+// 这样服务器也没法伪造 grant 塞给新设备一把它自己的私钥（hjg1 谁都能加密给新设备）。
+// 公钥、账号公钥、na、nb 都固定 32 字节。
 
-func e2eCommit(pub, nb []byte) []byte {
+func e2eCommit(pub, account, nb []byte) []byte {
 	h := sha256.New()
 	h.Write([]byte("huijian e2e v1 commit"))
 	h.Write(pub)
+	h.Write(account)
 	h.Write(nb)
 	return h.Sum(nil)
 }
 
-func e2eSAS(pub, na, nb []byte) string {
+func e2eSAS(pub, account, na, nb []byte) string {
 	h := sha256.New()
 	h.Write([]byte("huijian e2e v1 sas"))
 	h.Write(pub)
+	h.Write(account)
 	h.Write(na)
 	h.Write(nb)
 	return fmt.Sprintf("%06d", binary.BigEndian.Uint32(h.Sum(nil)[:4])%1000000)

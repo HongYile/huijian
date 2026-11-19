@@ -79,9 +79,13 @@ fn vectors_through_api() {
 
     // 核对码
     let dev_pub = ok(json!({"op": "public_key", "sk": dev}))["pub"].clone();
+    let acc = v["recipient_pk_b64url"].clone();
     let (na, nb) = (hex_to_b64(v["sas_nonce_a"].as_str().unwrap()), hex_to_b64(v["sas_nonce_b"].as_str().unwrap()));
-    assert_eq!(ok(json!({"op": "sas_commit", "pub": dev_pub, "nonce": nb}))["commit"], hex_to_b64(v["sas_commit"].as_str().unwrap()));
-    assert_eq!(ok(json!({"op": "sas_code", "pub": dev_pub, "na": na, "nb": nb}))["code"], v["sas_code"]);
+    assert_eq!(ok(json!({"op": "sas_commit", "pub": dev_pub, "account": acc, "nonce": nb}))["commit"], hex_to_b64(v["sas_commit"].as_str().unwrap()));
+    assert_eq!(ok(json!({"op": "sas_code", "pub": dev_pub, "account": acc, "na": na, "nb": nb}))["code"], v["sas_code"]);
+    // 账号公钥不同，核对码和承诺都不同；缺 account 是请求错误
+    assert_ne!(ok(json!({"op": "sas_code", "pub": dev_pub, "account": dev_pub, "na": na, "nb": nb}))["code"], v["sas_code"]);
+    err(json!({"op": "sas_code", "pub": dev_pub, "na": na, "nb": nb}), "bad_request");
 }
 
 #[test]

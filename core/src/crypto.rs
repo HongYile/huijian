@@ -312,11 +312,18 @@ pub fn parse_recovery(s: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-pub fn sas_commit(pub_key: &[u8; 32], nb: &[u8; 32]) -> [u8; 32] {
-    Sha256::new().chain_update(b"huijian e2e v1 commit").chain_update(pub_key).chain_update(nb).finalize().into()
+/// 核对码的承诺：pub 是新设备公钥，account 是新设备看到的账号公钥（见 server/e2e.go 的说明）
+pub fn sas_commit(pub_key: &[u8; 32], account: &[u8; 32], nb: &[u8; 32]) -> [u8; 32] {
+    Sha256::new().chain_update(b"huijian e2e v1 commit").chain_update(pub_key).chain_update(account).chain_update(nb).finalize().into()
 }
 
-pub fn sas_code(pub_key: &[u8; 32], na: &[u8; 32], nb: &[u8; 32]) -> String {
-    let h = Sha256::new().chain_update(b"huijian e2e v1 sas").chain_update(pub_key).chain_update(na).chain_update(nb).finalize();
+pub fn sas_code(pub_key: &[u8; 32], account: &[u8; 32], na: &[u8; 32], nb: &[u8; 32]) -> String {
+    let h = Sha256::new()
+        .chain_update(b"huijian e2e v1 sas")
+        .chain_update(pub_key)
+        .chain_update(account)
+        .chain_update(na)
+        .chain_update(nb)
+        .finalize();
     format!("{:06}", u32::from_be_bytes(h[..4].try_into().unwrap()) % 1_000_000)
 }

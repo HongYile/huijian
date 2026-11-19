@@ -267,9 +267,9 @@ func TestE2EVectors(t *testing.T) {
 		"grant_aad":           "hjg1",
 		"sas_nonce_a":         hex.EncodeToString(sasNA),
 		"sas_nonce_b":         hex.EncodeToString(sasNB),
-		"sas_commit":          hex.EncodeToString(e2eCommit(dev.PublicKey().Bytes(), sasNB)),
-		"sas_code":            e2eSAS(dev.PublicKey().Bytes(), sasNA, sasNB),
-		"sas_rule":            "commit = SHA-256(\"huijian e2e v1 commit\" ‖ device_pk ‖ nb)；code = SHA-256(\"huijian e2e v1 sas\" ‖ device_pk ‖ na ‖ nb) 前 4 字节大端 mod 1000000，补足 6 位",
+		"sas_commit":          hex.EncodeToString(e2eCommit(dev.PublicKey().Bytes(), sk.PublicKey().Bytes(), sasNB)),
+		"sas_code":            e2eSAS(dev.PublicKey().Bytes(), sk.PublicKey().Bytes(), sasNA, sasNB),
+		"sas_rule":            "commit = SHA-256(\"huijian e2e v1 commit\" ‖ device_pk ‖ account_pk ‖ nb)；code = SHA-256(\"huijian e2e v1 sas\" ‖ device_pk ‖ account_pk ‖ na ‖ nb) 前 4 字节大端 mod 1000000，补足 6 位",
 	}
 	got, _ := json.MarshalIndent(vec, "", " ")
 	const path = "testdata/e2e_vectors.json"

@@ -276,7 +276,15 @@ func TestE2EFlow(t *testing.T) {
 	nb, na := make([]byte, 32), make([]byte, 32)
 	rand.Read(nb)
 	rand.Read(na)
-	commit := b64of(e2eCommit(skC.PublicKey().Bytes(), nb))
+	acc := sk.PublicKey().Bytes()
+	{ // 承诺用了假的账号公钥（被冒充的服务器给新设备看了自己的公钥）：揭晓被拒
+		bad := b64of(e2eCommit(skC.PublicKey().Bytes(), skC.PublicKey().Bytes(), nb))
+		e.must(200, "PUT", "/v1/e2e/device", tokC, map[string]any{"pub": pubC, "request": true, "commit": bad})
+		e.must(200, "POST", "/v1/e2e/challenge", tokA, map[string]any{"device_id": dC.ID, "nonce": b64of(na)})
+		e.must(409, "POST", "/v1/e2e/reveal", tokC, map[string]any{"nonce": b64of(nb)})
+		e.must(200, "POST", "/v1/e2e/deny", tokA, map[string]any{"device_id": dC.ID})
+	}
+	commit := b64of(e2eCommit(skC.PublicKey().Bytes(), acc, nb))
 	e.must(400, "PUT", "/v1/e2e/device", tokC, map[string]any{"pub": pubC, "request": true})
 	e.must(200, "PUT", "/v1/e2e/device", tokC, map[string]any{"pub": pubC, "request": true, "commit": commit})
 	reqs := e.must(200, "GET", "/v1/e2e", tokA, nil)["requests"].([]any)
@@ -296,7 +304,7 @@ func TestE2EFlow(t *testing.T) {
 	e.must(409, "POST", "/v1/e2e/reveal", tokC, map[string]any{"nonce": b64of(nb)}) // 只能揭晓一次
 	r0 := e.must(200, "GET", "/v1/e2e", tokA, nil)["requests"].([]any)[0].(map[string]any)
 	gotNB, _ := b64.DecodeString(r0["reveal"].(string))
-	if b64of(e2eCommit(skC.PublicKey().Bytes(), gotNB)) != commit || e2eSAS(skC.PublicKey().Bytes(), na, gotNB) != e2eSAS(skC.PublicKey().Bytes(), na, nb) {
+	if b64of(e2eCommit(skC.PublicKey().Bytes(), acc, gotNB)) != commit || e2eSAS(skC.PublicKey().Bytes(), acc, na, gotNB) != e2eSAS(skC.PublicKey().Bytes(), acc, na, nb) {
 		t.Fatal("两边核对码不一致")
 	}
 	if own := e.must(200, "GET", "/v1/e2e", tokC, nil)["requests"].([]any); len(own) != 0 {

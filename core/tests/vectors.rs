@@ -94,6 +94,6 @@ fn huijian_vectors() {
 
     // 核对码
     let (na, nb) = (arr(&v["sas_nonce_a"]), arr(&v["sas_nonce_b"]));
-    assert_eq!(hex(&sas_commit(&public_key(&dev), &nb)), v["sas_commit"].as_str().unwrap());
-    assert_eq!(sas_code(&public_key(&dev), &na, &nb), v["sas_code"].as_str().unwrap());
+    assert_eq!(hex(&sas_commit(&public_key(&dev), &public_key(&sk), &nb)), v["sas_commit"].as_str().unwrap());
+    assert_eq!(sas_code(&public_key(&dev), &public_key(&sk), &na, &nb), v["sas_code"].as_str().unwrap());
 }
