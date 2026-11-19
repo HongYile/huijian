@@ -40,6 +40,9 @@ const (
 	maxManageIDs  = 1000
 	changeDelete  = "delete"
 	changeArchive = "archive"
+	// 0.7.0 起：「删除服务器上的明文消息」删掉的消息。服务器上已经没有了，但各设备已同步的本地副本应当保留：
+	// 客户端收到后把这些 id 记为「仅本机保留」，不删本地副本，对账时也跳过（不认识这个 kind 的旧客户端照常忽略）
+	changePurge = "purge"
 	// 0.6.1 起：账号设置的变更（id 都是 0），客户端收到后重新拉取对应的设置
 	changeKeys    = "keys"    // pushkey 新建、改名、换 key、吊销、删除
 	changeDevices = "devices" // 设备加入、改名、移除、管理权限（只有本机能改的接收规则、离开静音、Bark 设置不广播）
@@ -136,6 +139,11 @@ func recordChanges(tx *sql.Tx, userID int64, ids []int64, kind string, state int
 
 // DeleteMessages 删除这个账号的消息，返回不再被任何附件引用的文件（相对路径），由调用方删除文件
 func (s *Store) DeleteMessages(userID int64, ids []int64) (deleted int, orphans []string, err error) {
+	return s.deleteMessagesAs(userID, ids, changeDelete)
+}
+
+// deleteMessagesAs：删除并按 kind（delete / purge）记变更
+func (s *Store) deleteMessagesAs(userID int64, ids []int64, kind string) (deleted int, orphans []string, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, nil, err
@@ -166,7 +174,7 @@ func (s *Store) DeleteMessages(userID int64, ids []int64) (deleted int, orphans 
 	if _, err := tx.Exec(`DELETE FROM messages WHERE id IN (`+ph+`)`, args...); err != nil {
 		return 0, nil, err
 	}
-	if err := recordChanges(tx, userID, own, changeDelete, 0); err != nil {
+	if err := recordChanges(tx, userID, own, kind, 0); err != nil {
 		return 0, nil, err
 	}
 	// 旧版本的附件可能按内容共用一个文件：还有别的附件引用的不删（blob 有索引，分批查）
@@ -371,7 +379,11 @@ func (h *Hub) handleDeleteMessages(w http.ResponseWriter, r *http.Request, d *De
 }
 
 func (h *Hub) deleteMessages(userID int64, ids []int64) (int, error) {
-	n, orphans, err := h.st.DeleteMessages(userID, ids)
+	return h.deleteMessagesAs(userID, ids, changeDelete)
+}
+
+func (h *Hub) deleteMessagesAs(userID int64, ids []int64, kind string) (int, error) {
+	n, orphans, err := h.st.deleteMessagesAs(userID, ids, kind)
 	if err != nil {
 		return 0, err
 	}

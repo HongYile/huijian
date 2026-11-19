@@ -477,7 +477,7 @@ func (h *Hub) handleE2EDeletePlain(w http.ResponseWriter, r *http.Request, d *De
 	total := 0
 	for len(ids) > 0 {
 		n := min(len(ids), 500)
-		k, err := h.deleteMessages(d.UserID, ids[:n])
+		k, err := h.deleteMessagesAs(d.UserID, ids[:n], changePurge) // 其他设备保留本地副本
 		if err != nil {
 			apiErr(w, 500, "删除失败")
 			return

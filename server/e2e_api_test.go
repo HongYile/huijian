@@ -384,6 +384,18 @@ func TestE2EFlow(t *testing.T) {
 			t.Fatalf("明文消息还在：%v", m)
 		}
 	}
+	// 记的是 purge（其他设备保留本地副本），不是普通 delete
+	var kinds []string
+	rows, _ := e.h.st.db.Query(`SELECT kind FROM msg_changes WHERE user_id=? AND msg_id>0 AND kind IN ('delete','purge')`, alice.ID)
+	for rows.Next() {
+		var k string
+		rows.Scan(&k)
+		kinds = append(kinds, k)
+	}
+	rows.Close()
+	if len(kinds) != 1 || kinds[0] != "purge" {
+		t.Fatalf("删除明文应记 purge 变更：%v", kinds)
+	}
 	// 数据库文件（含 WAL）里也找不到删掉的明文
 	for _, f := range []string{"t.db", "t.db-wal"} {
 		if b, err := os.ReadFile(filepath.Join(e.h.dataDir, f)); err == nil && bytes.Contains(b, []byte("plain-1")) {

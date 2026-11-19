@@ -183,7 +183,7 @@ iPhone 客户端用 GBox 等工具自签安装，用不了苹果推送。锁屏�
 | `POST /v1/e2e/deny` | 拒绝：`{"device_id"}` |
 | `PUT /v1/e2e/recovery` | 换恢复码：`{"recovery_wrap", "current_password" / "current_password_key" / "current_auth_key"}`，旧恢复码立即失效 |
 | `PATCH /v1/e2e` | `{"e2e_only": true/false}`：只接受加密消息 |
-| `POST /v1/e2e/delete-plain` | `{"confirm": true}` → `{"deleted"}`：删除服务器上本账号的全部明文消息（加密消息不动；各设备已同步的本地副本照常保留，同步到删除变更后由客户端自行决定）。数据库开启了 `secure_delete`，删除后数据库文件里不残留原文；**之前做的备份不受影响**，需要的话请自行删除旧备份 |
+| `POST /v1/e2e/delete-plain` | `{"confirm": true}` → `{"deleted"}`：删除服务器上本账号的全部明文消息（加密消息不动）。删掉的消息记为 `kind: "purge"` 的变更（不是 `delete`），各设备保留已同步的本地副本。数据库开启了 `secure_delete`，删除后数据库文件里不残留原文；**之前做的备份不受影响**，需要的话请自行删除旧备份 |
 
 有设备请求批准、批准或拒绝后，同账号的长轮询会收到 `kind: "e2e"` 的变更（id 0），客户端重新 `GET /v1/e2e`。移除设备时，转交给它的副本一并删除。
 
@@ -242,7 +242,7 @@ iPhone 客户端用 GBox 等工具自签安装，用不了苹果推送。锁屏�
 
 **多设备同步**：长轮询 `GET /v1/messages` 加上 `changes_since=<游标>` 后，响应多三个字段：
 
-- `changes`：游标之后本账号的删除 / 归档变更，`[{"seq": 41, "id": 123, "kind": "delete"}, {"seq": 42, "id": 124, "kind": "archive", "state": 1}]`；
+- `changes`：游标之后本账号的删除 / 归档变更，`[{"seq": 41, "id": 123, "kind": "delete"}, {"seq": 42, "id": 124, "kind": "archive", "state": 1}]`；0.7.0 起还有 `kind: "purge"`：「删除服务器上的明文消息」删掉的消息，服务器上已经没有了，但客户端应当**保留**已同步的本地副本（记为「仅本机保留」，对账时也不删）；
 - `changes_next`：下一次请求用的游标；
 - `changes_reset`：为 `true` 时游标已经失效（离线超过 90 天、变更记录已清理，或服务端数据库从备份恢复过），客户端应调用 `GET /v1/messages/state` 重新对账，再用返回的 `changes_next` 继续。
 
