@@ -1,0 +1,5 @@
+# 构建产物和本地配置（build.local.env 里可能有私人服务器地址，永远不要提交）
+build/
+build.local.env
+test-run/
+screenshots/

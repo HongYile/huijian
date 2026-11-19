@@ -1,0 +1,4 @@
+# 回笺自己的代码：安装时就预编译（Compose 等库自带的规则由 profileinstaller 一起打包）。
+# 回笺代码量小，全部预编译的代价只是安装后多占几百 KB，换来冷启动和首次滑动列表不用边解释边编译。
+HSPLio/github/hongyile/huijian/**->**(**)**
+Lio/github/hongyile/huijian/**;

@@ -1,0 +1,24 @@
+# 构建产物
+server/bin/
+mac/build/
+mac/build
+mac/build.noindex/
+*.ipa
+# 运行与测试数据
+data/
+server/tests/run/
+server/tests/web-shots/
+mac/test-run*/
+deploy/docker/.env
+# 密钥（永远不要提交）
+secrets/
+*.token
+*.env
+!deploy/docker/.env.example
+# 系统文件
+.DS_Store
+mac/screenshots/
+*.result.txt
+server/huijian
+server/hongyan
+__pycache__/

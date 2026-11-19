@@ -1,0 +1,58 @@
+# 回笺公网入口（nginx）。只转发公开接口，管理后台（8791）不在这里出现。
+# 证书可用 certbot：certbot certonly --webroot -w /var/www/certbot -d push.example.com
+log_format huijian_safe '$remote_addr [$time_local] "$request_method $uri" $status $body_bytes_sent $request_time';  # 不记录查询参数，避免 pushkey 落盘
+limit_req_zone $binary_remote_addr zone=huijian_push:10m rate=5r/s;
+limit_req_zone $binary_remote_addr zone=huijian_pair:1m rate=10r/m;
+
+upstream huijian {
+    server 127.0.0.1:8790;   # 若服务端在另一台机器（例如经 WireGuard），改成它的内网地址
+    keepalive 8;
+}
+
+server {
+    listen 80;
+    server_name push.example.com;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name push.example.com;
+    ssl_certificate     /etc/letsencrypt/live/push.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/push.example.com/privkey.pem;
+
+    access_log /var/log/nginx/huijian.access.log huijian_safe;
+    error_log  /var/log/nginx/huijian.error.log crit;   # error 级日志会带完整请求行（含 pushkey）
+
+    client_max_body_size 512m;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_connect_timeout 5s;
+
+    location = /message/push {                 # 发送：大文件流式透传
+        limit_req zone=huijian_push burst=20 nodelay;
+        proxy_request_buffering off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_pass http://huijian;
+    }
+    location = /v1/pair {                      # 设备配对：严格限速
+        limit_req zone=huijian_pair burst=5 nodelay;
+        proxy_pass http://huijian;
+    }
+    location = /v1/stream {                    # SSE（可选）
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_pass http://huijian;
+    }
+    location /v1/ {                            # 消息拉取（长轮询）、附件下载（支持 Range）
+        proxy_buffering off;
+        proxy_read_timeout 660s;               # 比长轮询最长等待（HUIJIAN_LONGPOLL_MAX，默认 600 秒）长
+        proxy_pass http://huijian;
+    }
+    location = /healthz { proxy_pass http://huijian; }
+    location / { return 404; }
+}

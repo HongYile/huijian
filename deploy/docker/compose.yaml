@@ -1,0 +1,68 @@
+# 回笺 Huijian —— docker compose
+# 最简部署（一台有公网 IP 的服务器即可，不需要域名）：
+#   cp .env.example .env      # 把 HUIJIAN_PUBLIC_URL 改成 http://你的公网IP:8790
+#   docker compose up -d --build
+#   docker exec huijian huijian admin-link     # 打印管理后台的一次性登录链接
+# 记得在云服务器的安全组 / 防火墙里放行 8790 和 8791 端口。
+services:
+  huijian:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        GOPROXY: "${GOPROXY:-https://proxy.golang.org,direct}"
+    image: huijian:latest
+    container_name: huijian
+    restart: unless-stopped
+    ports:
+      - "${HUIJIAN_PUBLIC_PORT:-${HONGYAN_PUBLIC_PORT:-8790}}:8790"   # 消息 API：发送方、Mac 客户端连这个端口
+      - "${HUIJIAN_ADMIN_BIND:-${HONGYAN_ADMIN_BIND:-0.0.0.0}}:${HUIJIAN_ADMIN_PORT:-${HONGYAN_ADMIN_PORT:-8791}}:8791"   # 管理后台；只想内网访问就把 HUIJIAN_ADMIN_BIND 设为 127.0.0.1
+    environment:
+      HUIJIAN_PUBLIC_ADDR: "0.0.0.0:8790"
+      HUIJIAN_ADMIN_ADDR: "0.0.0.0:8791"
+      HUIJIAN_PUBLIC_URL: "${HUIJIAN_PUBLIC_URL:-${HONGYAN_PUBLIC_URL:-}}"            # 例如 http://1.2.3.4:8790，或 https://push.example.com
+      HUIJIAN_ADMIN_URL: "${HUIJIAN_ADMIN_URL:-${HONGYAN_ADMIN_URL:-}}"              # 留空则自动推导为 http://<同一主机>:8791
+      HUIJIAN_TRUSTED_PROXY: "${HUIJIAN_TRUSTED_PROXY:-${HONGYAN_TRUSTED_PROXY:-172.16.0.0/12}}"   # 只采信 docker 网段（例如同机 nginx）传来的 X-Real-IP；公网客户端不在此网段，伪造无效
+      HUIJIAN_MAX_UPLOAD_MB: "${HUIJIAN_MAX_UPLOAD_MB:-${HONGYAN_MAX_UPLOAD_MB:-512}}"
+      HUIJIAN_PUSH_PER_MIN: "${HUIJIAN_PUSH_PER_MIN:-${HONGYAN_PUSH_PER_MIN:-60}}"
+      HUIJIAN_LONGPOLL_MAX: "${HUIJIAN_LONGPOLL_MAX:-${HONGYAN_LONGPOLL_MAX:-600}}"     # 长轮询最长挂起秒数；反向代理读超时要比它长
+      HUIJIAN_PUBLIC_PORT: "${HUIJIAN_PUBLIC_PORT:-${HONGYAN_PUBLIC_PORT:-8790}}"      # 对外端口，用来推导页面上显示的地址
+      HUIJIAN_ADMIN_PORT: "${HUIJIAN_ADMIN_PORT:-${HONGYAN_ADMIN_PORT:-8791}}"
+      HUIJIAN_ADMIN_BIND: "${HUIJIAN_ADMIN_BIND:-${HONGYAN_ADMIN_BIND:-0.0.0.0}}"      # 宿主机绑定地址；为 127.0.0.1 时登录链接指向本机（SSH 隧道）
+      HUIJIAN_FILES: "${HUIJIAN_FILES:-${HONGYAN_FILES:-}}"                      # 附件目录（容器内路径）；放 NAS 时设为 /files 并映射 HUIJIAN_FILES_HOST_DIR
+      HUIJIAN_BACKUP_DIR: "${HUIJIAN_BACKUP_DIR:-${HONGYAN_BACKUP_DIR:-}}"            # 备份目录（容器内路径）；默认 /data/backups，放 NAS / 另一块盘时设为 /backup
+      HUIJIAN_BACKUP_AT: "${HUIJIAN_BACKUP_AT:-${HONGYAN_BACKUP_AT:-03:30}}"
+      HUIJIAN_BACKUP_KEEP: "${HUIJIAN_BACKUP_KEEP:-${HONGYAN_BACKUP_KEEP:-14}}"
+      HUIJIAN_SERVER_UPDATE: "${HUIJIAN_SERVER_UPDATE:-${HONGYAN_SERVER_UPDATE:-1}}"          # 服务端一键更新（管理后台「设置」）；0 关闭
+      HUIJIAN_SERVER_UPDATE_REPO: "${HUIJIAN_SERVER_UPDATE_REPO:-${HONGYAN_SERVER_UPDATE_REPO:-}}"  # 留空 = HongYile/huijian
+      HUIJIAN_SERVER_UPDATE_PUBKEY: "${HUIJIAN_SERVER_UPDATE_PUBKEY:-${HONGYAN_SERVER_UPDATE_PUBKEY:-}}"
+      HUIJIAN_SERVER_UPDATE_API: "${HUIJIAN_SERVER_UPDATE_API:-${HONGYAN_SERVER_UPDATE_API:-}}"
+      HUIJIAN_SERVER_UPDATE_PROXY: "${HUIJIAN_SERVER_UPDATE_PROXY:-${HONGYAN_SERVER_UPDATE_PROXY:-}}"    # 只给服务端更新用的下载代理；管理后台里也能设置（优先）
+      HUIJIAN_SERVER_UPDATE_MIRROR: "${HUIJIAN_SERVER_UPDATE_MIRROR:-${HONGYAN_SERVER_UPDATE_MIRROR:-}}"  # 下载镜像前缀，例如 https://ghproxy.example/；有签名校验，镜像不可信也没关系
+      HUIJIAN_SERVER_UPDATE_GITHUB_TOKEN: "${HUIJIAN_SERVER_UPDATE_GITHUB_TOKEN:-${HONGYAN_SERVER_UPDATE_GITHUB_TOKEN:-}}"  # 可选：GitHub 令牌（无需任何权限），API 额度 60 → 5000 次/小时
+      TZ: "${TZ:-}"                                            # 时区，例如 Asia/Shanghai；影响备份时间和附件目录的日期
+    volumes:
+      # 数据库、附件、管理令牌。默认用命名卷；0.4.0 以前用 ./data 目录的部署，在 .env 里设 HUIJIAN_DATA_DIR=./data 继续使用原数据
+      - ${HUIJIAN_DATA_DIR:-${HONGYAN_DATA_DIR:-huijian-data}}:/data
+      # 附件、备份可以映射到 NAS 或另一块磁盘（宿主机目录需要对容器用户 uid 10001 可写）；不设置时是两个空的命名卷，不会用到
+      - ${HUIJIAN_FILES_HOST_DIR:-${HONGYAN_FILES_HOST_DIR:-huijian-files}}:/files
+      - ${HUIJIAN_BACKUP_HOST_DIR:-${HONGYAN_BACKUP_HOST_DIR:-huijian-backup}}:/backup
+    # 下载代理在宿主机上时（bridge 网络），取消下一行注释，代理填 http://host.docker.internal:7890
+    # extra_hosts: ["host.docker.internal:host-gateway"]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+# 卷名可在 .env 里指定：从改名前的「鸿雁」升级时填旧卷名（docker volume ls 查看），继续使用原数据
+volumes:
+  huijian-data:
+    name: ${HUIJIAN_DATA_VOLUME:-huijian-data}
+  huijian-files:
+    name: ${HUIJIAN_FILES_VOLUME:-huijian-files}
+  huijian-backup:
+    name: ${HUIJIAN_BACKUP_VOLUME:-huijian-backup}

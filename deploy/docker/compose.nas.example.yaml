@@ -1,0 +1,20 @@
+# 附件和备份放到 NAS（推荐写法）
+#
+# 用法：宿主机先把 NAS 挂载到 /mnt/nas（见 docs/deploy.md「附件和备份放到 NAS」），然后
+#   cp compose.nas.example.yaml compose.override.yaml    # docker compose 会自动合并 compose.override.yaml
+#   docker compose up -d
+#
+# 映射的是整个挂载点而不是里面的子目录，并开启 rslave 传播：
+#   - NAS 比容器晚挂载上（开机顺序、NAS 重启）时，容器里也能马上看到，不用重启容器；
+#   - NAS 没挂上时，下面两个目录不存在，服务端把新附件先存在本地数据目录，NAS 恢复后自动搬回去。
+services:
+  huijian:
+    environment:
+      HUIJIAN_FILES: /nas/huijian/files        # 容器内路径 = /nas + 宿主机 /mnt/nas 下的相对路径
+      HUIJIAN_BACKUP_DIR: /nas/huijian/backup
+    volumes:
+      - type: bind
+        source: /mnt/nas                       # 宿主机上的 NAS 挂载点（必须是已存在的目录）
+        target: /nas
+        bind:
+          propagation: rslave

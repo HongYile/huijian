@@ -1,0 +1,349 @@
+{
+  "v": 1,
+  "blocks": [
+    {
+      "type": "heading",
+      "level": 1,
+      "runs": [
+        {
+          "text": "实验 exp42 完成"
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "runs": [
+        {
+          "text": "注意：",
+          "b": true
+        },
+        {
+          "text": "这是中文加粗补救，"
+        },
+        {
+          "text": "旧方案",
+          "s": true
+        },
+        {
+          "text": "已废弃。\n第二行直接换行，"
+        },
+        {
+          "text": "斜体",
+          "i": true
+        },
+        {
+          "text": "、"
+        },
+        {
+          "text": "code",
+          "code": true
+        },
+        {
+          "text": "、"
+        },
+        {
+          "text": "链接",
+          "href": "https://example.com"
+        },
+        {
+          "text": "、"
+        },
+        {
+          "text": "https://github.com",
+          "href": "https://github.com"
+        },
+        {
+          "text": " 自动链接。"
+        }
+      ]
+    },
+    {
+      "type": "progress",
+      "text": "15000/20000",
+      "value": 0.75,
+      "label": "训练进度"
+    },
+    {
+      "type": "table",
+      "align": [
+        "left",
+        "right",
+        "center"
+      ],
+      "head": [
+        [
+          {
+            "text": "模型"
+          }
+        ],
+        [
+          {
+            "text": "val_loss"
+          }
+        ],
+        [
+          {
+            "text": "用时"
+          }
+        ]
+      ],
+      "rows": [
+        [
+          [
+            {
+              "text": "base",
+              "b": true
+            }
+          ],
+          [
+            {
+              "text": "0.231"
+            }
+          ],
+          [
+            {
+              "text": "3h"
+            }
+          ]
+        ],
+        [
+          [
+            {
+              "text": "large"
+            }
+          ],
+          [
+            {
+              "text": "0.198"
+            }
+          ],
+          [
+            {
+              "text": "6h"
+            }
+          ]
+        ]
+      ]
+    },
+    {
+      "type": "image",
+      "att": "a_1",
+      "alt": "损失曲线",
+      "name": "loss.png",
+      "mime": "image/png",
+      "size": 1000
+    },
+    {
+      "type": "paragraph",
+      "runs": [
+        {
+          "text": "完整报告见 "
+        },
+        {
+          "text": "report.pdf",
+          "att": "a_2"
+        },
+        {
+          "text": "，上次结果 "
+        },
+        {
+          "text": "#12",
+          "href": "huijian://message/12"
+        },
+        {
+          "text": "。"
+        }
+      ]
+    },
+    {
+      "type": "callout",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "runs": [
+            {
+              "text": "清理 /data 下的旧 checkpoint"
+            }
+          ]
+        }
+      ],
+      "kind": "warning",
+      "title": "磁盘 95%"
+    },
+    {
+      "type": "callout",
+      "blocks": [
+        {
+          "type": "code",
+          "text": "step 1 loss 2.3"
+        }
+      ],
+      "kind": "note",
+      "title": "完整日志",
+      "fold": "closed"
+    },
+    {
+      "type": "quote",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "runs": [
+            {
+              "text": "普通引用"
+            }
+          ]
+        },
+        {
+          "type": "quote",
+          "blocks": [
+            {
+              "type": "paragraph",
+              "runs": [
+                {
+                  "text": "嵌套引用"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "list",
+      "tight": true,
+      "items": [
+        {
+          "check": true,
+          "blocks": [
+            {
+              "type": "paragraph",
+              "runs": [
+                {
+                  "text": "数据清洗"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "check": false,
+          "blocks": [
+            {
+              "type": "paragraph",
+              "runs": [
+                {
+                  "text": "评估"
+                }
+              ]
+            },
+            {
+              "type": "list",
+              "ordered": true,
+              "start": 1,
+              "tight": true,
+              "items": [
+                {
+                  "blocks": [
+                    {
+                      "type": "paragraph",
+                      "runs": [
+                        {
+                          "text": "子项一"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "blocks": [
+                    {
+                      "type": "paragraph",
+                      "runs": [
+                        {
+                          "text": "子项二"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "list",
+      "ordered": true,
+      "start": 3,
+      "tight": true,
+      "items": [
+        {
+          "blocks": [
+            {
+              "type": "paragraph",
+              "runs": [
+                {
+                  "text": "从三开始"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "blocks": [
+            {
+              "type": "paragraph",
+              "runs": [
+                {
+                  "text": "第四"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rule"
+    },
+    {
+      "type": "paragraph",
+      "runs": [
+        {
+          "text": "脚注测试"
+        },
+        {
+          "text": "1",
+          "fn": 1
+        },
+        {
+          "text": "，\u003cb\u003eHTML\u003c/b\u003e 不渲染\n换行。"
+        }
+      ]
+    },
+    {
+      "type": "code",
+      "lang": "python",
+      "text": "print(\"hi\")"
+    },
+    {
+      "type": "footnotes",
+      "items": [
+        {
+          "n": 1,
+          "blocks": [
+            {
+              "type": "paragraph",
+              "runs": [
+                {
+                  "text": "这是脚注。"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
