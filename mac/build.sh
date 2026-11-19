@@ -37,8 +37,11 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # 图标：Resources/AppIcon.icns 由 design/icon/make.py 生成（改图标后重新运行它）
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 SDK=$(xcrun --sdk macosx --show-sdk-path)
+# 共用核心（Rust：端到端加密、Markdown 解析）编译成静态库，链接进 App；-dead_strip 去掉用不到的部分
+../core/build.sh mac > /dev/null
+CORE=(-I ../core/include -L ../core/target/aarch64-apple-darwin/release -Xlinker -dead_strip)
 # -wmo：全模块优化（跨文件内联、去虚化）
-xcrun swiftc -sdk "$SDK" -target arm64-apple-macos14.0 -swift-version 5 -O -wmo \
+xcrun swiftc -sdk "$SDK" -target arm64-apple-macos14.0 -swift-version 5 -O -wmo "${CORE[@]}" \
   -module-name Huijian Sources/*.swift -o "$APP/Contents/MacOS/Huijian"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

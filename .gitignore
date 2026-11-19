@@ -22,3 +22,7 @@ mac/screenshots/
 server/huijian
 server/hongyan
 __pycache__/
+
+# Rust 共用核心的编译产物（core/build.sh 生成）
+core/target/
+android/app/src/main/jniLibs/

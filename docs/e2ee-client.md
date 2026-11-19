@@ -1,0 +1,272 @@
+# 端到端加密：客户端实现规格
+
+> 给 Mac、iPhone、安卓（以后 Windows）客户端的开发者。三端按这份规格实现，行为和文案保持一致。
+> 设计与安全理由见 [e2ee.md](e2ee.md)，服务端接口见 [api.md](api.md)「端到端加密」「新登录协议」。
+
+## 0. 共用核心
+
+所有密码学计算都调用共用核心（`core/`，Rust），不在各端自己实现：
+
+| 端 | 封装 | 构建 |
+|---|---|---|
+| Mac / iPhone | `Sources/Core.swift`（两端同一份） | `build.sh` 里自动执行 `../core/build.sh mac / ios / ios-sim`，静态链接 |
+| 安卓 | `Core.kt` | Gradle 任务 `buildCore` 自动执行 `core/build.sh android`，生成 `jniLibs/arm64-v8a/libhuijian_core.so` |
+
+操作一览见 `core/src/api.rs` 开头的注释。约定：钥匙、随机数、凭证是 base64url（无填充）字符串，盐是十六进制。
+Argon2id 一次约 0.1–0.4 秒、占 64 MiB 内存：**不要在主线程调用**，也不要并发调用多次。
+
+## 1. 本地存储
+
+| 内容 | 存放位置 | 说明 |
+|---|---|---|
+| 账号私钥（可能多把，按 kid 区分） | Mac / iPhone：钥匙串（`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`，不同步 iCloud）；安卓：和登录 token 相同的 Keystore 加密存储 | 按「服务器 + 账号 id」区分；退出登录、设备被移除时删除 |
+| 等待批准时生成的设备钥匙对 | 同上 | 拿到转交的私钥后删除 |
+| 「这个服务器上的这个账号已升级」标记 | 普通偏好设置（不是秘密） | 按「服务器地址 + 用户名（小写）」记，退出登录也**不删** |
+| 解密后的消息内容 | 和现在的本地消息缓存一样 | 同时保留信封原文 `e2e`，解锁后可以重新解密 |
+| 解密后的附件 | 和现在的附件缓存一样，用真实文件名 | 密文下载完、解密成功后删除密文 |
+
+钥匙串 / Keystore 读写失败时，不要崩溃：当作「未解锁」处理，并在加密页显示原因。
+
+## 2. 登录、注册、自动升级
+
+服务端没有 `e2e` 功能（`/v1/info` 的 features 里没有，或 `GET /v1/prelogin` 返回纯文本 404）时，按原来的方式登录。但如果这个账号已经标记为「已升级」，就拒绝登录，并显示 **T1**。
+
+### 2.1 账号密码登录
+
+1. `GET /v1/prelogin?username=`。
+2. 返回 `kdf: argon2id`：
+   - 先核对参数。`time`=3、`memory_kib`=65536、`lanes`=1，`salt` 至少 16 字节（32 位十六进制），否则拒绝并显示 **T2**。
+   - 用 `Core.passwordKeys(密码, salt)` 算出 `auth_key` 和 `unlock_key`，发送 `POST /v1/login {username, auth_key, name, platform, fingerprint}`。
+3. 返回 `kdf: pbkdf2-sha256`：
+   - 如果本地标记该账号「已升级」，拒绝并显示 **T1**。
+   - 否则用 `Core.pbkdf2(密码, salt, iterations)` 算出 `password_key`（轮数不够时核心库报 weak_params，显示 **T2**），发送 `POST /v1/login {username, password_key, …}`。
+4. **从不**发送 `password` 原文。只有一个例外：服务端没有 `e2e` 功能，且账号从未升级过。
+5. 登录响应 `426`：显示服务端给的说明（「请把回笺更新到最新版」类）。
+6. 用 argon2 登录成功后：
+   - 把账号标记为「已升级」。
+   - 如果响应里 `e2e.enabled`，并且有 `e2e.password_wrap`，执行 `Core.unwrap("hjp1", unlock_key, password_wrap)` 得到私钥，再按 **§4.5** 核对后保存。
+   - unwrap 失败（例如管理员重设过密码）时进入「已锁定」状态，不阻止登录。
+7. 用 PBKDF2 登录成功后，**立即自动升级**：
+   1. 先 `GET /v1/e2e`。如果 `enabled` 为真（说明管理员重设过密码，旧的密码副本已失效），先不升级，进入「已锁定」状态，等用户解锁后在 **§4.4** 里完成。
+   2. 否则 `salt = Core.newSalt()`，`(auth, unlock) = Core.passwordKeys(密码, salt)`，发送 `PUT /v1/account/auth {current_password_key, auth_salt: salt, auth_key: auth}`。
+   3. 成功后标记「已升级」。
+   4. 失败不影响登录，下次登录再试。
+
+`unlock_key` 只在内存里用完即弃，不落盘。
+
+### 2.2 注册
+
+1. 先用 `Core.passwordProblem(密码, 用户名)` 检查密码强度，不合格时把原因显示在密码框下面。
+2. 新协议注册：`salt = Core.newSalt()`，`(auth, _) = Core.passwordKeys(密码, salt)`，发送 `POST /v1/register {username, auth_key, auth_salt: salt, name, platform, fingerprint}`。
+3. 成功后标记「已升级」。
+
+### 2.3 配对码登录
+
+和原来一样。登录后，如果账号已开启加密，这台设备处于「已锁定」状态（它从没输过密码）。
+
+### 2.4 「当前密码」凭证（改密码、开启加密、换恢复码等需要核对当前密码的地方）
+
+`GET /v1/prelogin?username=<自己的用户名>`，按 2.1 的规则算出 `current_auth_key`（argon2）或 `current_password_key`（pbkdf2），同样核对参数、同样遵守「已升级」标记。服务端返回 `403` 时显示 **T3**。
+
+## 3. 加密状态
+
+加密页和消息列表都根据 `GET /v1/e2e` 和本地私钥算出状态：
+
+| 状态 | 条件 | 表现 |
+|---|---|---|
+| 未开启 | `enabled` 为假 | 加密页显示「开启端到端加密」入口 |
+| 已解锁 | `enabled` 为真，本机有私钥，且对应的公钥是 `keys` 里某把 `active` 的钥匙 | 正常解密 |
+| 已锁定 | `enabled` 为真，本机没有可用的私钥 | 消息列表顶部显示横幅 **T10**，点开进入解锁页（§4） |
+
+刷新时机：
+- 登录后；
+- App 回到前台；
+- 长轮询收到 `kind: "e2e"` 的变更时（同时可能有新的批准请求，见 §5）；
+- 加密页打开期间每 3 秒一次（只在等待批准、等待核对时）。
+
+入口位置：
+- Mac：设置 →「加密」标签页；
+- iPhone：设置 → 账户 →「端到端加密」；
+- 安卓：设置 →「端到端加密」。
+
+## 4. 开启加密与解锁
+
+### 4.1 开启加密（`POST /v1/e2e/setup`）
+
+页面文案见 **T20**。
+
+1. 表单：
+   - 当前密码；
+   - 「同时换一个新密码（推荐）」复选框，默认勾选；
+   - 勾选时显示新密码和确认新密码。
+2. 检查：
+   - 实际使用的密码（勾选时为新密码，不勾选时为当前密码）必须通过 `Core.passwordProblem`。
+   - 当前密码不合格又没勾选换密码时，提示「当前密码不够安全，请换一个新密码」，并自动勾选。
+3. 计算（在后台线程）：
+   - `kp = Core.keypair()`
+   - `salt = Core.newSalt()`；`(auth, unlock) = Core.passwordKeys(实际密码, salt)`
+   - `password_wrap = Core.wrap("hjp1", unlock, kp.sk)`
+   - `(code, rkey) = Core.recoveryNew()`；`recovery_wrap = Core.wrap("hjr1", rkey, kp.sk)`
+   - 「当前密码」凭证按 §2.4 计算
+4. `POST /v1/e2e/setup {pub: kp.pub, auth_salt: salt, auth_key: auth, password_wrap, recovery_wrap, current_…}`。返回 `409` 表示别的设备刚开启过，重新读取状态。
+5. 成功后：
+   - 保存 `kp.sk`，标记「已升级」；
+   - 进入「保存恢复码」页（**T21**）：大字等宽显示 `code`，提供复制按钮；
+   - 必须勾选「我已把恢复码保存好」才能点「完成」；
+   - 恢复码只显示这一次，不保存在本机。
+6. 完成后提示 **T22**，告诉用户去 Pushkey 页复制加密发送密钥。
+
+### 4.2 用密码解锁（配对码登录的设备，`POST /v1/e2e/unlock`）
+
+输入密码 → 按 §2.4 算出 auth_key 和 unlock_key → `POST /v1/e2e/unlock {auth_key}` → 用返回的 `password_wrap` 执行 `Core.unwrap("hjp1", unlock, …)` → 按 §4.5 核对后保存。
+
+失败情况：
+- `403`：显示 **T3**。
+- `409`（密码副本已失效）：显示服务端说明，并引导用户使用另外两种方式。
+
+### 4.3 请另一台设备批准（新设备一侧）
+
+1. `dev = Core.keypair()`，保存 dev 钥匙对；`nb = Core.random32()`；`commit = Core.sasCommit(dev.pub, nb)`。
+2. `PUT /v1/e2e/device {pub: dev.pub, request: true, commit}`。nb 只存在内存里，App 重启后从第 1 步重来。
+3. 显示等待页 **T30**，每 3 秒（以及收到 e2e 变更时）`GET /v1/e2e`，看 `device` 字段：
+   - `challenge` 非空，且还没揭晓：发送 `POST /v1/e2e/reveal {nonce: nb}`，然后显示核对码 `Core.sasCode(dev.pub, challenge, nb)`（**T31**，按 3+3 位显示，例如 `482 913`）。
+   - 已揭晓后 `challenge` 变了：说明对方重新开始，回到第 1 步（生成新的 nb，重新 PUT）。
+   - `grant` 非空：执行 `Core.grantOpen(dev.sk, grant)` 得到私钥，按 §4.5 核对后保存，删除 dev 钥匙对，显示「已解锁」。
+   - `requested` 变成假且没有 grant：说明被拒绝了，显示 **T32**。
+4. 用户可以点「取消」：发送 `PUT /v1/e2e/device {pub: dev.pub, request: false}`。
+
+### 4.4 用恢复码解锁
+
+1. 输入恢复码（**T40**），执行 `Core.recoveryKey(输入)`，格式不对时显示核心库给的说明。
+2. 用 `GET /v1/e2e` 里的 `recovery_wrap` 执行 `Core.unwrap("hjr1", key, …)`。失败时显示 **T41**。
+3. 按 §4.5 核对后保存。
+4. 解锁后（包括 §4.3 的批准）如果 `auth_key` 为假，或者 `has_password_wrap` 为假：
+   - 说明管理员重设过密码，账号回到了旧登录方式，或者密码副本已失效；
+   - 引导用户进入「重新设置密码」页（**T42**）：输入当前密码（管理员重设后的密码）、新密码、确认新密码；
+   - 发送 `PUT /v1/account/auth {current_…, auth_salt, auth_key, password_wrap}`，`password_wrap` 用新密码的 unlock 锁住本机私钥。
+
+### 4.5 保存私钥前的核对（必须）
+
+用 `Core.publicKey(sk)` 算出公钥，核对它是 `GET /v1/e2e`（或登录响应）的 `keys` 里一把 `active` 的钥匙。对不上就丢弃，并显示 **T43**。这一步防止被攻破的服务器塞给你一把它自己的钥匙。
+
+## 5. 批准其他设备（已解锁设备一侧）
+
+- `GET /v1/e2e` 的 `requests` 非空时：
+  - 加密页显示「等待批准的设备」列表，每项显示设备名、平台、请求时间；
+  - 系统通知 **T50**，同一个请求只通知一次。
+- 点「批准」：
+  1. `na = Core.random32()`（只用自己生成的随机数），发送 `POST /v1/e2e/challenge {device_id, nonce: na}`。返回 `409` 说明请求已被别的设备接手，显示 **T51**。
+  2. 等待对方揭晓：每 3 秒（以及收到 e2e 变更时）刷新，直到这项请求出现 `reveal`。
+  3. 核对 `Core.sasCommit(request.pub, reveal) == request.commit`。不一致时：
+     - 立即发送 `POST /v1/e2e/deny {device_id}`；
+     - 显示 **T52**。
+  4. 显示核对码 `Core.sasCode(request.pub, na, reveal)`（**T53**），两个按钮：「一致，批准」「不一致，拒绝」。
+  5. 点「一致，批准」：
+     - `grant = Core.grantSeal(sk: 账号私钥, to: request.pub)`；
+     - 发送 `POST /v1/e2e/grant {device_id, pub: request.pub, grant}`；
+     - 返回 `409` 时显示服务端说明（对方取消了或换了公钥）。
+  6. 点「不一致，拒绝」：发送 `POST /v1/e2e/deny {device_id}`。
+- 点「拒绝」（不核对，直接拒绝）：发送 `POST /v1/e2e/deny {device_id}`。
+
+## 6. 收消息
+
+### 6.1 解密
+
+消息带 `e2e` 字段（信封 `hje1.…`）时：
+
+1. 已解锁：调用 `Core.openMessage(keys: 本账号全部私钥, envelope)`，得到 `{v, text, desp, type, atts}`。
+   - 显示用载荷里的 `text`、`desp`、`type`（`markdown` / `text` / `image`），忽略服务端给的占位文字、`doc` 和 `preview`。
+   - 附件：载荷 `atts[i]` 对应服务端 `attachments[i]`（按顺序）。显示用载荷里的 `name`、`mime`、`size`，下载用服务端的 `id`。附件钥匙 `key` 和消息一起保存，解密附件时要用。
+   - Markdown：`type` 不是 `text` 且正文非空时，调用 `Core.mdBuild(text, desp, atts: [{id: 服务端附件 id, name, mime, size}])`，得到 `doc` 和 `preview`，用现有的 doc 渲染代码显示，和服务端解析的明文消息一模一样。
+2. 已锁定，或解密失败：
+   - 标题显示 **T60**，正文为空；保留 `e2e` 原文。
+   - 解锁后把所有还没解开的消息重新解密一遍。
+   - `wrong_key`：可能是换过钥匙、本机没有那把旧钥匙，显示 **T61**。
+   - `format`：显示 **T62**。
+3. 解密在后台线程做（单条约 0.1 ms，批量同步时也要避免阻塞界面）。
+
+### 6.2 通知
+
+- 本机弹出的通知（Mac、安卓，以及 iPhone 在前台时）用解密后的标题和预览。
+- 未解锁时，通知标题显示 **T60**。
+- 优先级、频道、线程不加密，按原规则提醒。
+
+### 6.3 标记
+
+| 情况 | 列表 | 详情页 |
+|---|---|---|
+| 加密消息 | 标题前一个小锁图标（SF Symbol `lock.fill` / Material `Lock`），弱化颜色 | 元信息行显示「🔒 端到端加密」 |
+| 账号已开启加密，但这条是明文 | 一个「未加密」灰色小徽章 | 元信息行显示 **T63** |
+| 账号未开启加密 | 不显示任何标记 | 不显示任何标记 |
+
+### 6.4 附件
+
+1. 下载密文：`GET /v1/att/{id}`。`X-Huijian-Sha256` 是**密文**的哈希，照常校验。
+2. 校验通过后，调用 `Core.decryptFile(key, 密文, 目标文件)`：
+   - 目标文件用载荷里的真实文件名；
+   - 成功后删除密文；
+   - 失败时删除临时文件，附件卡片显示「解密失败」。
+3. 自动下载的大小上限按载荷里的 `size` 判断。密文比明文略大，大约多 0.03%。
+
+## 7. 设置项（已开启并已解锁）
+
+1. **加密发送密钥**：Pushkey 页每把 key 下面多一行「加密发送密钥」，内容是 `<pushkey>.e2e.<公钥>`，其中公钥取 `keys` 里 `active` 的那把的 `pub`（43 个字符）。
+   - 提供复制按钮，旁边的说明见 **T70**。
+   - 账号未开启加密时不显示这一行。
+2. **只接受加密消息**：开关，对应 `PATCH /v1/e2e {e2e_only}`，说明见 **T71**。
+3. **更换恢复码**：先输入当前密码，然后：
+   - `(code, rkey) = Core.recoveryNew()`，`recovery_wrap = Core.wrap("hjr1", rkey, sk)`；
+   - 发送 `PUT /v1/e2e/recovery {recovery_wrap, current_…}`；
+   - 进入「保存恢复码」页（同 4.1）。
+4. **删除服务器上的明文消息**：二次确认（**T72**）后发送 `POST /v1/e2e/delete-plain {confirm: true}`，显示删除了多少条。本机已同步的明文消息保留。
+5. **改密码**（已升级的账号，替换原来的改密码表单）：
+   - 新密码先过 `Core.passwordProblem`；
+   - `salt = newSalt`，`(auth, unlock) = passwordKeys(新密码, salt)`；
+   - 已开启加密时 `password_wrap = wrap("hjp1", unlock, sk)`。本机处于锁定状态时不能改，提示先解锁；
+   - 发送 `PUT /v1/account/auth {current_auth_key, auth_salt, auth_key, password_wrap}`。
+   - 只改用户名时：`POST /v1/account/credentials {username, current_auth_key}`。
+6. 状态行：「已开启 · 钥匙 <kid 前 8 位>」，以及「恢复码：已设置 / 未设置」（看 `recovery_wrap` 是否非空）。
+
+## 8. 退出登录、设备被移除
+
+删除本机为这个账号保存的全部私钥和设备钥匙对。「已升级」标记不删。
+
+## 9. 文案
+
+| 编号 | 文案 |
+|---|---|
+| T1 | 这个账号已经升级到新的登录方式，服务器却要求用旧方式登录。可能有人冒充服务器，已停止登录。 |
+| T2 | 服务器给的密码保护参数不安全，已拒绝登录。可能有人冒充服务器。 |
+| T3 | 密码不对 |
+| T10 | 🔒 加密消息已锁定：点这里解锁 |
+| T20 | 标题「开启端到端加密」。说明：开启后，新消息的标题、正文和附件只有你登录过的设备能解开，服务器和备份里只有密文。发送端要换成「加密发送密钥」才会加密。旧消息保持原样。 |
+| T21 | 标题「保存恢复码」。说明：忘记密码、又没有其他设备可以批准时，只能用它解锁加密消息。恢复码只显示这一次，请抄下来或存进密码管理器。勾选项「我已把恢复码保存好」。 |
+| T22 | 已开启端到端加密。到「Pushkey」页复制「加密发送密钥」，换掉脚本里原来的 pushkey，新消息就会加密。 |
+| T30 | 标题「请另一台设备批准」。说明：在另一台已解锁的设备上打开回笺，它会提示有设备请求解锁。 |
+| T31 | 核对码 `482 913`：确认和另一台设备上显示的一样，再在那台设备上点「一致，批准」。 |
+| T32 | 另一台设备拒绝了这次请求。 |
+| T40 | 标题「用恢复码解锁」。占位文字「XXXXX-XXXXX-XXXXX-XXXXX-XXXXXX」。 |
+| T41 | 恢复码不对，或者已经被更换。 |
+| T42 | 标题「重新设置密码」。说明：管理员重设过你的密码，需要设置一个新密码来保护加密钥匙。 |
+| T43 | 收到的钥匙和账号的钥匙对不上，已丢弃。可能有人冒充服务器。 |
+| T50 | 「<设备名>」请求解锁加密消息：打开回笺核对后批准。 |
+| T51 | 这个请求已经由另一台设备处理。 |
+| T52 | 核对失败，可能有人冒充这台设备，已拒绝。 |
+| T53 | 核对码 `482 913`：和新设备上显示的一致吗？ |
+| T60 | 🔒 加密消息（解锁后查看） |
+| T61 | 🔒 用别的钥匙加密的消息，这台设备解不开 |
+| T62 | 🔒 加密消息已损坏，无法解开 |
+| T63 | 未加密：发送端用的是普通 pushkey |
+| T70 | 发送端用它代替 pushkey，消息会在发送端加密，只有你的设备能解开。它只能加密、不能解密，泄露了也看不到你的消息。 |
+| T71 | 打开后，服务器拒收没有加密的消息，防止有脚本忘了换成加密发送密钥。 |
+| T72 | 删除服务器上本账号的全部明文消息？加密消息不受影响，本机已同步的消息保留。服务器以前做的备份里仍有这些消息。 |
+
+## 10. 测试清单
+
+- 共用核心：`cd core && cargo test`（测试向量与服务端一致）。
+- 各端单元测试 / 自检：
+  - 登录：argon2 参数被篡改时拒绝；已升级账号收到 pbkdf2 时拒绝；pbkdf2 登录后自动升级。
+  - 开启加密后：解锁、恢复码解锁、批准流程（两个客户端对同一个本地服务端，核对码一致）、核对失败自动拒绝。
+  - 收消息：加密消息（含附件）解密后的标题、正文、doc、附件名，与服务端用同样内容发出的明文消息一致。
+  - 锁定状态下收到的消息解锁后自动解开。
+- 端到端：服务端 `tests/e2e_local.sh` 起本地 hub，用 `huijian push -k <加密发送密钥>` 发消息。

@@ -1,0 +1,5 @@
+module HuijianCore {
+    header "huijian_core.h"
+    link "huijian_core"
+    export *
+}

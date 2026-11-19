@@ -34,6 +34,7 @@ android {
         versionCode = buildNumber
         versionName = appVersion
         buildConfigField("String", "DEFAULT_SERVER", "\"$defaultServer\"")
+        ndk { abiFilters += "arm64-v8a" } // 共用核心只编译 arm64（真机和 Apple 芯片 Mac 上的模拟器都是）
     }
 
     signingConfigs {
@@ -64,6 +65,17 @@ android {
 }
 
 kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }
+
+// 共用核心（Rust：端到端加密、Markdown 解析）→ src/main/jniLibs/arm64-v8a/libhuijian_core.so。需要 Rust 和 NDK，见 core/build.sh
+val buildCore by tasks.registering(Exec::class) {
+    val core = rootProject.file("../core")
+    workingDir = core
+    commandLine("./build.sh", "android")
+    inputs.dir(core.resolve("src"))
+    inputs.file(core.resolve("Cargo.toml"))
+    outputs.file(file("src/main/jniLibs/arm64-v8a/libhuijian_core.so"))
+}
+tasks.named("preBuild") { dependsOn(buildCore) }
 
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2025.11.00")

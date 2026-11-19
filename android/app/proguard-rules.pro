@@ -2,3 +2,6 @@
 -dontwarn org.conscrypt.**
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
+
+# 共用核心的 JNI 入口（Core.call）：名字必须保持不变
+-keep class io.github.hongyile.huijian.Core { native <methods>; }

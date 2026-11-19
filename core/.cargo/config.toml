@@ -1,0 +1,4 @@
+# ARM（Mac、iPhone、安卓）用 CPU 的 AES / PMULL 硬件指令：不开时附件解密慢约 10 倍。
+# 安卓上是运行时检测，没有这些指令的老芯片自动退回软件实现。
+[target.'cfg(target_arch = "aarch64")']
+rustflags = ["--cfg", "aes_armv8", "--cfg", "polyval_armv8"]

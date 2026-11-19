@@ -64,8 +64,13 @@ if [ "$MODE" = sim ]; then
 ENTXML
   LINK_ENT=(-Xlinker -sectcreate -Xlinker __TEXT -Xlinker __entitlements -Xlinker "$ENT")
 fi
+# 共用核心（Rust：端到端加密、Markdown 解析）编译成静态库，链接进 App；-dead_strip 去掉用不到的部分
+CORE_T=$([ "$SDK_NAME" = iphonesimulator ] && echo ios-sim || echo ios)
+../core/build.sh $CORE_T > /dev/null
+CORE_DIR=../core/target/$([ "$CORE_T" = ios-sim ] && echo aarch64-apple-ios-sim || echo aarch64-apple-ios)/release
+CORE=(-I ../core/include -L "$CORE_DIR" -Xlinker -dead_strip)
 # -wmo：全模块优化（跨文件内联、去虚化）
-xcrun -sdk $SDK_NAME swiftc -parse-as-library -target "$TARGET" -sdk "$SDK" -swift-version 5 -O -wmo \
+xcrun -sdk $SDK_NAME swiftc -parse-as-library -target "$TARGET" -sdk "$SDK" -swift-version 5 -O -wmo "${CORE[@]}" \
   -module-name Huijian Sources/*.swift -o "$APP/Huijian" ${LINK_ENT[@]+"${LINK_ENT[@]}"}
 
 # Info.plist。ATS 只写 NSAllowsArbitraryLoads：同时写 NSAllowsLocalNetworking 时系统会忽略前者，
