@@ -67,7 +67,9 @@ enum E2E {
         static let weakCurrent = "当前密码不够安全，请换一个新密码"
         static let lockedCannotChange = "本机还没有解锁加密消息，请先解锁（设置里的「加密」或「端到端加密」页），再改密码"
         static let noPrelogin = "服务器没有给出新登录方式的参数（加密功能的服务器一定有），可能有人冒充服务器，已停止。"
-        static let setupUncertain = "网络出错，暂时无法确认加密是否已经开启。恢复码已保留在本机内存里，请稍后再点一次「开启」（会先检查结果）。"
+        static let setupUncertain = "网络出错，暂时无法确认加密是否已经开启。新钥匙和恢复码已保存在本机，网络恢复后会自动检查结果；也可以稍后再点一次「开启」。"
+        static let setupNotDone = "上次开启加密没有成功，请重新点「开启」。"
+        static let recoveryUncertain = "网络出错，暂时无法确认恢复码是否已经更换。新恢复码已保存在本机，确认更换成功后会自动显示；如果一直没有显示，说明没换成，旧恢复码仍然有效，可以稍后再换一次。"
         static let noRecovery = "这个账号没有设置恢复码，请用密码或另一台设备解锁"
         static let restarted = "对方重新发起了请求，请在列表里重新批准"
         static let requestGone = "对方已取消请求，或已由其他设备处理"
@@ -347,6 +349,32 @@ enum E2E {
 
         var keysName: String { "e2e-keys|" + scope }
         var deviceName: String { "e2e-device|" + scope }
+        var setupName: String { "e2e-setup|" + scope }
+        var recoveryName: String { "e2e-recovery|" + scope }
+
+        /// 进行中的更换恢复码（§7 第 3 项）：新恢复码和这次上传的 recovery_wrap，发请求前存进安全存储，点「完成」、请求被拒（4xx）、退出登录时删除
+        func pendingRecovery() throws -> RecoveryAttempt? {
+            guard let d = try secrets.read(recoveryName) else { return nil }
+            return try? JSONDecoder().decode(RecoveryAttempt.self, from: d)
+        }
+
+        func savePendingRecovery(_ a: RecoveryAttempt) throws {
+            try secrets.write(recoveryName, try JSONEncoder().encode(a))
+        }
+
+        func deletePendingRecovery() throws { try secrets.remove(recoveryName) }
+
+        /// 进行中的开启（§4.1）：新钥匙对和恢复码，从生成起就存在安全存储里，点「完成」、确认开启失败、退出登录时删除
+        func pendingSetup() throws -> SetupAttempt? {
+            guard let d = try secrets.read(setupName) else { return nil }
+            return try? JSONDecoder().decode(SetupAttempt.self, from: d)
+        }
+
+        func savePendingSetup(_ a: SetupAttempt) throws {
+            try secrets.write(setupName, try JSONEncoder().encode(a))
+        }
+
+        func deletePendingSetup() throws { try secrets.remove(setupName) }
 
         func accountKeys() throws -> [String] {
             guard let d = try secrets.read(keysName) else { return [] }
@@ -378,10 +406,13 @@ enum E2E {
 
         func deleteDeviceKeypair() throws { try secrets.remove(deviceName) }
 
-        /// 退出登录、设备被移除时：删除这个账号的全部私钥和设备钥匙对
+        /// 退出登录、设备被移除、换账号时：删除这个账号的全部私钥、设备钥匙对和进行中的开启。
+        /// 钉住的公钥（偏好设置里）不删
         func removeAll() throws {
             try secrets.remove(keysName)
             try secrets.remove(deviceName)
+            try secrets.remove(setupName)
+            try secrets.remove(recoveryName)
         }
     }
 
@@ -720,38 +751,93 @@ enum E2E {
 
     // MARK: - 开启加密（§4.1）
 
-    /// 一次开启加密的尝试。结果不确定（网络出错、5xx 后又取不到状态）时留在内存里，下次调用 setup 时传回来先核对
-    struct SetupAttempt: Equatable {
+    /// 一次开启加密：新钥匙对和恢复码。从生成起存在 KeyRing.pendingSetup，用户在「保存恢复码」页点「完成」才删除
+    struct SetupAttempt: Codable, Equatable {
         let sk: String
         let pub: String
         let code: String
     }
 
-    /// 开启加密的结果暂时无法确认：attempt（含恢复码）由调用方留在内存里，下次传给 setup 的 previous
+    /// 开启加密的结果暂时无法确认：attempt 已存在 KeyRing.pendingSetup，之后每次刷新状态由 checkPendingSetup 核对
     struct SetupPending: LocalizedError {
         let attempt: SetupAttempt
         var errorDescription: String? { T.setupUncertain }
     }
 
-    /// 开启端到端加密，返回恢复码（只显示这一次）。newPassword 不为 nil 时同时换成新密码。
-    /// 调用前界面已检查密码强度；这里再检查一次实际使用的密码。
-    /// 网络出错或 5xx 时先重新 GET /v1/e2e 核对（§4.1 第 4 步）；仍无法确认时抛 SetupPending
-    static func setup(_ api: API, ring: KeyRing, server: String, username: String, currentPassword: String, newPassword: String?,
-                      marks: UpgradeMarks, previous: SetupAttempt? = nil) async throws -> String {
-        func finish(_ a: SetupAttempt) -> String {
-            marks.mark(server: server, username: username)
-            ring.pinIfNeeded(a.pub)
-            return a.code
+    /// 核对进行中的开启（§4.1）的结果
+    enum SetupCheck: Equatable {
+        case none                       // 没有进行中的开启
+        case completed(SetupAttempt)    // 服务端已经用这把钥匙开启：私钥已保存、公钥已钉住、已标记升级 → 显示恢复码页
+        case notEnabled(SetupAttempt)   // 服务端还没开启：保留，提示用户重试（T.setupNotDone）
+        case discarded                  // 服务端用的是别的钥匙（或本机钉住的不是这把）：已删除
+    }
+
+    /// 有进行中的开启时，每次拿到 GET /v1/e2e 都调用（§4.1）。username 为空时不写「已升级」标记
+    @discardableResult
+    static func checkPendingSetup(_ st: State, ring: KeyRing, server: String, username: String, marks: UpgradeMarks) throws -> SetupCheck {
+        guard let a = try ring.pendingSetup() else { return .none }
+        guard st.enabled else { return .notEnabled(a) }
+        guard st.activeKey?.pub == a.pub else {
+            try? ring.removeAccountKey(a.sk)
+            try? ring.deletePendingSetup()
+            return .discarded
         }
-        if let p = previous {
+        do {
+            try acceptKey(a.sk, keys: st.keys, ring: ring)
+        } catch let f as Failure where f.kind == .keyMismatch {
+            try? ring.deletePendingSetup()
+            return .discarded
+        }
+        if !username.isEmpty { marks.mark(server: server, username: username) }
+        return .completed(a)
+    }
+
+    /// 已经确认开启、用户还没在「保存恢复码」页点「完成」的那次开启（私钥已经存进钥匙串就说明确认过）。
+    /// App 启动、读钥匙时调用：不为 nil 就直接回到恢复码页，不用等联网
+    static func confirmedSetup(ring: KeyRing) -> SetupAttempt? {
+        guard let a = try? ring.pendingSetup(), ((try? ring.accountKeys()) ?? []).contains(a.sk) else { return nil }
+        return a
+    }
+
+    /// 用户在「保存恢复码」页点了「完成」。这一页只在确认开启后显示：私钥万一当时没存进钥匙串就补存、补钉，
+    /// 存好了才删除进行中的开启（没存好就留着，下次刷新状态 checkPendingSetup 再处理）
+    static func finishRecovery(ring: KeyRing) {
+        guard let a = try? ring.pendingSetup() else { return }
+        if !((try? ring.accountKeys()) ?? []).contains(a.sk) { try? ring.addAccountKey(a.sk) }
+        guard ((try? ring.accountKeys()) ?? []).contains(a.sk) else { return }
+        ring.pinIfNeeded(a.pub)
+        try? ring.deletePendingSetup()
+    }
+
+    /// §4.5 末尾：本机存着私钥、却没有钉住的公钥（例如重装后偏好设置清空了）时，用核对通过的私钥补钉。返回补钉的公钥
+    @discardableResult
+    static func repinIfNeeded(_ st: State, ring: KeyRing, localKeys: [String]) -> String? {
+        guard ring.pinned == nil else { return nil }
+        for sk in localKeys {
+            if let pub = try? verify(sk: sk, keys: st.keys, pinned: nil) {
+                ring.pinIfNeeded(pub)
+                return pub
+            }
+        }
+        return nil
+    }
+
+    /// 开启端到端加密，返回恢复码。newPassword 不为 nil 时同时换成新密码。
+    /// 调用前界面已检查密码强度；这里再检查一次实际使用的密码。
+    /// 新钥匙对和恢复码在提交前存进 ring.pendingSetup（§4.1），成功后也不删，用户在「保存恢复码」页点「完成」时调用方删除。
+    /// 网络出错或 5xx 时先重新 GET /v1/e2e 核对（§4.1 第 4 步）；仍无法确认时抛 SetupPending（之后每次刷新状态会自动核对）
+    static func setup(_ api: API, ring: KeyRing, server: String, username: String, currentPassword: String, newPassword: String?,
+                      marks: UpgradeMarks) async throws -> String {
+        // 上次的开启还没确认：先核对结果
+        if let p = try? ring.pendingSetup() {
             let st: State
             do { st = try await api.state() } catch { throw SetupPending(attempt: p) }
-            if st.enabled {
-                if st.activeKey?.pub == p.pub { return finish(p) }
-                try? ring.removeAccountKey(p.sk)
-                throw Failure(.conflict, "别的设备刚开启了加密，已重新读取状态")
+            switch try checkPendingSetup(st, ring: ring, server: server, username: username, marks: marks) {
+            case .completed(let a): return a.code
+            case .notEnabled: try? ring.deletePendingSetup()      // 上次其实没开启：丢掉，重新生成
+            case .discarded: throw Failure(.conflict, "别的设备刚开启了加密，已重新读取状态")
+            case .none: break
             }
-            try? ring.removeAccountKey(p.sk)      // 上次其实没开启：丢掉，重新生成
         }
         let actual = newPassword ?? currentPassword
         if let problem = Core.passwordProblem(actual, username: username) {
@@ -766,9 +852,9 @@ enum E2E {
             let r = try Core.recoveryNew()
             return (pw, r, try Core.wrap("hjr1", key: r.key, data: kp.sk))
         }
-        // 先存私钥再提交：存不进钥匙串就不开启（否则账号开启了、本机却没有钥匙）
-        try saveKey(kp.sk, ring: ring)
+        // 先存新钥匙对和恢复码再提交：存不进钥匙串就不开启（否则账号开启了、本机却没有钥匙，恢复码也可能丢）
         let attempt = SetupAttempt(sk: kp.sk, pub: kp.pub, code: recovery.code)
+        do { try ring.savePendingSetup(attempt) } catch { throw Failure(.storage, "保存加密钥匙失败：\(error.localizedDescription)") }
         var body = cur.currentFields
         body["pub"] = kp.pub
         body["auth_salt"] = salt
@@ -780,17 +866,23 @@ enum E2E {
         } catch {
             if let f = error as? Failure, (400...499).contains(f.status) {
                 // 服务端明确拒绝（403 密码不对、409 已开启……）：丢掉这次的钥匙
-                try? ring.removeAccountKey(kp.sk)
+                try? ring.deletePendingSetup()
                 throw mapCurrent(error)
             }
             // 网络出错或 5xx：服务端可能其实已经开启了，先看结果
             guard let st = try? await api.state() else { throw SetupPending(attempt: attempt) }
-            if st.enabled, st.activeKey?.pub == kp.pub { return finish(attempt) }
-            try? ring.removeAccountKey(kp.sk)
-            if st.enabled { throw Failure(.conflict, "别的设备刚开启了加密，已重新读取状态") }
-            throw error
+            switch try checkPendingSetup(st, ring: ring, server: server, username: username, marks: marks) {
+            case .completed(let a): return a.code
+            case .discarded: throw Failure(.conflict, "别的设备刚开启了加密，已重新读取状态")
+            case .notEnabled, .none: throw error            // 没开启：钥匙留着，下次点「开启」会先核对再重新生成
+            }
         }
-        return finish(attempt)
+        // 第 5 步：保存私钥（我们自己生成、服务端刚接受的公钥）、钉住、标记升级。
+        // 保存失败也照样返回恢复码：pendingSetup 还在，下次刷新状态时 checkPendingSetup 会再保存
+        try? saveKey(kp.sk, ring: ring)
+        ring.pinIfNeeded(kp.pub)
+        marks.mark(server: server, username: username)
+        return recovery.code
     }
 
     // MARK: - 解锁（§4.2、§4.4）
@@ -883,16 +975,69 @@ enum E2E {
     }
 
     /// 更换恢复码（§7.3），返回新的恢复码
-    static func rotateRecovery(_ api: API, sk: String, server: String, username: String, password: String, marks: UpgradeMarks) async throws -> String {
+    /// 一次更换恢复码：新恢复码、这次上传的 recovery_wrap；confirmed = 已确认服务端换成了这份（重启后直接回到恢复码页）
+    struct RecoveryAttempt: Codable, Equatable {
+        let code: String
+        let wrap: String
+        var confirmed = false
+    }
+
+    /// 更换恢复码的结果暂时无法确认：新恢复码已存在 KeyRing.pendingRecovery，之后每次刷新状态由 checkPendingRecovery 核对
+    struct RecoveryPending: LocalizedError {
+        let attempt: RecoveryAttempt
+        var errorDescription: String? { T.recoveryUncertain }
+    }
+
+    /// 更换恢复码（§7 第 3 项），返回新恢复码。新恢复码在发请求前存进 ring.pendingRecovery，成功后也不删，
+    /// 用户在「保存恢复码」页点「完成」时调用 finishRotation。4xx 删除；网络出错或 5xx 时重新读状态核对，仍无法确认抛 RecoveryPending
+    static func rotateRecovery(_ api: API, ring: KeyRing, sk: String, server: String, username: String, password: String,
+                               marks: UpgradeMarks) async throws -> String {
         let cur = try await currentCredential(api, server: server, username: username, password: password, marks: marks)
         let (code, wrap) = try coreCall { () -> (String, String) in
             let r = try Core.recoveryNew()
             return (r.code, try Core.wrap("hjr1", key: r.key, data: sk))
         }
+        // 先存再发：服务端一换，旧恢复码就失效了，新的不能丢
+        var attempt = RecoveryAttempt(code: code, wrap: wrap)
+        do { try ring.savePendingRecovery(attempt) } catch { throw Failure(.storage, "保存恢复码失败：\(error.localizedDescription)") }
         var body = cur.currentFields
         body["recovery_wrap"] = wrap
-        do { try await api.call("PUT", "/v1/e2e/recovery", body: body) } catch { throw mapCurrent(error) }
+        do {
+            try await api.call("PUT", "/v1/e2e/recovery", body: body)
+        } catch {
+            if let f = error as? Failure, (400...499).contains(f.status) {
+                try? ring.deletePendingRecovery()          // 明确被拒：旧恢复码仍然有效
+                throw mapCurrent(error)
+            }
+            // 网络出错或 5xx：服务端可能已经换了，先看结果；不一样或取不到都先保留（可能还在处理），之后刷新再核对
+            guard let st = try? await api.state(), st.recovery_wrap == wrap else { throw RecoveryPending(attempt: attempt) }
+        }
+        attempt.confirmed = true
+        try? ring.savePendingRecovery(attempt)
         return code
+    }
+
+    /// 有进行中的更换恢复码时，每次拿到 GET /v1/e2e 都调用：已确认过，或服务端的 recovery_wrap 就是这次上传的那份 → 返回它（显示恢复码页）。
+    /// 对不上时保留、返回 nil（结果不确定时服务端可能还没处理完；没换成的话旧恢复码仍然有效，下次更换会覆盖它）
+    @discardableResult
+    static func checkPendingRecovery(_ st: State, ring: KeyRing) -> RecoveryAttempt? {
+        guard var a = try? ring.pendingRecovery() else { return nil }
+        if a.confirmed { return a }
+        guard st.hasRecovery, st.recovery_wrap == a.wrap else { return nil }
+        a.confirmed = true
+        try? ring.savePendingRecovery(a)
+        return a
+    }
+
+    /// 已确认更换、用户还没点「完成」的新恢复码。App 启动、读钥匙时调用：不为 nil 就直接回到恢复码页
+    static func confirmedRecovery(ring: KeyRing) -> RecoveryAttempt? {
+        guard let a = try? ring.pendingRecovery(), a.confirmed else { return nil }
+        return a
+    }
+
+    /// 更换恢复码后，用户在「保存恢复码」页点了「完成」
+    static func finishRotation(ring: KeyRing) {
+        try? ring.deletePendingRecovery()
     }
 
     static func setE2EOnly(_ api: API, _ on: Bool) async throws {
@@ -929,14 +1074,21 @@ enum E2E {
         private var nb = ""
         private var revealedFor: String?
         private var busy = false
+        /// 已停止（退出登录、换账号）：之后不再登记、不再写钥匙串
+        private(set) var stopped = false
 
         init(ring: KeyRing) { self.ring = ring }
+
+        /// 退出登录、换账号时先停下（§8）：正在 await 的 handle / start 回来后不会再写设备钥匙对或私钥
+        func stop() { stopped = true }
 
         /// 第 1–3 步：定下账号公钥 acc；生成（或沿用已保存的）设备钥匙对和新的 nb；登记并请求批准。
         /// acc 定不下来（钉住的公钥不是服务器的有效钥匙，或者没钉住而有效钥匙不是正好一把）时显示 T43 并停止
         func start(_ api: API, state: State? = nil) async throws {
+            guard !stopped else { throw CancellationError() }
             let st: State
             if let state { st = state } else { st = try await api.state() }
+            guard !stopped else { throw CancellationError() }
             let active = st.keys.filter(\.active)
             if let pin = ring.pinned {
                 guard active.contains(where: { $0.pub == pin }) else { phase = .failed(T.t43); throw Failure(.keyMismatch, T.t43) }
@@ -960,6 +1112,7 @@ enum E2E {
             let n = try coreCall { try Core.random32() }
             let commit = try coreCall { try Core.sasCommit(pub: dev.pub, account: account, nonce: n) }
             try await api.call("PUT", "/v1/e2e/device", body: ["pub": dev.pub, "request": true, "commit": commit])
+            guard !stopped else { throw CancellationError() }
             nb = n
             revealedFor = nil
             phase = .waiting
@@ -969,7 +1122,7 @@ enum E2E {
         /// 第 4 步：每次拿到新的 GET /v1/e2e 时调用（generation 是发 GET 之前记下的请求序号），推进流程，返回新的阶段
         @discardableResult
         func handle(_ st: State, api: API, generation g: Int) async -> Phase {
-            guard !busy, let dev, g == generation else { return phase }
+            guard !busy, !stopped, let dev, g == generation else { return phase }
             busy = true
             defer { busy = false }
             switch phase {
@@ -984,6 +1137,7 @@ enum E2E {
             }
             // 转交：只在本次请求已经揭晓、核对码已经显示之后才处理（hjg1 谁都能加密给 dev.pub，之前看到的一律忽略）
             if revealedFor != nil, !d.grant.isEmpty {
+                guard !stopped else { return phase }
                 do {
                     let sk = try coreCall { try Core.grantOpen(deviceSK: dev.sk, grant: d.grant) }
                     guard (try? Core.publicKey(sk).pub) == account else { throw Failure(.keyMismatch, T.t43) }
@@ -1014,6 +1168,7 @@ enum E2E {
                 }
                 do {
                     try await api.call("POST", "/v1/e2e/reveal", body: ["nonce": nb])
+                    guard !stopped else { return phase }
                     revealedFor = d.challenge
                     phase = .code(code)
                 } catch let f as Failure where f.kind == .conflict {
@@ -1049,6 +1204,11 @@ enum E2E {
         /// 本机私钥算出的账号公钥（不用服务器给的 keys）
         private let account: String
         private(set) var phase: Phase = .challenged
+        /// 已停止（用户点「取消」、退出登录、换账号）：之后的 handle / approve 什么都不做
+        private(set) var stopped = false
+
+        /// 只停止本机的等待（§5 第 2 步的「取消」；§8）
+        func stop() { stopped = true }
 
         private init(request: Request, na: String, account: String) {
             self.request = request
@@ -1071,7 +1231,7 @@ enum E2E {
         /// 第 2–4 步：每次拿到新的 GET /v1/e2e 时调用
         @discardableResult
         func handle(_ st: State, api: API) async -> Phase {
-            guard phase == .challenged else { return phase }
+            guard !stopped, phase == .challenged else { return phase }
             guard let r = st.requests.first(where: { $0.device_id == request.device_id }) else {
                 phase = .failed(T.requestGone)
                 return phase
@@ -1095,7 +1255,7 @@ enum E2E {
 
         /// 「一致，批准」：把账号私钥转交给对方的公钥；409 时抛服务端说明
         func approve(_ api: API, sk: String) async throws {
-            guard case .code = phase else { return }
+            guard !stopped, case .code = phase else { return }
             let grant = try coreCall { try Core.grantSeal(sk: sk, to: request.pub) }
             do {
                 try await api.call("POST", "/v1/e2e/grant", body: ["device_id": request.device_id, "pub": request.pub, "grant": grant])

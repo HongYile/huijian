@@ -58,7 +58,7 @@ struct E2ESettings: View {
     }
 
     @ViewBuilder var notices: some View {
-        ForEach([model.e2eStorageError, model.e2eLoginNote, notice].compactMap { $0 }, id: \.self) { t in
+        ForEach([model.e2eStorageError, model.e2eLoginNote, model.e2eSetupNote, model.e2eRecoveryNote, notice].compactMap { $0 }, id: \.self) { t in
             E2ENote(text: t, color: t == notice ? Theme.success : Theme.warning)
         }
     }
@@ -196,14 +196,26 @@ struct RecoveryCodeCard: View {
     let onDone: () -> Void
     @State private var saved = false
     @State private var copied = false
+    /// 窗口不是当前窗口（失去焦点、App 进入后台）时遮住恢复码（§4.1），防止被截屏、录屏或旁人看到
+    @Environment(\.controlActiveState) private var activeState
+    private var masked: Bool { activeState != .key }
 
     var body: some View {
         SettingsCard(title: E2E.T.t21Title) {
             FormBlock {
                 Text(E2E.T.t21).font(.system(size: 13)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 12) {
-                    Text(code).font(.system(size: 22, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.text)
-                        .textSelection(.enabled)
+                    if masked {
+                        // 不是模糊，而是整个换掉：界面上根本没有恢复码的字
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(String(code.map { $0 == "-" ? "-" : "•" }))
+                                .font(.system(size: 22, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.text3)
+                            Text("窗口不在前台时遮住，回到这个窗口后显示").font(.system(size: 12)).foregroundStyle(Theme.text3)
+                        }
+                    } else {
+                        Text(code).font(.system(size: 22, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.text)
+                            .textSelection(.enabled)
+                    }
                     Spacer()
                     Button(copied ? "已复制" : "复制") {
                         NSPasteboard.general.clearContents()
@@ -211,6 +223,7 @@ struct RecoveryCodeCard: View {
                         copied = true
                     }
                     .buttonStyle(SoftButtonStyle())
+                    .disabled(masked)
                 }
                 .padding(14)
                 .background(RoundedRectangle(cornerRadius: 8).fill(Theme.surface2))
@@ -443,9 +456,15 @@ struct E2ERequestsCard: View {
             }
             switch model.e2eApprovalPhases[r.device_id] {
             case .challenged:
+                // §5 第 2 步：等待期间可以拒绝（发 deny），也可以只停止本机的等待
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("等待新设备显示核对码…").font(.system(size: 12.5)).foregroundStyle(Theme.text3)
+                    Spacer()
+                    Button("拒绝") { act(r.device_id) { try await model.e2eDeny(r.device_id) } }
+                        .buttonStyle(SoftButtonStyle(destructive: true)).disabled(busy != nil)
+                    Button("取消") { model.e2eCancelApproval(r.device_id) }
+                        .buttonStyle(SoftButtonStyle()).disabled(busy != nil)
                 }
                 .padding(.leading, 31)
             case .code(let c):

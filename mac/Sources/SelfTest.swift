@@ -1241,10 +1241,32 @@ enum SelfTest {
             check(m.messages.contains { $0.id == 900101 } && m.messages.contains { $0.id == 900102 } && m.e2ePlainKept == [900101, 900102],
                   "收到 purge：本地副本保留，记为仅本机保留（本地没有的不记）")
             check(AppModel.withoutKept([900101, 900102, 5], kept: m.e2ePlainKept) == [5], "对账时跳过仅本机保留的消息")
+            // §7.4 对账：账号已开启加密时，服务器上找不到的明文消息记入「仅本机保留」，加密消息照常删除
+            let missing = [SelfTest.msg(900201, "plain", "", 3, "明文"), m.messages.first { $0.id == 900001 }!]
+            let rOn = AppModel.reconcileRemovals(missing: missing, e2eEnabled: true, kept: [])
+            check(rOn.remove == [900001] && rOn.kept == [900201], "对账（已开启加密）：找不到的明文消息保留并记为仅本机保留，加密消息删除")
+            let rOff = AppModel.reconcileRemovals(missing: missing, e2eEnabled: false, kept: [])
+            check(rOff.remove == [900201, 900001] && rOff.kept.isEmpty, "对账（没开启加密）：找不到的照常删除")
             m.applyChanges([APIClient.MsgChange(seq: 4, id: 900101, kind: "delete", state: nil)])
             check(!m.messages.contains { $0.id == 900101 } && m.e2ePlainKept == [900102], "之后的 delete 变更照常删除，并移出保留集合")
             m.removeLocal([900102])
             check(m.e2ePlainKept.isEmpty, "本机删除后移出保留集合")
+            // §8 换账号 / 换服务器：先停下批准流程，再删旧账号的私钥、设备钥匙对、进行中的开启
+            let oldRing = E2E.KeyRing(secrets: E2E.MemorySecrets(), scope: E2E.scope(server: "http://127.0.0.1:9", accountID: 6), defaults: m.defaults)
+            if let ring = m.e2eRing {
+                let other6 = try Core.keypair()
+                let r6 = E2E.KeyRing(secrets: ring.secrets, scope: oldRing.scope, defaults: m.defaults)
+                try r6.addAccountKey(other6.sk)
+                try r6.saveDeviceKeypair(sk: other6.sk, pub: other6.pub)
+                try r6.savePendingSetup(E2E.SetupAttempt(sk: other6.sk, pub: other6.pub, code: "C"))
+                let req = E2E.ApprovalRequest(ring: r6)
+                m.e2eRequest = req
+                m.e2eDiscardAccount(accountKey: "http://127.0.0.1:9#6")
+                check(req.stopped && m.e2eRequest == nil && ((try? r6.accountKeys()) ?? ["x"]).isEmpty && (try? r6.deviceKeypair()) == nil
+                      && (try? r6.pendingSetup()) == nil, "换账号：停下请求，删除旧账号的私钥、设备钥匙对、进行中的开启")
+                check(((try? ring.accountKeys()) ?? []) == [kp.sk], "换账号：不动当前账号的钥匙")
+                m.loadE2EKeys()
+            }
             // 退出登录：删除本机钥匙
             m.e2eWipe()
             check(m.e2eKeys.isEmpty && ((try? m.e2eRing?.accountKeys()) ?? ["x"])?.isEmpty == true, "退出登录：本机私钥全部删除")

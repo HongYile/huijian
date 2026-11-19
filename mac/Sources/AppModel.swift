@@ -188,8 +188,10 @@ final class AppModel: ObservableObject {
     @Published var e2eLoginNote: String?
     /// 登录时解开、但还没取到账号 id 没法保存的私钥（只在内存里，loadE2EKeys 时保存）
     var e2ePendingLoginKey: (sk: String, keys: [E2E.Key])?
-    /// 开启加密结果不确定时留下的这次钥匙和恢复码（只在内存里，下次「开启」先核对）
-    var e2ePendingSetup: E2E.SetupAttempt?
+    /// 开启加密的结果提示（结果不确定 / 上次没成功，§4.1）；进行中的开启本身存在钥匙串（KeyRing.pendingSetup）
+    @Published var e2eSetupNote: String?
+    /// 更换恢复码结果不确定时的提示（§7 第 3 项）；新恢复码本身存在钥匙串（KeyRing.pendingRecovery）
+    @Published var e2eRecoveryNote: String?
     /// 刚生成的恢复码（开启加密或更换后）：放在 App 状态里，关掉设置窗口再打开还在，用户点「完成」才清除
     @Published var e2eRecoveryCode: String?
     @Published var e2eRecoveryFromSetup = false
@@ -634,6 +636,14 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 对账：服务器上找不到的本地消息里哪些要删（§7.4）。账号已开启加密时，找不到的**明文**消息可能是
+    /// 「删除服务器上的明文消息」删掉的（离线超过 90 天收不到 purge 变更），记入「仅本机保留」而不删；加密消息照常删除
+    nonisolated static func reconcileRemovals(missing: [Message], e2eEnabled: Bool, kept: Set<Int64>) -> (remove: [Int64], kept: Set<Int64>) {
+        var k = kept
+        if e2eEnabled { k.formUnion(missing.filter { !$0.isE2E }.map(\.id)) }
+        return (withoutKept(missing.map(\.id), kept: k), k)
+    }
+
     nonisolated static func withoutKept(_ ids: [Int64], kept: Set<Int64>) -> [Int64] {
         kept.isEmpty ? ids : ids.filter { !kept.contains($0) }
     }
@@ -917,6 +927,7 @@ final class AppModel: ObservableObject {
             if let a = me.account {
                 let k = Self.key("accountKey"), cur = "\(server)#\(a.id)"
                 if let prev = defaults.string(forKey: k), prev != cur {
+                    e2eDiscardAccount(accountKey: prev)     // §8：换账号 / 换服务器，删掉旧账号的钥匙
                     defaults.set(cur, forKey: k)
                     resetLocalMessages()
                     loadE2EKeys()          // 换了账号：读新账号的钥匙
@@ -976,7 +987,8 @@ final class AppModel: ObservableObject {
             fresh[i].applyE2E(.locked)
             undecrypted = true
         }
-        if undecrypted, !e2eKeys.isEmpty { Task { await decryptPending() } }
+        // 也包括 prepareE2E 时还没解锁、标成 locked 的（解锁和同步同时进行，§6.1）
+        if undecrypted || fresh.contains(where: \.e2eUnreadable), !e2eKeys.isEmpty { Task { await decryptPending() } }
         messages = (messages + fresh).sorted { $0.id < $1.id }
         save()
         if notify && notificationsEnabled {
@@ -1022,7 +1034,9 @@ final class AppModel: ObservableObject {
         if Task.isCancelled { return }
         let sameData = changesEpoch == nil || epoch == nil || epoch == changesEpoch
         if sameData {
-            removeLocal(Self.withoutKept(messages.filter { states[$0.id] == nil }.map(\.id), kept: e2ePlainKept))
+            let r = Self.reconcileRemovals(missing: messages.filter { states[$0.id] == nil }, e2eEnabled: e2eAccountEnabled, kept: e2ePlainKept)
+            if r.kept != e2ePlainKept { e2ePlainKept = r.kept }
+            removeLocal(r.remove)
         }
         applyArchive(states)
         changesEpoch = epoch

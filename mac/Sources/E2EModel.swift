@@ -77,6 +77,17 @@ extension AppModel {
             let ks = try ring.accountKeys()
             if ks != e2eKeys { e2eKeys = ks }
             e2eStorageError = nil
+            // 已经确认开启、用户还没点「完成」就退出了（§4.1）：重新打开后回到「保存恢复码」页
+            if e2eRecoveryCode == nil {
+                if let a = E2E.confirmedSetup(ring: ring) {
+                    e2eRecoveryCode = a.code
+                    e2eRecoveryFromSetup = true
+                } else if let a = E2E.confirmedRecovery(ring: ring) {
+                    // 已确认更换的恢复码，用户还没点「完成」（§7 第 3 项）
+                    e2eRecoveryCode = a.code
+                    e2eRecoveryFromSetup = false
+                }
+            }
         } catch {
             e2eKeys = []
             e2eStorageError = "读取钥匙串失败，加密消息暂时无法解开：\(error.localizedDescription)"
@@ -92,8 +103,9 @@ extension AppModel {
         repeat {
             e2eRefreshAgain = false
             let tok = token
-            // 批准请求的序号：只处理最近一次登记之后发出的 GET（§4.3 第 4 步）
-            let requestGen = e2eRequest?.generation
+            // 批准请求的对象和序号：只处理同一个请求对象最近一次登记之后发出的 GET（§4.3 第 4 步）
+            let req = e2eRequest
+            let requestGen = req?.generation
             let st: E2E.State
             do { st = try await api.state() } catch {
                 if let f = error as? E2E.Failure, f.kind == .unsupported { noteUnsupported("e2e") }
@@ -104,10 +116,23 @@ extension AppModel {
             if st != e2eState { e2eState = st }
             // 账号开启了加密、本机却没读到私钥（钥匙串偶发读取失败）：重读一次
             if st.enabled, e2eKeys.isEmpty || e2eStorageError != nil { loadE2EKeys() }
+            if let ring = e2eRing {
+                checkPendingSetup(st, ring: ring)
+                // 更换恢复码结果不确定时：服务端的 recovery_wrap 就是这次上传的那份 → 显示恢复码页
+                if let a = E2E.checkPendingRecovery(st, ring: ring) {
+                    e2eRecoveryNote = nil
+                    if e2eRecoveryCode == nil {
+                        e2eRecoveryCode = a.code
+                        e2eRecoveryFromSetup = false
+                    }
+                }
+                // §4.5 末尾：有私钥却没钉住公钥（重装后偏好设置清空等）：核对通过就补钉
+                E2E.repinIfNeeded(st, ring: ring, localKeys: e2eKeys)
+            }
             defaults.set(st.enabled, forKey: Self.key("e2eEnabled"))
             // 配对码登录的设备：账号已用新方式登录时补记「已升级」标记（§2）
             if st.auth_key, let u = account?.username, !u.isEmpty { e2eMarks.mark(server: e2eServerID, username: u) }
-            if let r = e2eRequest, let g = requestGen, r === e2eRequest {
+            if let r = req, let g = requestGen, r === e2eRequest {
                 let ph = await r.handle(st, api: api, generation: g)
                 if ph != e2eRequestPhase { e2eRequestPhase = ph }
                 if ph == .granted {
@@ -142,17 +167,63 @@ extension AppModel {
         if changed { defaults.set(Array(seen.suffix(50)), forKey: k) }
     }
 
-    /// 退出登录、设备被移除（§8）：删除本机为这个账号保存的全部私钥和设备钥匙对（只删钥匙串里的）。
+    /// 有进行中的开启时（§4.1）每次刷新状态都核对：已用这把钥匙开启 → 保存、钉住、显示恢复码页；
+    /// 服务端用的是别的钥匙 → 已删除；还没开启 → 保留，提示重试
+    private func checkPendingSetup(_ st: E2E.State, ring: E2E.KeyRing) {
+        let r: E2E.SetupCheck
+        do {
+            r = try E2E.checkPendingSetup(st, ring: ring, server: e2eServerID, username: account?.username ?? "", marks: e2eMarks)
+        } catch { return }       // 钥匙串暂时读不了：下次再查
+        switch r {
+        case .none:
+            if e2eSetupNote != nil { e2eSetupNote = nil }
+        case .completed(let a):
+            loadE2EKeys()
+            if e2eRecoveryCode == nil {
+                e2eRecoveryCode = a.code
+                e2eRecoveryFromSetup = true
+            }
+            e2eSetupNote = nil
+        case .notEnabled:
+            if e2eSetupNote != E2E.T.setupNotDone { e2eSetupNote = E2E.T.setupNotDone }
+        case .discarded:
+            e2eSetupNote = nil
+            loadE2EKeys()
+        }
+    }
+
+    /// 退出登录、设备被移除（§8）：删除本机为这个账号保存的全部私钥、设备钥匙对和进行中的开启（只删钥匙串里的）。
     /// 「已升级」标记和钉住的账号公钥在偏好设置里，不删
     func e2eWipe() {
-        if let ring = e2eRing {
+        e2eDiscard(ring: e2eRing)
+        e2eLoginNote = nil
+        e2ePendingLoginKey = nil
+    }
+
+    /// 换账号、换服务器（§8）：accountKey 是上一个账号的「服务器#账号 id」，删掉它在本机的钥匙。
+    /// 不动登录时留下的提示和待保存的私钥（它们属于新账号）
+    func e2eDiscardAccount(accountKey prev: String) {
+        guard let i = prev.lastIndex(of: "#"), let id = Int64(prev[prev.index(after: i)...]) else {
+            e2eDiscard(ring: nil)
+            return
+        }
+        let old = E2E.scope(server: String(prev[..<i]), accountID: id)
+        // 只是同一个服务器地址换了写法（规范化后相同）：是同一个账号，不删
+        if let cur = account?.id, old == E2E.scope(server: e2eServerID, accountID: cur) { return }
+        e2eDiscard(ring: E2E.KeyRing(secrets: e2eSecrets, scope: old, defaults: defaults))
+    }
+
+    /// 先停下正在进行的批准流程（请求、批准），再删钥匙串里的东西，最后清掉内存状态
+    private func e2eDiscard(ring: E2E.KeyRing?) {
+        e2eRequest?.stop()
+        for a in e2eApprovals.values { a.stop() }
+        if let ring {
             do { try ring.removeAll() } catch { NSLog("回笺 删除加密钥匙失败: \(error.localizedDescription)") }
         }
         e2eKeys = []
         e2eState = nil
-        e2eLoginNote = nil
-        e2ePendingLoginKey = nil
-        e2ePendingSetup = nil
+        e2eSetupNote = nil
+        e2eRecoveryNote = nil
         e2eRecoveryCode = nil
         e2eRequest = nil
         e2eRequestPhase = nil
@@ -249,20 +320,19 @@ extension AppModel {
     // MARK: 开启加密、解锁（§4）
 
     /// 开启加密。成功后恢复码放在 e2eRecoveryCode（App 状态，用户点「完成」才清除）。
-    /// 结果不确定时这次的钥匙和恢复码留在内存里，下次点「开启」先核对（§4.1 第 4 步）
+    /// 新钥匙对和恢复码在钥匙串里（KeyRing.pendingSetup），结果不确定时之后每次刷新状态都会自动核对（§4.1）
     func e2eSetup(current: String, newPassword: String?) async throws {
         let (api, ring, u) = try e2eContext()
         do {
             let code = try await E2E.setup(api, ring: ring, server: e2eServerID, username: u, currentPassword: current,
-                                           newPassword: newPassword, marks: e2eMarks, previous: e2ePendingSetup)
-            e2ePendingSetup = nil
+                                           newPassword: newPassword, marks: e2eMarks)
+            e2eSetupNote = nil
             e2eRecoveryCode = code
             e2eRecoveryFromSetup = true
         } catch let p as E2E.SetupPending {
-            e2ePendingSetup = p.attempt
+            e2eSetupNote = p.localizedDescription
             throw p
         } catch {
-            e2ePendingSetup = nil
             loadE2EKeys()
             await refreshE2E()
             throw error
@@ -271,8 +341,17 @@ extension AppModel {
         await refreshE2E()
     }
 
-    /// 用户在「保存恢复码」页点了「完成」
+    /// 用户在「保存恢复码」页点了「完成」：开启加密时的新钥匙对和恢复码从钥匙串删除（私钥已另存）
     func e2eRecoveryDone() {
+        // 这一页只在服务端确认开启之后才显示：私钥万一当时没存进钥匙串，这里补存，存好了才删进行中的开启
+        if let ring = e2eRing {
+            if e2eRecoveryFromSetup {
+                E2E.finishRecovery(ring: ring)
+                loadE2EKeys()
+            } else {
+                E2E.finishRotation(ring: ring)
+            }
+        }
         e2eRecoveryCode = nil
     }
 
@@ -306,13 +385,16 @@ extension AppModel {
     }
 
     func e2eCancelRequest() async {
-        if let r = e2eRequest, let api = e2eAPI { await r.cancel(api) }
+        let r = e2eRequest
+        r?.stop()                       // 先停下：等撤回请求的这段时间里，刷新状态不再推进它
         e2eRequest = nil
         e2eRequestPhase = nil
+        if let r, let api = e2eAPI { await r.cancel(api) }
     }
 
     /// 关掉「请另一台设备批准」的结果（已解锁 / 被拒绝）
     func e2eDismissRequest() {
+        e2eRequest?.stop()
         e2eRequest = nil
         e2eRequestPhase = nil
     }
@@ -356,6 +438,12 @@ extension AppModel {
         await refreshE2E()
     }
 
+    /// 等待对方揭晓时点「取消」：只停止本机的等待，不发拒绝（§5 第 2 步）
+    func e2eCancelApproval(_ deviceID: String) {
+        e2eApprovals[deviceID]?.stop()
+        e2eForgetApproval(deviceID)
+    }
+
     func e2eForgetApproval(_ deviceID: String) {
         e2eApprovals[deviceID] = nil
         e2eApprovalPhases[deviceID] = nil
@@ -371,9 +459,16 @@ extension AppModel {
 
     /// 更换恢复码；新的恢复码放在 e2eRecoveryCode，用户点「完成」才清除
     func e2eRotateRecovery(password: String) async throws {
-        let (api, _, u) = try e2eContext()
+        let (api, ring, u) = try e2eContext()
         guard let sk = e2eAccountKey else { throw E2E.Failure(.locked, "本机还没有解锁") }
-        let code = try await E2E.rotateRecovery(api, sk: sk, server: e2eServerID, username: u, password: password, marks: e2eMarks)
+        let code: String
+        do {
+            code = try await E2E.rotateRecovery(api, ring: ring, sk: sk, server: e2eServerID, username: u, password: password, marks: e2eMarks)
+        } catch let p as E2E.RecoveryPending {
+            e2eRecoveryNote = p.localizedDescription
+            throw p
+        }
+        e2eRecoveryNote = nil
         e2eRecoveryCode = code
         e2eRecoveryFromSetup = false
         await refreshE2E()
