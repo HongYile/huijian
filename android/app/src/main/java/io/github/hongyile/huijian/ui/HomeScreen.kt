@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -87,7 +88,9 @@ fun HomeScreen(open: (Long) -> Unit, openSettings: () -> Unit, openE2E: () -> Un
     // 回到前台时重新检查权限（用户可能刚去系统设置里改过）
     var resumeTick by remember { mutableIntStateOf(0) }
     LifecycleResumeEffect(Unit) { resumeTick++; onPauseOrDispose { } }
-    val setupOk = remember(resumeTick) { Notifier.canPost(ctx) && Background.ignoringBatteryOptimizations(ctx) }
+    // 回到前台时重新检查：在系统设置里开了通知，提示条自动消失
+    val notifyOk = remember(resumeTick) { Notifier.canPost(ctx) }
+    val setupOk = remember(resumeTick) { Background.ignoringBatteryOptimizations(ctx) }
     // 每 30 秒刷新一次相对时间
     var clock by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) { while (true) { delay(30_000); clock++ } }
@@ -134,8 +137,11 @@ fun HomeScreen(open: (Long) -> Unit, openSettings: () -> Unit, openE2E: () -> Un
                 Banner("登录已失效（设备可能已被移除），请重新登录", "重新登录") {
                     Hub.logout(ctx, notifyServer = false, keepE2EKeys = true)   // 同一台设备重新登录后加密私钥还能用
                 }
+            } else if (!notifyOk) {
+                // 通知被关掉（拒绝过权限、或在系统设置里关了）：不自动跳转，点提示条才进系统的通知设置
+                Banner("通知已关闭，点这里开启", null, Modifier.testTag("notifyOff")) { Background.openAppNotificationSettings(ctx) }
             } else if (!setupOk) {
-                Banner("后台运行还没设置好，锁屏后可能收不到消息", "去设置", openSettings)
+                Banner("后台运行还没设置好，锁屏后可能收不到消息", "去设置", onClick = openSettings)
             }
             if (state != ConnState.Unauthorized && e2eStatus == E2EStatus.LOCKED) {
                 LockBanner(openE2E)
@@ -227,19 +233,22 @@ private fun LockBanner(onClick: () -> Unit) {
     }
 }
 
+/** 首页顶部的提示条；action 为 null 时整条可点 */
 @Composable
-private fun Banner(text: String, action: String, onClick: () -> Unit) {
-    Surface(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-        shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primaryContainer,
-    ) {
-        Row(Modifier.padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun Banner(text: String, action: String?, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val m = modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)
+    val shape = RoundedCornerShape(12.dp)
+    val content: @Composable () -> Unit = {
+        Row(Modifier.padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp).heightIn(min = 40.dp),
+            verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Default.Warning, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
             Spacer(Modifier.width(8.dp))
             Text(text, Modifier.weight(1f), fontSize = 13.sp, color = MaterialTheme.colorScheme.onPrimaryContainer)
-            TextButton(onClick) { Text(action) }
+            if (action != null) TextButton(onClick) { Text(action) }
         }
     }
+    if (action == null) Surface(onClick, m, shape = shape, color = MaterialTheme.colorScheme.primaryContainer, content = content)
+    else Surface(m, shape = shape, color = MaterialTheme.colorScheme.primaryContainer, content = content)
 }
 
 @Composable

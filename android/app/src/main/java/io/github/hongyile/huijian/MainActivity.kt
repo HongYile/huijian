@@ -60,9 +60,13 @@ sealed interface Screen {
 class MainActivity : ComponentActivity() {
     private var screen by mutableStateOf<Screen>(Screen.Home)
 
+    /** 这次请求是用户点「去开启」发起的（登录后自动请求时为 false：被拒绝也不跳转，首页显示「通知已关闭」提示条） */
+    private var notifyByUser = false
+
     private val askNotify = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        // 拒绝过两次后系统不再弹窗、直接返回 false：这时改为打开通知设置
-        if (!granted && Build.VERSION.SDK_INT >= 33 && !shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)) {
+        // 拒绝过两次后系统不再弹窗、直接返回 false：只有用户主动点「去开启」时才改为打开通知设置
+        if (!granted && notifyByUser && Build.VERSION.SDK_INT >= 33 &&
+            !shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)) {
             Background.openAppNotificationSettings(this)
         }
     }
@@ -82,7 +86,7 @@ class MainActivity : ComponentActivity() {
                 if (state == ConnState.LoggedOut) {
                     LoginScreen(onSignedIn = {
                         SyncService.start(this, restart = true)
-                        requestNotificationPermission()
+                        requestNotificationPermission(byUser = false)   // 只弹系统授权框，不自动跳设置
                         screen = Screen.Settings      // 登录后先去「后台运行检查」把权限设好
                     })
                 } else {
@@ -106,7 +110,7 @@ class MainActivity : ComponentActivity() {
                             BackHandler { screen = Screen.Home }
                             SettingsScreen(
                                 back = { screen = Screen.Home },
-                                requestNotify = ::requestNotificationPermission,
+                                requestNotify = { requestNotificationPermission(byUser = true) },
                                 open = { screen = it },
                             )
                         }
@@ -154,12 +158,18 @@ class MainActivity : ComponentActivity() {
         else if (i?.getBooleanExtra(Notifier.EXTRA_OPEN_E2E, false) == true) screen = Screen.E2E
     }
 
-    private fun requestNotificationPermission() {
+    /**
+     * 请求通知权限。byUser = false（登录后自动请求）：Android 13 及以上只弹一次系统授权框，被拒绝、或在系统设置里关了通知时
+     * 什么都不做（首页显示「通知已关闭，点这里开启」）；byUser = true（设置页「去开启」）：弹不出授权框时打开系统通知设置
+     */
+    private fun requestNotificationPermission(byUser: Boolean) {
         if (Notifier.canPost(this)) return
         val granted = Build.VERSION.SDK_INT < 33 ||
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        notifyByUser = byUser
         // 有权限但在系统设置里关了通知：请求权限会直接返回「已授予」，只能打开设置
-        if (granted) Background.openAppNotificationSettings(this) else askNotify.launch(Manifest.permission.POST_NOTIFICATIONS)
+        if (granted) { if (byUser) Background.openAppNotificationSettings(this) }
+        else askNotify.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     private companion object { const val KEY_SCREEN = "screen" }
