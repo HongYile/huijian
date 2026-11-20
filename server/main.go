@@ -21,6 +21,9 @@ func usage() {
   huijian restore [选项] <备份目录>  从备份恢复（需先停止服务端），换服务器时用
   huijian push [选项] 文本          发送消息（选项必须写在文本前面）
   huijian flush                    重发 outbox 中积压的消息
+  huijian agent <login|send|ask|replies|status|logout>
+                                  agent 双向：发可回复的加密消息、等用户回复（huijian agent -h 看详细用法）
+  huijian mcp                      stdio MCP 服务（工具 notify / ask / check_replies），先用 huijian agent login 登录
   huijian admin-link               生成 5 分钟有效的一次性管理登录链接（管理后台只能在服务器上进入，
                                   docker：docker exec huijian huijian admin-link）
   huijian invite new [-n 数量] [-uses 次数] [-days 天数] [-note 备注]
@@ -99,6 +102,10 @@ func main() {
 		os.Exit(runRelease(os.Args[2:]))
 	case "server-push":
 		os.Exit(runServerPush(os.Args[2:]))
+	case "agent":
+		os.Exit(runAgentCLI(os.Args[2:]))
+	case "mcp":
+		os.Exit(runMCP(os.Args[2:]))
 	case "version", "-v", "--version":
 		fmt.Println(version)
 	default:
