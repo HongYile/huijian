@@ -65,6 +65,7 @@ var (
 	errAgentPending   = errors.New("等待批准的 agent 登录请求太多，请先在设备上处理")
 	errAgentState     = errors.New("这个 agent 会话的状态已经变了，请刷新")
 	errAgentTaken     = errors.New("这个请求已经由另一台设备处理")
+	errAgentRestart   = errors.New("批准中途重新开始了：为了安全，这次登录请求已作废，请让 agent 重新登录")
 )
 
 type AgentKey struct {
@@ -290,19 +291,31 @@ func (s *Store) agentStep(userID int64, id string, f func(tx *sql.Tx, a *AgentSe
 	return nil
 }
 
-// AgentChallenge：批准设备出随机数 na（别的设备已经接手时 errAgentTaken）
+// AgentChallenge：批准设备出随机数 na（别的设备已经接手时 errAgentTaken）。
+// agent 已经揭晓过 nb 之后不能再换 na：否则（被攻破的）服务器知道 nb 后可以挑 na 凑出想要的核对码。
+// 同一台设备在揭晓后重新开始 → 这次请求作废（errAgentRestart），agent 重新登录（新钥匙、新 nb）
 func (s *Store) AgentChallenge(userID int64, id, deviceID, na string) error {
-	return s.agentStep(userID, id, func(tx *sql.Tx, a *AgentSession) error {
+	restarted := false
+	err := s.agentStep(userID, id, func(tx *sql.Tx, a *AgentSession) error {
 		if a.State != agentPending {
 			return errAgentState
 		}
 		if a.NADevice != "" && a.NADevice != deviceID {
 			return errAgentTaken
 		}
-		// 同一台设备重新开始：nb 一起清空，agent 要重新揭晓（换了 na，旧的核对码作废）
-		_, err := tx.Exec(`UPDATE agent_sessions SET na=?, na_device=?, nb='' WHERE id=?`, na, deviceID, id)
+		if a.NB != "" {
+			restarted = true
+			_, err := tx.Exec(`UPDATE agent_sessions SET state=?, ended_at=? WHERE id=?`, agentExpired, now(), id)
+			return err
+		}
+		// 还没揭晓：可以换 na（agent 还没交出 nb，旧的核对码也还没出现）
+		_, err := tx.Exec(`UPDATE agent_sessions SET na=?, na_device=? WHERE id=?`, na, deviceID, id)
 		return err
 	})
+	if err == nil && restarted {
+		return errAgentRestart
+	}
+	return err
 }
 
 // AgentReveal：agent 揭晓 nb（只能在出了 na 之后、揭晓一次）
@@ -342,12 +355,24 @@ func (s *Store) AgentDeny(userID int64, id string) error {
 	})
 }
 
-// AgentTakeToken：agent 第一次查到「已批准」时取走令牌，之后服务器只留哈希
+// agentTokenWindow：批准后多久内可以取走令牌（agent 一直不来取，明文令牌不能一直留在数据库里）
+const agentTokenWindow = 10 * 60
+
+// AgentTakeToken：agent 第一次查到「已批准」时取走令牌，之后服务器只留哈希。
+// 比较后清空（UPDATE … WHERE token_once=?）：两个并发查询只有一个拿得到
 func (s *Store) AgentTakeToken(id string) string {
 	var tok string
-	s.db.QueryRow(`SELECT token_once FROM agent_sessions WHERE id=? AND state=?`, id, agentApproved).Scan(&tok)
-	if tok != "" {
-		s.db.Exec(`UPDATE agent_sessions SET token_once='' WHERE id=?`, id)
+	var at int64
+	s.db.QueryRow(`SELECT token_once, approved_at FROM agent_sessions WHERE id=? AND state=?`, id, agentApproved).Scan(&tok, &at)
+	if tok == "" {
+		return ""
+	}
+	res, err := s.db.Exec(`UPDATE agent_sessions SET token_once='' WHERE id=? AND token_once=?`, id, tok)
+	if err != nil {
+		return ""
+	}
+	if n, _ := res.RowsAffected(); n != 1 || now()-at > agentTokenWindow {
+		return ""
 	}
 	return tok
 }
@@ -454,17 +479,19 @@ func (s *Store) InsertAgentReply(userID int64, sid string, msgID int64, e2e, cop
 	return id, nil
 }
 
-// expireAgentReplies：3 天没取走的回复删掉密文、记为过期；30 天前的记录整条删除
-func expireAgentReplies(x q) {
-	x.Exec(`UPDATE agent_replies SET state=?, e2e='' WHERE state=? AND created_at<?`, replyExpired, replySent, now()-agentReplyKeep)
-	x.Exec(`DELETE FROM agent_replies WHERE created_at<?`, now()-agentHistoryKeep)
-	x.Exec(`DELETE FROM agent_sessions WHERE ended_at>0 AND ended_at<?`, now()-agentHistoryKeep)
+// ExpireAgent：3 天没取走的回复删掉密文、记为过期；30 天前的记录整条删除；批准后 10 分钟没取走的令牌清掉。
+// 由后台每 10 分钟执行一次（backup.go 的 startBackground）
+func (s *Store) ExpireAgent() {
+	s.db.Exec(`UPDATE agent_replies SET state=?, e2e='' WHERE state=? AND created_at<?`, replyExpired, replySent, now()-agentReplyKeep)
+	s.db.Exec(`DELETE FROM agent_replies WHERE created_at<?`, now()-agentHistoryKeep)
+	s.db.Exec(`DELETE FROM agent_sessions WHERE ended_at>0 AND ended_at<?`, now()-agentHistoryKeep)
+	s.db.Exec(`UPDATE agent_sessions SET token_once='' WHERE token_once!='' AND approved_at<?`, now()-agentTokenWindow)
 }
 
 // PendingAgentReplies：会话还没取走的回复
 func (s *Store) PendingAgentReplies(sid string) ([]AgentReply, error) {
-	expireAgentReplies(s.db)
-	rows, err := s.db.Query(`SELECT id,msg_id,e2e,created_at FROM agent_replies WHERE session_id=? AND state=? ORDER BY id LIMIT 100`, sid, replySent)
+	rows, err := s.db.Query(`SELECT id,msg_id,e2e,created_at FROM agent_replies WHERE session_id=? AND state=? AND created_at>=? ORDER BY id LIMIT 100`,
+		sid, replySent, now()-agentReplyKeep)
 	if err != nil {
 		return nil, err
 	}
@@ -493,7 +520,6 @@ func (s *Store) AckAgentReply(a *AgentSession, replyID int64, receipt string) (b
 
 // AgentRepliesFor：设备查看某条消息下的回复（副本、状态、回执）
 func (s *Store) AgentRepliesFor(userID, msgID int64) ([]AgentReply, error) {
-	expireAgentReplies(s.db)
 	rows, err := s.db.Query(`SELECT id,session_id,msg_id,copy,device,state,receipt,created_at,received_at FROM agent_replies
 		WHERE user_id=? AND msg_id=? ORDER BY id`, userID, msgID)
 	if err != nil {
@@ -505,6 +531,9 @@ func (s *Store) AgentRepliesFor(userID, msgID int64) ([]AgentReply, error) {
 		var r AgentReply
 		if err := rows.Scan(&r.ID, &r.SessionID, &r.MsgID, &r.Copy, &r.Device, &r.State, &r.Receipt, &r.CreatedAt, &r.ReceivedAt); err != nil {
 			return nil, err
+		}
+		if r.State == replySent && r.CreatedAt < now()-agentReplyKeep { // 定时清理还没跑到
+			r.State = replyExpired
 		}
 		out = append(out, r)
 	}

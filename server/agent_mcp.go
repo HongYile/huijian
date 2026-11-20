@@ -8,7 +8,9 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -29,7 +31,14 @@ type mcpServer struct {
 	slot  string
 	out   io.Writer
 	outMu sync.Mutex
-	stMu  sync.Mutex // 会话状态文件：同一时间只有一个工具调用读写（ask 等回复期间别的工具调用排队）
+
+	// mu 保护下面这些：会话状态在内存里只有一份（槽位文件锁保证没有别的进程同时改它）。
+	// 只在读写状态时持有；ask 等回复（长轮询）期间不持有，notify / check_replies 不用排队
+	mu      sync.Mutex
+	st      *agentState
+	unlock  func()
+	waiting map[int64]int                 // 正在 ask 等回复的消息 id（check_replies 不交出这些消息的回复）
+	cancels map[string]context.CancelFunc // 进行中的工具调用（按请求 id），收到 notifications/cancelled 时取消
 }
 
 func runMCP(args []string) int {
@@ -39,7 +48,41 @@ func runMCP(args []string) int {
 		return 2
 	}
 	m := &mcpServer{slot: *slot, out: os.Stdout}
+	defer m.release()
 	return m.serve(os.Stdin)
+}
+
+// state：取会话状态（第一次用时锁住槽位并读入）。调用方持有 m.mu
+func (m *mcpServer) state() (*agentState, error) {
+	if m.st != nil {
+		return m.st, nil
+	}
+	s, unlock, err := openAgentSlot(m.slot)
+	if err != nil {
+		return nil, err
+	}
+	m.st, m.unlock = s, unlock
+	return s, nil
+}
+
+// release：放开槽位（会话失效后放开，让 huijian agent login 能重新登录；下次工具调用再读）。调用方持有 m.mu，或进程退出时
+func (m *mcpServer) release() {
+	if m.unlock != nil {
+		m.unlock()
+	}
+	m.st, m.unlock = nil, nil
+}
+
+// failed：会话失效（结束、key 吊销）时放开槽位，并给出提示
+func (m *mcpServer) failed(prefix string, err error) (string, bool) {
+	var he *agentHTTPError
+	if errors.As(err, &he) && (he.Status == 401 || he.Status == 403) {
+		m.mu.Lock()
+		m.release()
+		m.mu.Unlock()
+		return prefix + err.Error() + "（会话已结束或 Agent key 已吊销：请用户在终端运行 huijian agent login 重新登录）", true
+	}
+	return prefix + err.Error(), true
 }
 
 func (m *mcpServer) send(v any) {
@@ -71,7 +114,18 @@ func (m *mcpServer) serve(in io.Reader) int {
 			m.fail(json.RawMessage("null"), -32700, "JSON 解析失败")
 			continue
 		}
-		if len(r.ID) == 0 { // 通知（notifications/initialized 等）：不回复
+		if len(r.ID) == 0 { // 通知：不回复。notifications/cancelled 取消进行中的调用（例如用户中断了 ask）
+			if r.Method == "notifications/cancelled" {
+				var p struct {
+					RequestID json.RawMessage `json:"requestId"`
+				}
+				json.Unmarshal(r.Params, &p)
+				m.mu.Lock()
+				if c := m.cancels[string(p.RequestID)]; c != nil {
+					c()
+				}
+				m.mu.Unlock()
+			}
 			continue
 		}
 		switch r.Method {
@@ -92,15 +146,34 @@ func (m *mcpServer) serve(in io.Reader) int {
 		case "tools/list":
 			m.reply(r.ID, map[string]any{"tools": mcpTools()})
 		case "tools/call":
+			ctx, cancel := context.WithCancel(context.Background())
+			m.mu.Lock()
+			if m.cancels == nil {
+				m.cancels = map[string]context.CancelFunc{}
+			}
+			m.cancels[string(r.ID)] = cancel
+			m.mu.Unlock()
 			wg.Add(1)
 			go func(r mcpReq) { // ask 可能等很久：每个调用单独跑，不挡住别的请求
 				defer wg.Done()
-				m.call(r)
+				defer func() {
+					m.mu.Lock()
+					delete(m.cancels, string(r.ID))
+					m.mu.Unlock()
+					cancel()
+				}()
+				m.call(ctx, r)
 			}(r)
 		default:
 			m.fail(r.ID, -32601, "不支持的方法："+r.Method)
 		}
 	}
+	// 输入结束（客户端退出）：取消进行中的调用
+	m.mu.Lock()
+	for _, c := range m.cancels {
+		c()
+	}
+	m.mu.Unlock()
 	wg.Wait()
 	return 0
 }
@@ -126,7 +199,7 @@ func mcpTools() []map[string]any {
 	}
 }
 
-func (m *mcpServer) call(r mcpReq) {
+func (m *mcpServer) call(ctx context.Context, r mcpReq) {
 	var p struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -135,11 +208,11 @@ func (m *mcpServer) call(r mcpReq) {
 		m.fail(r.ID, -32602, "参数格式不对")
 		return
 	}
-	text, isErr := m.tool(p.Name, p.Arguments)
+	text, isErr := m.tool(ctx, p.Name, p.Arguments)
 	m.reply(r.ID, map[string]any{"content": []map[string]any{{"type": "text", "text": text}}, "isError": isErr})
 }
 
-func (m *mcpServer) tool(name string, raw json.RawMessage) (string, bool) {
+func (m *mcpServer) tool(ctx context.Context, name string, raw json.RawMessage) (string, bool) {
 	var a struct {
 		Title    string   `json:"title"`
 		Body     string   `json:"body"`
@@ -150,13 +223,6 @@ func (m *mcpServer) tool(name string, raw json.RawMessage) (string, bool) {
 	}
 	if len(raw) > 0 && json.Unmarshal(raw, &a) != nil {
 		return "参数格式不对", true
-	}
-	// 工具调用一个一个来：会话状态（消息序号、处理过的回复）只有一份，并发写会丢序号（幂等键重复，消息被服务器当成重发吞掉）
-	m.stMu.Lock()
-	defer m.stMu.Unlock()
-	s, err := loadAgentState(m.slot)
-	if err != nil {
-		return err.Error(), true
 	}
 	switch name {
 	case "notify":
@@ -170,9 +236,9 @@ func (m *mcpServer) tool(name string, raw json.RawMessage) (string, bool) {
 			}
 			prio = *a.Priority
 		}
-		id, err := agentSend(s, agentPayload{V: 1, Kind: "message", Text: a.Title, Desp: a.Body}, prio, env("HUIJIAN_TOPIC", "agent"), "")
+		id, _, err := m.push(ctx, agentPayload{V: 1, Kind: "message", Text: a.Title, Desp: a.Body}, prio)
 		if err != nil {
-			return "发送失败：" + err.Error(), true
+			return m.failed("发送失败：", err)
 		}
 		return fmt.Sprintf("已发出（消息 %d）", id), false
 	case "ask":
@@ -191,35 +257,136 @@ func (m *mcpServer) tool(name string, raw json.RawMessage) (string, bool) {
 		if a.Timeout > 0 {
 			timeout = time.Duration(min(max(a.Timeout, 10), 86400)) * time.Second
 		}
-		id, err := agentSend(s, agentPayload{V: 1, Kind: "message", Text: a.Question, Desp: a.Body, Ask: true, Choices: a.Choices}, 4,
-			env("HUIJIAN_TOPIC", "agent"), "")
+		id, seq, err := m.push(ctx, agentPayload{V: 1, Kind: "message", Text: a.Question, Desp: a.Body, Ask: true, Choices: a.Choices}, 4)
 		if err != nil {
-			return "发送失败：" + err.Error(), true
+			return m.failed("发送失败：", err)
 		}
-		got, err := agentWaitReply(s, id, timeout)
+		got, err := m.wait(ctx, id, seq, timeout)
 		if err != nil {
 			if _, ok := err.(*agentTimeout); ok {
 				return fmt.Sprintf("超时：等了 %v 用户没有回复（消息 %d）。之后可以用 check_replies 看看用户有没有回。", timeout, id), false
 			}
-			return "等回复失败：" + err.Error(), true
+			if ctx.Err() != nil {
+				return fmt.Sprintf("已取消等待（消息 %d）。用户之后的回复可以用 check_replies 取。", id), true
+			}
+			return m.failed("等回复失败：", err)
 		}
 		return got.Text, false
 	case "check_replies":
-		all := s.Inbox
-		got, err := agentFetch(s, 0)
-		if err != nil {
-			return "取回复失败：" + err.Error(), true
+		if err := m.fetch(ctx, 0); err != nil {
+			return m.failed("取回复失败：", err)
 		}
-		all = append(all, got...)
-		s.Inbox = nil
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		s, err := m.state()
+		if err != nil {
+			return err.Error(), true
+		}
+		// 正在 ask 等着的回复留给那次调用
+		var out, keep []agentGot
+		for _, g := range s.Inbox {
+			if m.waiting[g.MsgID] > 0 {
+				keep = append(keep, g)
+			} else {
+				out = append(out, g)
+			}
+		}
+		s.Inbox = keep
 		if err := s.save(); err != nil {
 			return "保存会话失败：" + err.Error(), true
 		}
-		if len(all) == 0 {
+		if len(out) == 0 {
 			return "没有新回复", false
 		}
-		b, _ := json.Marshal(all)
+		b, _ := json.Marshal(out)
 		return string(b), false
 	}
 	return "没有这个工具：" + name, true
+}
+
+// push：持锁加密、记序号、发出
+func (m *mcpServer) push(ctx context.Context, p agentPayload, prio int) (int64, int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, err := m.state()
+	if err != nil {
+		return 0, 0, err
+	}
+	return agentSend(ctx, s, p, prio, env("HUIJIAN_TOPIC", "agent"), "")
+}
+
+// fetch：取一次回复。网络请求不持锁；解开、存盘持锁；回执在存盘之后发
+func (m *mcpServer) fetch(ctx context.Context, wait time.Duration) error {
+	m.mu.Lock()
+	s, err := m.state()
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	raw, err := agentPoll(ctx, s, wait)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	receipts, bad := agentAccept(s, raw)
+	if len(receipts) > 0 {
+		err = s.save()
+	}
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if len(receipts) > 0 {
+		return agentAck(ctx, s, receipts)
+	}
+	if bad > 0 {
+		sleepCtx(ctx, min(wait, 5*time.Second))
+	}
+	return nil
+}
+
+// wait：等某条消息（id、seq）的回复
+func (m *mcpServer) wait(ctx context.Context, id, seq int64, timeout time.Duration) (agentGot, error) {
+	m.mu.Lock()
+	if m.waiting == nil {
+		m.waiting = map[int64]int{}
+	}
+	m.waiting[id]++
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		if m.waiting[id]--; m.waiting[id] <= 0 {
+			delete(m.waiting, id)
+		}
+		m.mu.Unlock()
+	}()
+	deadline := time.Now().Add(timeout)
+	for {
+		m.mu.Lock()
+		var got agentGot
+		ok := false
+		if m.st != nil {
+			if got, ok = m.st.take(id, seq); ok {
+				m.st.save()
+			}
+		}
+		m.mu.Unlock()
+		if ok {
+			return got, nil
+		}
+		left := time.Until(deadline)
+		if left <= 0 {
+			return agentGot{}, &agentTimeout{timeout}
+		}
+		if err := ctx.Err(); err != nil {
+			return agentGot{}, err
+		}
+		if err := m.fetch(ctx, min(left, agentWaitMax)); err != nil {
+			if agentFatal(err) || ctx.Err() != nil {
+				return agentGot{}, err
+			}
+			fmt.Fprintln(os.Stderr, "取回复出错，稍后重试：", err)
+			sleepCtx(ctx, 5*time.Second)
+		}
+	}
 }

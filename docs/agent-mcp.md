@@ -180,21 +180,29 @@ Mac、iPhone、安卓同步做：
 
 | 用途 | 格式 | 算法 |
 |---|---|---|
-| 登录承诺 | `commit = SHA-256("huijian agent v1 commit" ‖ 会话公钥 ‖ 账号公钥 ‖ nb)` | 同设备批准，只换前缀 |
+| 登录承诺 | `commit = SHA-256("huijian agent v1 commit" ‖ 会话公钥 ‖ 账号公钥 ‖ nb ‖ SHA-256(会话名称))` | 名称也在承诺里：服务器改不了设备上显示、写进证明的名称 |
 | 核对码 | `SHA-256("huijian agent v1 sas" ‖ 会话公钥 ‖ 账号公钥 ‖ na ‖ nb)` 前 4 字节（大端）mod 1000000，6 位 | 同上 |
 | 会话证明 `hja1` | `hja1.<base64url(nonce‖密文)>`，AES-256-GCM，附加数据 `hja1`，钥匙 `HKDF-SHA256(salt="huijian agent v1 attest", ikm=账号私钥)`，明文 `{"session_id","pub","name","approved_at"}` | 只有持有账号私钥的设备能写、能验 |
 | agent → 账号 `hje2` | `hje2.<kid>.<session_id>.<base64url(enc‖ct)>`；HPKE auth（发送方 = 会话私钥，接收方 = 账号公钥），info `huijian agent v1 message`，附加数据 `hje2.<kid>.<session_id>` | 消息和回执都用它 |
 | 消息载荷 | `{"v":1,"kind":"message","text","desp","ask":bool,"choices":[…],"seq":n,"sent_at":秒}` | `choices` 最多 4 个、每个最长 20 字 |
 | 回执载荷 | `{"v":1,"kind":"receipt","reply_id":n,"n":"<回复里的随机数>","received_at":秒}` | |
 | 设备 → agent `hjq1` | `hjq1.<session_id>.<base64url(enc‖ct)>`；HPKE auth（发送方 = 账号私钥，接收方 = 会话公钥，取自会话证明），info `huijian agent v1 reply`，附加数据 `hjq1.<session_id>.<msg_id>` | |
-| 回复载荷 | `{"v":1,"text","n":"<16 字节随机数 base64url>","sent_at":秒,"device":"<设备名>"}` | 文字最长 16 KB；agent 记下处理过的 `n`（保留 3 天），重放的丢弃 |
+| 回复载荷 | `{"v":1,"re_seq":n,"text","n":"<16 字节随机数 base64url>","sent_at":秒,"device":"<设备名>"}` | `re_seq` = 被回复消息载荷里的 `seq`（设备解开消息得到）：agent 只认 `re_seq` 和自己记下的「消息 id → seq」都对得上的回复，服务器挪不了「回的是哪个问题」。文字最长 16 KB；agent 记下处理过的 `n`（保留 3 天），`sent_at` 早于 3 天或在未来的拒绝 |
 | 回复副本 | 普通 `hje1` 信封（加密给账号公钥），载荷同上 | 同账号其他设备靠它显示回复内容（`hjq1` 只有 agent 解得开） |
+
+登录与收发的几条规则（2026-11-20 审查后补充）：
+- agent 揭晓 nb 之后，challenge 再变就放弃这次登录（重新 `login`：新会话钥匙、新 nb）；服务端在揭晓后收到同一台设备的新 challenge 时把请求作废（409）。否则服务器知道 nb 后可以挑 na 凑出想要的核对码。
+- 会话令牌在批准后 10 分钟内只能取走一次（比较后清空）；没取走的由定时清理删掉。
+- agent 收到回复：先解开、核对、存进本地待交付列表并存盘，再发回执；回执没送到时下次照发，内容不重复交出。
+- 一个会话槽位同一时间只能被一个进程使用（文件锁）；同时跑多个 agent 用不同槽位、各自登录。幂等键带随机数；服务端遇到同一幂等键、不同密文时返回 409。
+- 设备只信任**当前账号钥匙**写的会话证明来回复；重置加密前的证明只用来显示历史消息。
+- 回复副本（hje1）任何人都能用账号公钥写：副本只用来显示「回复过什么」，✓✓ 只看 agent 用会话私钥写的回执（核对 reply_id 和 n）。
 
 共用核心（`core/src/agent.rs`，JSON 操作见 `api.rs`）给设备一侧提供：
 
 | 操作 | 参数 → 结果 |
 |---|---|
-| `agent_commit` | `{pub, account, nonce}` → `{commit}`：设备用**自己私钥算出的**账号公钥核对 agent 揭晓的 nb |
+| `agent_commit` | `{pub, account, nonce, name}` → `{commit}`：设备用**自己私钥算出的**账号公钥核对 agent 揭晓的 nb |
 | `agent_sas` | `{pub, account, na, nb}` → `{code}` |
 | `agent_attest_seal` | `{sk, session_id, pub, name, approved_at}` → `{attest}` |
 | `agent_attest_open` | `{sk, attest, session_id, pub}` → `{name, approved_at}`；证明里的会话 id、公钥对不上时 `format` |

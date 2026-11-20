@@ -130,6 +130,20 @@ func (b *agentWaiters) unsub(sid string, ch chan struct{}) {
 	}
 }
 
+// notifyAll：吊销 key、重置加密、删除账号后叫醒所有长轮询，让它们重新核对令牌（不用等满 60 秒）
+func (b *agentWaiters) notifyAll() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, chs := range b.m {
+		for ch := range chs {
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
+		}
+	}
+}
+
 func (b *agentWaiters) notify(sid string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -180,6 +194,7 @@ func (h *Hub) handleAgentKeyRevoke(w http.ResponseWriter, r *http.Request, d *De
 		apiErr(w, 404, "Agent key 不存在")
 		return
 	}
+	h.agentWait.notifyAll()
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
@@ -217,7 +232,7 @@ func agentStepErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		apiErr(w, 404, "agent 会话不存在")
-	case errors.Is(err, errAgentTaken), errors.Is(err, errAgentState):
+	case errors.Is(err, errAgentTaken), errors.Is(err, errAgentState), errors.Is(err, errAgentRestart):
 		apiErr(w, 409, err.Error())
 	default:
 		apiErr(w, 500, "操作失败")
@@ -477,6 +492,10 @@ func (h *Hub) handleAgentPush(w http.ResponseWriter, r *http.Request, a *AgentSe
 		Text: text, Source: a.Name, SrcIP: h.realIP(r), Idem: idem, E2E: in.E2E, AgentSession: a.ID, Ask: in.Ask})
 	if errors.Is(err, errAccountGone) {
 		apiErr(w, 403, err.Error())
+		return
+	}
+	if errors.Is(err, errIdemConflict) {
+		apiErr(w, 409, err.Error())
 		return
 	}
 	if err != nil {

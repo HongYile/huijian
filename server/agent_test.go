@@ -63,7 +63,7 @@ func (f *agentFixture) login(t *testing.T, name string) (sid, token string, sess
 	nb := randBytes(32)
 	pub := sessSK.PublicKey().Bytes()
 	sid = e.agentMust(200, "POST", "/v1/agent/sessions", f.ak, map[string]any{"name": name, "pub": b64of(pub),
-		"commit": b64of(agentCommit(pub, acct, nb))})["session_id"].(string)
+		"commit": b64of(agentCommit(pub, acct, nb, name))})["session_id"].(string)
 	// 设备：看到请求，出 na
 	na := randBytes(32)
 	e.agentMust(200, "POST", "/v1/agent/sessions/"+sid+"/challenge", f.tokA, map[string]any{"nonce": b64of(na)})
@@ -82,7 +82,7 @@ func (f *agentFixture) login(t *testing.T, name string) (sid, token string, sess
 	}
 	rev, _ := b64.DecodeString(req["reveal"].(string))
 	cm, _ := b64.DecodeString(req["commit"].(string))
-	if !bytes.Equal(agentCommit(pub, f.acctSK.PublicKey().Bytes(), rev), cm) {
+	if !bytes.Equal(agentCommit(pub, f.acctSK.PublicKey().Bytes(), rev, req["name"].(string)), cm) {
 		t.Fatal("承诺核对失败")
 	}
 	if agentSAS(pub, f.acctSK.PublicKey().Bytes(), na, rev) != agentCode {
@@ -117,7 +117,16 @@ func (f *agentFixture) push(t *testing.T, sid, token string, sessSK *ecdh.Privat
 // reply：设备用账号私钥加密给会话公钥（取自证明），附上给账号自己的副本
 func (f *agentFixture) reply(t *testing.T, tok, sid string, sessPub *ecdh.PublicKey, msgID int64, text string) (int, map[string]any, string) {
 	n := b64of(randBytes(16))
-	b, _ := json.Marshal(agentReply{V: 1, Text: text, N: n, SentAt: now(), Device: "mac"})
+	// 和设备一样：回复带上被回复消息载荷里的 seq（解开消息拿到）
+	var env string
+	f.e.h.st.db.QueryRow(`SELECT e2e FROM messages WHERE id=?`, msgID).Scan(&env)
+	var seq int64
+	if pt, err := agentOpen(f.acctSK, sessPub, env); err == nil {
+		var p agentPayload
+		json.Unmarshal(pt, &p)
+		seq = p.Seq
+	}
+	b, _ := json.Marshal(agentReply{V: 1, ReSeq: seq, Text: text, N: n, SentAt: now(), Device: "mac"})
 	env, err := agentReplySeal(sessPub, f.acctSK, sid, msgID, b, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -303,7 +312,7 @@ func TestAgentLoginRules(t *testing.T) {
 		nb := randBytes(32)
 		pub := sk.PublicKey().Bytes()
 		sid := e.agentMust(200, "POST", "/v1/agent/sessions", f.ak, map[string]any{"name": "x", "pub": b64of(pub),
-			"commit": b64of(agentCommit(pub, acctPub, nb))})["session_id"].(string)
+			"commit": b64of(agentCommit(pub, acctPub, nb, "x"))})["session_id"].(string)
 		return sid, pub, nb
 	}
 	e.agentMust(400, "POST", "/v1/agent/sessions", f.ak, map[string]any{"name": "x", "pub": "abc", "commit": b64of(randBytes(32))})
@@ -389,7 +398,7 @@ func TestAgentVectors(t *testing.T) {
 	na, nb := bytes.Repeat([]byte{0xa1}, 32), bytes.Repeat([]byte{0xb2}, 32)
 	sid := "as0123456789abcdef"
 	msg := []byte(`{"v":1,"kind":"message","text":"要不要删掉 3 个异常样本？","ask":true,"choices":["删","保留"],"seq":1,"sent_at":1763600000}`)
-	reply := []byte(`{"v":1,"text":"删","n":"AAECAwQFBgcICQoLDA0ODw","sent_at":1763600100,"device":"mac"}`)
+	reply := []byte(`{"v":1,"re_seq":1,"text":"删","n":"AAECAwQFBgcICQoLDA0ODw","sent_at":1763600100,"device":"mac"}`)
 	env, err := agentSeal(acct.PublicKey(), sess, sid, msg, eph1)
 	if err != nil {
 		t.Fatal(err)
@@ -406,7 +415,8 @@ func TestAgentVectors(t *testing.T) {
 		"session_sk": b64of(sess.Bytes()), "session_pub": b64of(sess.PublicKey().Bytes()),
 		"eph1_sk": b64of(eph1.Bytes()), "eph2_sk": b64of(eph2.Bytes()),
 		"na": b64of(na), "nb": b64of(nb),
-		"commit":     b64of(agentCommit(sess.PublicKey().Bytes(), acct.PublicKey().Bytes(), nb)),
+		"name":       "家里 Claude Code",
+		"commit":     b64of(agentCommit(sess.PublicKey().Bytes(), acct.PublicKey().Bytes(), nb, "家里 Claude Code")),
 		"sas":        agentSAS(sess.PublicKey().Bytes(), acct.PublicKey().Bytes(), na, nb),
 		"session_id": sid, "message": string(msg), "message_envelope": env,
 		"msg_id": 42, "reply": string(reply), "reply_envelope": rep,
@@ -440,4 +450,59 @@ func TestAgentVectors(t *testing.T) {
 			t.Fatalf("向量 %s 变了：%s ≠ %s", k, w, mustJSON(old[k]))
 		}
 	}
+}
+
+// 审查修复：揭晓后重新开始 → 作废；令牌只取一次、超时不给；幂等键相同内容不同 → 409
+func TestAgentReviewFixes(t *testing.T) {
+	f := newAgentFixture(t)
+	e := f.e
+	acctPub := f.acctSK.PublicKey().Bytes()
+	newReq := func() (string, []byte) {
+		sk := newKey(t)
+		nb := randBytes(32)
+		pub := sk.PublicKey().Bytes()
+		return e.agentMust(200, "POST", "/v1/agent/sessions", f.ak, map[string]any{"name": "r", "pub": b64of(pub),
+			"commit": b64of(agentCommit(pub, acctPub, nb, "r"))})["session_id"].(string), nb
+	}
+	// 揭晓前同一台设备可以换 na
+	s1, nb1 := newReq()
+	e.agentMust(200, "POST", "/v1/agent/sessions/"+s1+"/challenge", f.tokA, map[string]any{"nonce": b64of(randBytes(32))})
+	e.agentMust(200, "POST", "/v1/agent/sessions/"+s1+"/challenge", f.tokA, map[string]any{"nonce": b64of(randBytes(32))})
+	e.agentMust(200, "POST", "/v1/agent/sessions/"+s1+"/reveal", f.ak, map[string]any{"nonce": b64of(nb1)})
+	// 揭晓后再换 na：请求作废，agent 看到 expired
+	e.agentMust(409, "POST", "/v1/agent/sessions/"+s1+"/challenge", f.tokA, map[string]any{"nonce": b64of(randBytes(32))})
+	if st := e.agentMust(200, "GET", "/v1/agent/sessions/"+s1, f.ak, nil); st["state"] != agentExpired {
+		t.Fatalf("揭晓后重新开始应作废：%v", st)
+	}
+
+	// 令牌：并发取只有一个拿到；批准超过 10 分钟没取走的不给
+	sid, tok, sk := f.login(t, "令牌")
+	if tok == "" || e.h.st.AgentTakeToken(sid) != "" {
+		t.Fatal("令牌只能取一次")
+	}
+	s2, nb2 := newReq()
+	e.agentMust(200, "POST", "/v1/agent/sessions/"+s2+"/challenge", f.tokA, map[string]any{"nonce": b64of(randBytes(32))})
+	e.agentMust(200, "POST", "/v1/agent/sessions/"+s2+"/reveal", f.ak, map[string]any{"nonce": b64of(nb2)})
+	att, _ := agentAttestSeal(f.acctSK.Bytes(), agentAttest{SessionID: s2, Name: "r", ApprovedAt: now()})
+	e.agentMust(200, "POST", "/v1/agent/sessions/"+s2+"/approve", f.tokA, map[string]any{"attest": att})
+	e.h.st.db.Exec(`UPDATE agent_sessions SET approved_at=? WHERE id=?`, now()-agentTokenWindow-1, s2)
+	if st := e.agentMust(200, "GET", "/v1/agent/sessions/"+s2, f.ak, nil); st["token"] != nil {
+		t.Fatalf("超时没取走的令牌不应再给：%v", st)
+	}
+	e.h.st.ExpireAgent()
+	var once string
+	e.h.st.db.QueryRow(`SELECT token_once FROM agent_sessions WHERE id=?`, s2).Scan(&once)
+	if once != "" {
+		t.Fatal("定时清理应清掉没取走的令牌")
+	}
+
+	// 幂等键：同一内容是重发（同一个 id），不同内容 409
+	b, _ := json.Marshal(agentPayload{V: 1, Kind: "message", Text: "a", Seq: 1, SentAt: now()})
+	env1, _ := agentSeal(f.acctSK.PublicKey(), sk, sid, b, nil)
+	env2, _ := agentSeal(f.acctSK.PublicKey(), sk, sid, b, nil)
+	id1 := e.agentMust(200, "POST", "/v1/agent/push", tok, map[string]any{"e2e": env1, "idem": "k1"})["id"]
+	if again := e.agentMust(200, "POST", "/v1/agent/push", tok, map[string]any{"e2e": env1, "idem": "k1"})["id"]; again != id1 {
+		t.Fatal("同一内容重发应返回同一条")
+	}
+	e.agentMust(409, "POST", "/v1/agent/push", tok, map[string]any{"e2e": env2, "idem": "k1"})
 }

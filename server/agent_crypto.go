@@ -27,13 +27,16 @@ const (
 	agentAttestPfx   = "hja1"
 )
 
-// agentCommit：登录承诺（会话公钥、agent 看到的账号公钥、agent 的随机数 nb）
-func agentCommit(sessPub, account, nb []byte) []byte {
+// agentCommit：登录承诺（会话公钥、agent 看到的账号公钥、agent 的随机数 nb、会话名称的 SHA-256）。
+// 名称也在承诺里：服务器改不了设备上显示、写进会话证明的名称
+func agentCommit(sessPub, account, nb []byte, name string) []byte {
+	nh := sha256.Sum256([]byte(name))
 	h := sha256.New()
 	h.Write([]byte("huijian agent v1 commit"))
 	h.Write(sessPub)
 	h.Write(account)
 	h.Write(nb)
+	h.Write(nh[:])
 	return h.Sum(nil)
 }
 
@@ -140,6 +143,7 @@ func agentOpen(accountSK *ecdh.PrivateKey, sessPub *ecdh.PublicKey, env string) 
 // agentReply：hjq1 的明文
 type agentReply struct {
 	V      int    `json:"v"`
+	ReSeq  int64  `json:"re_seq"` // 被回复的消息在载荷里的 seq（agent 自己定的序号，服务器换不了「回的是哪个问题」）
 	Text   string `json:"text"`
 	N      string `json:"n"`
 	SentAt int64  `json:"sent_at"`

@@ -13,6 +13,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/json"
@@ -38,8 +39,9 @@ type agentState struct {
 	Token      string           `json:"token"`       // 会话令牌 ST_
 	AccountPub string           `json:"account_pub"` // 登录时钉住的账号公钥
 	Seq        int64            `json:"seq"`
-	Seen       map[string]int64 `json:"seen,omitempty"`  // 处理过的回复随机数 n → 时间（保留 3 天，重放的丢弃）
-	Inbox      []agentGot       `json:"inbox,omitempty"` // ask 等待期间收到的、别的消息的回复（下次 replies 时交出）
+	Sent       map[int64]int64  `json:"sent,omitempty"`  // 发出的消息 id → 载荷里的 seq（核对回复回的是哪条；只留最近 500 条）
+	Seen       map[string]int64 `json:"seen,omitempty"`  // 处理过的回复随机数 n → 时间（保留 3 天；更早发出的回复一律拒绝）
+	Inbox      []agentGot       `json:"inbox,omitempty"` // 已解开、还没交出的回复（先存盘再发回执，进程中途退出也不丢）
 	path       string
 }
 
@@ -47,6 +49,7 @@ type agentState struct {
 type agentGot struct {
 	ReplyID int64  `json:"reply_id"`
 	MsgID   int64  `json:"msg_id"`
+	ReSeq   int64  `json:"re_seq"` // 回复的是 seq 为几的那条消息
 	Text    string `json:"text"`
 	SentAt  int64  `json:"sent_at"`
 	Device  string `json:"device,omitempty"`
@@ -86,6 +89,9 @@ func loadAgentState(slot string) (*agentState, error) {
 	if s.Seen == nil {
 		s.Seen = map[string]int64{}
 	}
+	if s.Sent == nil {
+		s.Sent = map[int64]int64{}
+	}
 	return &s, nil
 }
 
@@ -94,6 +100,13 @@ func (s *agentState) save() error {
 	for n, at := range s.Seen {
 		if at < cut {
 			delete(s.Seen, n)
+		}
+	}
+	if len(s.Sent) > 500 {
+		for id, seq := range s.Sent {
+			if seq <= s.Seq-500 {
+				delete(s.Sent, id)
+			}
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
@@ -138,12 +151,16 @@ type agentHTTPError struct {
 func (e *agentHTTPError) Error() string { return fmt.Sprintf("%d %s", e.Status, e.Msg) }
 
 func agentReq(method, server, path, tok string, body any, timeout time.Duration) (map[string]any, error) {
+	return agentReqCtx(context.Background(), method, server, path, tok, body, timeout)
+}
+
+func agentReqCtx(ctx context.Context, method, server, path, tok string, body any, timeout time.Duration) (map[string]any, error) {
 	var rd io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
 		rd = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, strings.TrimRight(server, "/")+path, rd)
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(server, "/")+path, rd)
 	if err != nil {
 		return nil, err
 	}
@@ -247,10 +264,18 @@ func agentLoginCmd(args []string) error {
 	if !strings.HasPrefix(*key, "AK_") {
 		return errors.New("缺少 Agent key：用 -k 或环境变量 HUIJIAN_AGENT_KEY（在回笺「设置 → Agent」里新建）")
 	}
+	if strings.TrimSpace(*name) == "" || len(*name) > 64 {
+		return errors.New("名字 1–64 字节")
+	}
 	dir, err := agentDir(*slot)
 	if err != nil {
 		return err
 	}
+	unlock, err := lockAgentSlot(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	info, err := agentReq("GET", srv, "/v1/agent/info", *key, nil, 20*time.Second)
 	if err != nil {
 		return err
@@ -261,7 +286,8 @@ func agentLoginCmd(args []string) error {
 		return errors.New("服务器返回的账号公钥格式不对")
 	}
 	// 以前登录过：钉住的账号公钥必须一致（不一致说明账号重置过加密，或者有人冒充服务器）
-	if old, err := loadAgentState(*slot); err == nil && old.Server == srv && old.AccountPub != "" && old.AccountPub != acct {
+	old, _ := loadAgentState(*slot)
+	if old != nil && old.Server == srv && old.AccountPub != "" && old.AccountPub != acct {
 		fmt.Fprintln(os.Stderr, "注意：账号的加密公钥和上次登录时不同（可能在设备上重置过加密）。这次登录的核对码会核对新公钥。")
 	}
 	sk, err := ecdh.X25519().GenerateKey(rand.Reader)
@@ -271,7 +297,7 @@ func agentLoginCmd(args []string) error {
 	nb := randBytes(32)
 	pub := sk.PublicKey().Bytes()
 	out, err := agentReq("POST", srv, "/v1/agent/sessions", *key,
-		map[string]any{"name": *name, "pub": b64.EncodeToString(pub), "commit": b64.EncodeToString(agentCommit(pub, acctRaw, nb))}, 20*time.Second)
+		map[string]any{"name": *name, "pub": b64.EncodeToString(pub), "commit": b64.EncodeToString(agentCommit(pub, acctRaw, nb, *name))}, 20*time.Second)
 	if err != nil {
 		return err
 	}
@@ -303,20 +329,25 @@ func agentLoginCmd(args []string) error {
 				return errors.New("没核对核对码就被批准了，不安全，已放弃：请重新登录")
 			}
 			s := &agentState{Server: srv, Name: *name, SessionID: sid, SK: b64.EncodeToString(sk.Bytes()), Token: tok, AccountPub: acct,
-				Seen: map[string]int64{}, path: filepath.Join(dir, "session.json")}
+				Seen: map[string]int64{}, Sent: map[int64]int64{}, path: filepath.Join(dir, "session.json")}
 			if err := s.save(); err != nil {
 				return fmt.Errorf("保存会话失败：%v", err)
+			}
+			// 这个槽位以前的会话：结束掉（不然它在服务器上一直是已批准，只能等用户手动结束）
+			if old != nil && old.Token != "" && old.SessionID != sid {
+				agentReq("DELETE", old.Server, "/v1/agent/session", old.Token, nil, 10*time.Second)
 			}
 			fmt.Fprintf(os.Stderr, "✅ 登录成功：「%s」（会话 %s，槽位 %s）\n", *name, sid, *slot)
 			return nil
 		}
 		if ch, _ := st["challenge"].(string); ch != "" && ch != revealed {
+			// 揭晓过 nb 之后 na 又变了：不能再用同一个 nb 算新的核对码（服务器知道 nb 后可以挑 na 凑出想要的核对码）。放弃，重新登录
+			if revealed != "" {
+				return errors.New("批准中途重新开始了：为了安全，这次登录作废，请重新执行 huijian agent login")
+			}
 			na, err := b64.DecodeString(ch)
 			if err != nil || len(na) != 32 {
 				return errors.New("服务器返回的随机数格式不对")
-			}
-			if revealed != "" {
-				fmt.Fprintln(os.Stderr, "批准设备重新开始了，核对码已更新：")
 			}
 			// 先算出核对码，再揭晓 nb（顺序同设备批准：服务器在看到 nb 之前就得定下 na）
 			code := agentSAS(pub, acctRaw, na, nb)
@@ -327,7 +358,7 @@ func agentLoginCmd(args []string) error {
 				}
 			}
 			revealed = ch
-			fmt.Fprintf(os.Stderr, "核对码：%s %s —— 和回笺设备上显示的一致，再在设备上点「一致，批准」。\n", code[:3], code[3:])
+			fmt.Fprintf(os.Stderr, "核对码：%s %s（「%s」）—— 和回笺设备上显示的核对码、名称都一致，再在设备上点「一致，批准」。\n", code[:3], code[3:], *name)
 		}
 		time.Sleep(2 * time.Second)
 	}
@@ -371,11 +402,12 @@ func agentSendCmd(args []string, ask bool) error {
 			p = 4
 		}
 	}
-	s, err := loadAgentState(*slot)
+	s, unlock, err := openAgentSlot(*slot)
 	if err != nil {
 		return err
 	}
-	id, err := agentSend(s, agentPayload{V: 1, Kind: "message", Text: title, Desp: *desp, Ask: *askFlag, Choices: choices}, p, *topic, *thread)
+	defer unlock()
+	id, seq, err := agentSend(context.Background(), s, agentPayload{V: 1, Kind: "message", Text: title, Desp: *desp, Ask: *askFlag, Choices: choices}, p, *topic, *thread)
 	if err != nil {
 		return err
 	}
@@ -384,7 +416,7 @@ func agentSendCmd(args []string, ask bool) error {
 		return nil
 	}
 	fmt.Fprintf(os.Stderr, "已发出（消息 %d），等回复…\n", id)
-	got, err := agentWaitReply(s, id, *timeout)
+	got, err := agentWaitReply(context.Background(), s, id, seq, *timeout)
 	if err != nil {
 		return err
 	}
@@ -392,114 +424,200 @@ func agentSendCmd(args []string, ask bool) error {
 	return nil
 }
 
-// agentSend：加密并发送一条会话消息，返回消息 id
-func agentSend(s *agentState, p agentPayload, prio int, topic, thread string) (int64, error) {
+// openAgentSlot：锁住槽位并读出会话状态
+func openAgentSlot(slot string) (*agentState, func(), error) {
+	dir, err := agentDir(slot)
+	if err != nil {
+		return nil, nil, err
+	}
+	unlock, err := lockAgentSlot(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	s, err := loadAgentState(slot)
+	if err != nil {
+		unlock()
+		return nil, nil, err
+	}
+	return s, unlock, nil
+}
+
+// agentSend：加密并发送一条会话消息，返回消息 id 和载荷里的 seq。调用方持有槽位（和进程内的锁）
+func agentSend(ctx context.Context, s *agentState, p agentPayload, prio int, topic, thread string) (int64, int64, error) {
 	sk, acct, err := s.keys()
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	s.Seq++
 	p.Seq, p.SentAt = s.Seq, now()
 	b, _ := json.Marshal(p)
 	env, err := agentSeal(acct, sk, s.SessionID, b, nil)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if err := s.save(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	out, err := agentReq("POST", s.Server, "/v1/agent/push", s.Token, map[string]any{"e2e": env, "priority": prio, "topic": topic,
-		"thread": thread, "ask": p.Ask, "idem": fmt.Sprintf("%s-%d", s.SessionID, s.Seq)}, 30*time.Second)
+	// 幂等键带随机数：序号万一重复（状态文件被恢复成旧的），服务器也不会把新消息当成旧消息的重发吞掉
+	out, err := agentReqCtx(ctx, "POST", s.Server, "/v1/agent/push", s.Token, map[string]any{"e2e": env, "priority": prio, "topic": topic,
+		"thread": thread, "ask": p.Ask, "idem": fmt.Sprintf("%s-%d-%s", s.SessionID, s.Seq, randHex(4))}, 30*time.Second)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	id, _ := out["id"].(float64)
-	return int64(id), nil
+	f, _ := out["id"].(float64)
+	id := int64(f)
+	if id <= 0 {
+		return 0, 0, errors.New("服务器没有返回消息 id")
+	}
+	s.Sent[id] = p.Seq
+	if err := s.save(); err != nil {
+		return 0, 0, err
+	}
+	return id, p.Seq, nil
 }
 
 type agentTimeout struct{ d time.Duration }
 
 func (e *agentTimeout) Error() string { return fmt.Sprintf("等了 %v 没有收到回复", e.d) }
 
-// agentFetch：取一次回复（最多等 wait），解开、核对、去重，并给每条发回执。核对不过的回复丢弃（不发回执）
-func agentFetch(s *agentState, wait time.Duration) ([]agentGot, error) {
-	sk, acct, err := s.keys()
-	if err != nil {
-		return nil, err
-	}
-	out, err := agentReq("GET", s.Server, "/v1/agent/replies?wait="+strconv.Itoa(int(wait.Seconds())), s.Token, nil, wait+30*time.Second)
+// agentRaw：服务器给的一条回复（还没解开）
+type agentRaw struct {
+	ReplyID int64
+	MsgID   int64
+	E2E     string
+}
+
+// agentPoll：取一次回复（最多等 wait），只走网络、不碰状态
+func agentPoll(ctx context.Context, s *agentState, wait time.Duration) ([]agentRaw, error) {
+	out, err := agentReqCtx(ctx, "GET", s.Server, "/v1/agent/replies?wait="+strconv.Itoa(int(wait.Seconds())), s.Token, nil, wait+30*time.Second)
 	if err != nil {
 		return nil, err
 	}
 	raw, _ := out["replies"].([]any)
-	var got []agentGot
-	var receipts []map[string]any
+	var got []agentRaw
 	for _, x := range raw {
 		m, _ := x.(map[string]any)
 		rid, _ := m["reply_id"].(float64)
 		mid, _ := m["msg_id"].(float64)
 		env, _ := m["e2e"].(string)
-		r, err := agentReplyOpen(sk, acct, env, int64(mid))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "回复 %d 核对失败（不是你的设备发的，或者被改过），已忽略\n", int64(rid))
-			continue
-		}
-		b, _ := json.Marshal(agentPayload{V: 1, Kind: "receipt", ReplyID: int64(rid), N: r.N, ReceivedAt: now()})
-		rc, err := agentSeal(acct, sk, s.SessionID, b, nil)
-		if err != nil {
-			return nil, err
-		}
-		receipts = append(receipts, map[string]any{"reply_id": int64(rid), "e2e": rc})
-		if _, dup := s.Seen[r.N]; dup {
-			continue // 重放：回执照发（让服务器不再给），内容不再交出
-		}
-		s.Seen[r.N] = now()
-		got = append(got, agentGot{ReplyID: int64(rid), MsgID: int64(mid), Text: r.Text, SentAt: r.SentAt, Device: r.Device})
-	}
-	if len(receipts) > 0 {
-		if err := s.save(); err != nil {
-			return nil, err
-		}
-		if _, err := agentReq("POST", s.Server, "/v1/agent/replies/ack", s.Token, map[string]any{"receipts": receipts}, 30*time.Second); err != nil {
-			return nil, err
-		}
-	} else if len(raw) > 0 {
-		time.Sleep(min(wait, 5*time.Second)) // 只剩核对不过的：别空转
+		got = append(got, agentRaw{int64(rid), int64(mid), env})
 	}
 	return got, nil
 }
 
-// agentWaitReply：等某条消息的回复；期间收到的别的回复放进 inbox
-func agentWaitReply(s *agentState, msgID int64, timeout time.Duration) (agentGot, error) {
+// agentAccept：解开、核对、去重。新回复放进 Inbox、记进 Seen（调用方持锁，之后存盘再发回执）。
+// 返回要发的回执和核对不过的条数（核对不过的不发回执，留在服务器上，设备那边仍是「已发出」）
+func agentAccept(s *agentState, raw []agentRaw) (receipts []map[string]any, bad int) {
+	sk, acct, err := s.keys()
+	if err != nil {
+		return nil, len(raw)
+	}
+	t := now()
+	for _, x := range raw {
+		r, err := agentReplyOpen(sk, acct, x.E2E, x.MsgID)
+		ok := err == nil
+		// 回的是哪条：载荷里的 re_seq 必须是自己发过的序号；记得这个消息 id 时还要对得上（服务器不能把回复挪到别的问题下）
+		if ok && (r.ReSeq < 1 || r.ReSeq > s.Seq) {
+			ok = false
+		}
+		if seq, known := s.Sent[x.MsgID]; ok && known && seq != r.ReSeq {
+			ok = false
+		}
+		// 太旧（超过处理记录的保留期，可能是重放）或时间在未来的不要
+		if ok && (r.SentAt < t-agentReplyKeep || r.SentAt > t+86400) {
+			ok = false
+		}
+		if !ok {
+			fmt.Fprintf(os.Stderr, "回复 %d 核对失败（不是你的设备发的、被改过、挪了位置或太旧），已忽略\n", x.ReplyID)
+			bad++
+			continue
+		}
+		b, _ := json.Marshal(agentPayload{V: 1, Kind: "receipt", ReplyID: x.ReplyID, N: r.N, ReceivedAt: t})
+		rc, err := agentSeal(acct, sk, s.SessionID, b, nil)
+		if err != nil {
+			bad++
+			continue
+		}
+		receipts = append(receipts, map[string]any{"reply_id": x.ReplyID, "e2e": rc})
+		if _, dup := s.Seen[r.N]; dup {
+			continue // 处理过（上次回执没送到，或者重放）：回执照发，内容不再交出（第一次已经放进 Inbox）
+		}
+		s.Seen[r.N] = t
+		s.Inbox = append(s.Inbox, agentGot{ReplyID: x.ReplyID, MsgID: x.MsgID, ReSeq: r.ReSeq, Text: r.Text, SentAt: r.SentAt, Device: r.Device})
+	}
+	return receipts, bad
+}
+
+func agentAck(ctx context.Context, s *agentState, receipts []map[string]any) error {
+	_, err := agentReqCtx(ctx, "POST", s.Server, "/v1/agent/replies/ack", s.Token, map[string]any{"receipts": receipts}, 30*time.Second)
+	return err
+}
+
+// agentFetch：单进程用（命令行）：取一次、解开、存盘、再发回执。回复留在 Inbox 里，由调用方取走
+func agentFetch(ctx context.Context, s *agentState, wait time.Duration) error {
+	raw, err := agentPoll(ctx, s, wait)
+	if err != nil {
+		return err
+	}
+	receipts, bad := agentAccept(s, raw)
+	if len(receipts) > 0 {
+		if err := s.save(); err != nil {
+			return err
+		}
+		return agentAck(ctx, s, receipts)
+	}
+	if bad > 0 {
+		sleepCtx(ctx, min(wait, 5*time.Second)) // 只剩核对不过的：别空转
+	}
+	return nil
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
+}
+
+// take：从 Inbox 取出回复消息 msgID（seq 为 seq）的第一条
+func (s *agentState) take(msgID, seq int64) (agentGot, bool) {
+	for i, g := range s.Inbox {
+		if g.MsgID == msgID && g.ReSeq == seq {
+			s.Inbox = append(s.Inbox[:i:i], s.Inbox[i+1:]...)
+			return g, true
+		}
+	}
+	return agentGot{}, false
+}
+
+// agentFatal：会话已经失效（结束、key 吊销、额度满）的错误，不用重试
+func agentFatal(err error) bool {
+	var he *agentHTTPError
+	return errors.As(err, &he) && (he.Status == 401 || he.Status == 403 || he.Status == 429)
+}
+
+// agentWaitReply：等某条消息的回复（命令行）；期间收到的别的回复留在 Inbox
+func agentWaitReply(ctx context.Context, s *agentState, msgID, seq int64, timeout time.Duration) (agentGot, error) {
 	deadline := time.Now().Add(timeout)
 	for {
+		if g, ok := s.take(msgID, seq); ok {
+			return g, s.save()
+		}
 		left := time.Until(deadline)
 		if left <= 0 {
 			return agentGot{}, &agentTimeout{timeout}
 		}
-		got, err := agentFetch(s, min(left, agentWaitMax))
-		if err != nil {
-			var he *agentHTTPError
-			if errors.As(err, &he) && (he.Status == 401 || he.Status == 403 || he.Status == 429) {
+		if err := ctx.Err(); err != nil {
+			return agentGot{}, err
+		}
+		if err := agentFetch(ctx, s, min(left, agentWaitMax)); err != nil {
+			if agentFatal(err) || ctx.Err() != nil {
 				return agentGot{}, err
 			}
 			fmt.Fprintln(os.Stderr, "取回复出错，稍后重试：", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		var mine *agentGot
-		for i := range got {
-			if got[i].MsgID == msgID && mine == nil {
-				mine = &got[i]
-			} else {
-				s.Inbox = append(s.Inbox, got[i])
-			}
-		}
-		if err := s.save(); err != nil {
-			return agentGot{}, err
-		}
-		if mine != nil {
-			return *mine, nil
+			sleepCtx(ctx, 5*time.Second)
 		}
 	}
 }
@@ -511,21 +629,19 @@ func agentRepliesCmd(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	s, err := loadAgentState(*slot)
+	s, unlock, err := openAgentSlot(*slot)
 	if err != nil {
 		return err
 	}
-	all := s.Inbox
-	if len(all) == 0 || *wait > 0 {
-		got, err := agentFetch(s, time.Duration(max(0, *wait))*time.Second)
-		if err != nil {
+	defer unlock()
+	if len(s.Inbox) == 0 || *wait > 0 {
+		if err := agentFetch(context.Background(), s, time.Duration(min(max(0, *wait), 60))*time.Second); err != nil && len(s.Inbox) == 0 {
 			return err
 		}
-		all = append(all, got...)
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
-	for _, g := range all {
+	for _, g := range s.Inbox {
 		enc.Encode(g)
 	}
 	s.Inbox = nil
@@ -553,10 +669,11 @@ func agentLogoutCmd(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	s, err := loadAgentState(*slot)
+	s, unlock, err := openAgentSlot(*slot)
 	if err != nil {
 		return err
 	}
+	defer unlock()
 	if _, err := agentReq("DELETE", s.Server, "/v1/agent/session", s.Token, nil, 20*time.Second); err != nil {
 		var he *agentHTTPError
 		if !(errors.As(err, &he) && he.Status == 401) {

@@ -185,6 +185,7 @@ func (h *Hub) adminDeleteAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.br.Notify(id)
+	h.agentWait.notifyAll()
 	if len(orphans) > 0 {
 		h.unlinkPending(orphans)
 	}

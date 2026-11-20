@@ -208,7 +208,7 @@ fn dispatch(m: &Map<String, Value>) -> R {
         "sas_code" => Ok(json!({"code": crypto::sas_code(&key32(m, "pub")?, &key32(m, "account")?, &key32(m, "na")?, &key32(m, "nb")?)})),
 
         // ---------- agent 双向（docs/agent-mcp.md §11） ----------
-        "agent_commit" => Ok(json!({"commit": b64(&agent::commit(&key32(m, "pub")?, &key32(m, "account")?, &key32(m, "nonce")?))})),
+        "agent_commit" => Ok(json!({"commit": b64(&agent::commit(&key32(m, "pub")?, &key32(m, "account")?, &key32(m, "nonce")?, s(m, "name")?))})),
         "agent_sas" => Ok(json!({"code": agent::sas(&key32(m, "pub")?, &key32(m, "account")?, &key32(m, "na")?, &key32(m, "nb")?)})),
         "agent_attest_seal" => {
             let a = Attest {

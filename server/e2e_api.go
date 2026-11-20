@@ -291,6 +291,7 @@ func (h *Hub) handleE2EReset(w http.ResponseWriter, r *http.Request, d *Device) 
 	log.Printf("账号 #%d 重置端到端加密（新钥匙 %s，设备 %s）", d.UserID, kid, d.ID)
 	h.startSealBacklog(d.UserID)       // 之前补加密跳过的明文（附件读不到等）用新钥匙再试
 	h.st.EndAllAgentSessions(d.UserID) // agent 会话证明是旧钥匙写的、agent 钉住的是旧公钥：全部结束，重新登录
+	h.agentWait.notifyAll()
 	writeJSON(w, 200, map[string]any{"kid": kid})
 }
 

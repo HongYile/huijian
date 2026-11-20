@@ -4,10 +4,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -35,7 +37,7 @@ func (f *agentFixture) approveNext(t *testing.T) string {
 				pub, _ := b64.DecodeString(s["pub"].(string))
 				rev, _ := b64.DecodeString(s["reveal"].(string))
 				cm, _ := b64.DecodeString(s["commit"].(string))
-				if !bytes.Equal(agentCommit(pub, f.acctSK.PublicKey().Bytes(), rev), cm) {
+				if !bytes.Equal(agentCommit(pub, f.acctSK.PublicKey().Bytes(), rev, s["name"].(string)), cm) {
 					t.Fatal("承诺核对失败")
 				}
 				att, _ := agentAttestSeal(f.acctSK.Bytes(), agentAttest{SessionID: sid, Pub: s["pub"].(string), Name: s["name"].(string), ApprovedAt: now()})
@@ -81,8 +83,22 @@ func TestAgentCLIAndMCP(t *testing.T) {
 		t.Fatal("槽位名不能带路径")
 	}
 
+	// 槽位上锁：同一槽位第二个进程拿不到锁
+	unlock, err := lockAgentSlot(filepath.Dir(p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockAgentSlot(filepath.Dir(p)); runtime.GOOS != "windows" && err == nil {
+		t.Fatal("同一槽位不能同时被两处锁住")
+	}
+	if err := agentLogoutCmd([]string{"-s", "t1"}); err == nil || !strings.Contains(err.Error(), "正被另一个进程使用") {
+		t.Fatalf("槽位被占用时命令应失败：%v", err)
+	}
+	unlock()
+	ctx := context.Background()
+
 	// 发消息：设备能解开，载荷带 choices、seq
-	id, err := agentSend(s, agentPayload{V: 1, Kind: "message", Text: "选一个", Ask: true, Choices: []string{"A", "B"}}, 4, "agent", "")
+	id, seq1, err := agentSend(ctx, s, agentPayload{V: 1, Kind: "message", Text: "选一个", Ask: true, Choices: []string{"A", "B"}}, 4, "agent", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,20 +109,33 @@ func TestAgentCLIAndMCP(t *testing.T) {
 	pt, err := agentOpen(f.acctSK, pk, env)
 	var pl agentPayload
 	json.Unmarshal(pt, &pl)
-	if err != nil || pl.Text != "选一个" || len(pl.Choices) != 2 || pl.Seq != 1 || !pl.Ask {
+	if err != nil || pl.Text != "选一个" || len(pl.Choices) != 2 || pl.Seq != 1 || seq1 != 1 || !pl.Ask {
 		t.Fatalf("设备解开的消息不对：%+v %v", pl, err)
 	}
 
+	// 服务器把回复挪到别的消息下（回复里的 re_seq 对不上记下的序号）：不收、不发回执
+	other, seq2, _ := agentSend(ctx, s, agentPayload{V: 1, Kind: "message", Text: "进度"}, 3, "agent", "")
+	moved, _ := json.Marshal(agentReply{V: 1, ReSeq: seq1, Text: "挪过来的", N: b64of(randBytes(16)), SentAt: now()})
+	menv, _ := agentReplySeal(pk, f.acctSK, sid, other, moved, nil)
+	if rc, bad := agentAccept(s, []agentRaw{{ReplyID: 99, MsgID: other, E2E: menv}}); len(rc) != 0 || bad != 1 || len(s.Inbox) != 0 {
+		t.Fatalf("挪了位置的回复应拒绝：%d %d %v", len(rc), bad, s.Inbox)
+	}
+	// 太旧的回复（超过处理记录的保留期）：拒绝
+	old, _ := json.Marshal(agentReply{V: 1, ReSeq: seq2, Text: "旧", N: b64of(randBytes(16)), SentAt: now() - agentReplyKeep - 10})
+	oenv, _ := agentReplySeal(pk, f.acctSK, sid, other, old, nil)
+	if _, bad := agentAccept(s, []agentRaw{{ReplyID: 98, MsgID: other, E2E: oenv}}); bad != 1 {
+		t.Fatal("太旧的回复应拒绝")
+	}
+
 	// 等回复：期间先来一条别的消息的回复（进 inbox），再来这条的
-	other, _ := agentSend(s, agentPayload{V: 1, Kind: "message", Text: "进度"}, 3, "agent", "")
 	go func() {
 		time.Sleep(300 * time.Millisecond)
 		f.reply(t, f.tokB, sid, pk, other, "收到")
 		time.Sleep(300 * time.Millisecond)
 		f.reply(t, f.tokB, sid, pk, id, "B")
 	}()
-	got, err := agentWaitReply(s, id, 10*time.Second)
-	if err != nil || got.Text != "B" || got.MsgID != id {
+	got, err := agentWaitReply(ctx, s, id, seq1, 10*time.Second)
+	if err != nil || got.Text != "B" || got.MsgID != id || got.ReSeq != seq1 {
 		t.Fatalf("等回复：%+v %v", got, err)
 	}
 	if len(s.Inbox) != 1 || s.Inbox[0].Text != "收到" {
@@ -119,11 +148,29 @@ func TestAgentCLIAndMCP(t *testing.T) {
 		t.Fatalf("应有 2 条带回执的回复：%d", n)
 	}
 	// 超时
-	if _, err := agentWaitReply(s, id, 1*time.Second); err == nil {
+	if _, err := agentWaitReply(ctx, s, id, seq1, 1*time.Second); err == nil {
 		t.Fatal("应超时")
 	} else if _, ok := err.(*agentTimeout); !ok {
 		t.Fatalf("应返回超时：%v", err)
 	}
+
+	// 回执没送到（ack 失败）：回复已经存进 Inbox，重新读出来还在；再取到同一条时不重复交出
+	third, seq3, _ := agentSend(ctx, s, agentPayload{V: 1, Kind: "message", Text: "第三条", Ask: true}, 4, "agent", "")
+	f.reply(t, f.tokB, sid, pk, third, "三")
+	raw, _ := agentPoll(ctx, s, 0)
+	if rc, _ := agentAccept(s, raw); len(rc) != 1 || s.save() != nil {
+		t.Fatal("应解开一条回复")
+	}
+	s2, _ := loadAgentState("t1")
+	if g, ok := s2.take(third, seq3); !ok || g.Text != "三" {
+		t.Fatalf("没发回执的回复应留在 Inbox：%+v", s2.Inbox)
+	}
+	raw, _ = agentPoll(ctx, s2, 0)
+	if rc, _ := agentAccept(s2, raw); len(rc) != 1 || len(s2.Inbox) != 1 || s2.Inbox[0].Text != "收到" {
+		t.Fatalf("再取到同一条：照发回执、不重复交出：%d %v", len(rc), s2.Inbox)
+	}
+	agentAck(ctx, s2, func() []map[string]any { rc, _ := agentAccept(s2, raw); return rc }())
+	s2.save()
 
 	// MCP：initialize、tools/list、notify、ask（设备回复）、check_replies（交出 inbox）
 	pr, pw := io.Pipe()
@@ -142,7 +189,7 @@ func TestAgentCLIAndMCP(t *testing.T) {
 		for i := 0; i < 100; i++ {
 			var mid int64
 			f.e.h.st.db.QueryRow(`SELECT id FROM messages WHERE agent_session=? AND ask=1 ORDER BY id DESC LIMIT 1`, sid).Scan(&mid)
-			if mid > id {
+			if mid > third {
 				f.reply(t, f.tokB, sid, pk, mid, "继续")
 				return
 			}
@@ -154,6 +201,7 @@ func TestAgentCLIAndMCP(t *testing.T) {
 	time.Sleep(3 * time.Second)
 	pw.Close()
 	<-finished
+	m.release()
 	res := map[float64]map[string]any{}
 	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
 		var r map[string]any

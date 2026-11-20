@@ -412,6 +412,7 @@ func (h *Hub) startBackground() func() {
 					log.Printf("搬回暂存附件失败: %v", safeErr(err))
 				}
 				h.unlinkPending(nil) // 补加密后没删掉的旧明文附件（NAS 掉线、文件被占用时）
+				h.st.ExpireAgent()   // agent 回复 3 天过期、记录 30 天删除、没取走的令牌清掉
 			}
 		}
 	}()

@@ -480,6 +480,9 @@ type NewMessage struct {
 
 // InsertMessage 写入消息；若 idem 已存在则返回原消息 id 且 dup=true。
 // errAccountGone：账号在推送处理途中被删除（messages 没有外键，要自己核对，否则会留下孤儿消息和附件）
+// errIdemConflict：agent 消息的幂等键和已有消息相同、内容不同
+var errIdemConflict = errors.New("幂等键已被另一条消息使用")
+
 var errAccountGone = errors.New("pushkey 所属账号已删除")
 
 func (s *Store) InsertMessage(m NewMessage) (id int64, dup bool, err error) {
@@ -496,7 +499,12 @@ func (s *Store) InsertMessage(m NewMessage) (id int64, dup bool, err error) {
 		return 0, false, errAccountGone
 	}
 	if m.Idem != "" {
-		if err := tx.QueryRow(`SELECT id FROM messages WHERE user_id=? AND idem=?`, m.UserID, m.Idem).Scan(&id); err == nil {
+		var oldE2E string
+		if err := tx.QueryRow(`SELECT id, e2e FROM messages WHERE user_id=? AND idem=?`, m.UserID, m.Idem).Scan(&id, &oldE2E); err == nil {
+			// agent 消息：同一个幂等键却是不同的密文，说明是另一条消息（例如两个进程用了同一个序号），不能当成重发吞掉
+			if m.AgentSession != "" && oldE2E != m.E2E {
+				return 0, false, errIdemConflict
+			}
 			return id, true, nil
 		}
 	}

@@ -36,7 +36,8 @@ fn vectors_match_server() {
     assert_eq!(crypto::public_key(&acct_sk), acct_pub);
     assert_eq!(crypto::public_key(&sess_sk), sess_pub);
     let (na, nb) = (k(&v, "na"), k(&v, "nb"));
-    assert_eq!(B64.encode(agent::commit(&sess_pub, &acct_pub, &nb)), st(&v, "commit"));
+    assert_eq!(B64.encode(agent::commit(&sess_pub, &acct_pub, &nb, st(&v, "name"))), st(&v, "commit"));
+    assert_ne!(B64.encode(agent::commit(&sess_pub, &acct_pub, &nb, "别的名字")), st(&v, "commit"));
     assert_eq!(agent::sas(&sess_pub, &acct_pub, &na, &nb), st(&v, "sas"));
     let sid = st(&v, "session_id");
     // 加密结果逐字节一致
@@ -55,7 +56,7 @@ fn vectors_match_server() {
 fn api_ops() {
     let v = vec();
     let (acct_sk, acct_pub, sess_pub, sid) = (st(&v, "account_sk"), st(&v, "account_pub"), st(&v, "session_pub"), st(&v, "session_id"));
-    assert_eq!(ok(json!({"op": "agent_commit", "pub": sess_pub, "account": acct_pub, "nonce": v["nb"]}))["commit"], v["commit"]);
+    assert_eq!(ok(json!({"op": "agent_commit", "pub": sess_pub, "account": acct_pub, "nonce": v["nb"], "name": v["name"]}))["commit"], v["commit"]);
     assert_eq!(ok(json!({"op": "agent_sas", "pub": sess_pub, "account": acct_pub, "na": v["na"], "nb": v["nb"]}))["code"], v["sas"]);
 
     // 会话证明：服务端写的能核对；会话 id 或公钥对不上、换了账号钥匙都不行
@@ -79,7 +80,7 @@ fn api_ops() {
     err(json!({"op": "agent_open", "keys": [acct_sk], "session_pub": sess_pub, "session_id": sid, "envelope": "hje1.x"}), "format");
 
     // 回复：agent 用会话私钥能解开；副本账号自己能解开
-    let payload = r#"{"v":1,"text":"保留","n":"AAAAAAAAAAAAAAAAAAAAAA","sent_at":1,"device":"mac"}"#;
+    let payload = r#"{"v":1,"re_seq":1,"text":"保留","n":"AAAAAAAAAAAAAAAAAAAAAA","sent_at":1,"device":"mac"}"#;
     let r = ok(json!({"op": "agent_reply_seal", "sk": acct_sk, "session_pub": sess_pub, "session_id": sid, "msg_id": 7, "payload": payload}));
     let env = r["envelope"].as_str().unwrap();
     assert!(env.starts_with(&format!("hjq1.{sid}.")));

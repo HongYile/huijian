@@ -12,9 +12,17 @@ pub const ATTEST_PREFIX: &str = "hja1";
 pub const INFO_MESSAGE: &[u8] = b"huijian agent v1 message";
 pub const INFO_REPLY: &[u8] = b"huijian agent v1 reply";
 
-/// 登录承诺：会话公钥、agent 看到的账号公钥、agent 的随机数 nb
-pub fn commit(sess_pub: &[u8; 32], account: &[u8; 32], nb: &[u8; 32]) -> [u8; 32] {
-    Sha256::new().chain_update(b"huijian agent v1 commit").chain_update(sess_pub).chain_update(account).chain_update(nb).finalize().into()
+/// 登录承诺：会话公钥、agent 看到的账号公钥、agent 的随机数 nb、会话名称（SHA-256）。名称在承诺里，服务器改不了
+pub fn commit(sess_pub: &[u8; 32], account: &[u8; 32], nb: &[u8; 32], name: &str) -> [u8; 32] {
+    let nh = Sha256::digest(name.as_bytes());
+    Sha256::new()
+        .chain_update(b"huijian agent v1 commit")
+        .chain_update(sess_pub)
+        .chain_update(account)
+        .chain_update(nb)
+        .chain_update(nh)
+        .finalize()
+        .into()
 }
 
 /// 6 位核对码
