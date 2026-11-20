@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -41,6 +42,10 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.platform.LocalDensity
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -115,6 +120,35 @@ fun HomeScreen(open: (Long) -> Unit, openSettings: () -> Unit, openE2E: () -> Un
     }
     val unread = visible.count { it.id !in read && it.priority >= 2 }
 
+    // 新消息到达（列表按 id 作 key，插到最前面时会停在原来的第一条上，新消息跑到可见区上方）：
+    // 已在顶部 → 自动滚到最上面；不在顶部 → 显示「有 N 条新消息」，点了滚到顶部，自己滚到顶部后消失
+    val listState = rememberLazyListState()
+    val listScope = rememberCoroutineScope()
+    val slop = with(LocalDensity.current) { NewMessages.TOP_SLOP_DP.dp.roundToPx() }
+    var newCount by remember { mutableIntStateOf(0) }
+    var prevTop by remember { mutableStateOf<Long?>(null) }
+    var prevView by remember { mutableStateOf(filter to topic) }
+    LaunchedEffect(shown.firstOrNull()?.id, filter, topic) {
+        val top = shown.firstOrNull()?.id
+        val view = filter to topic
+        if (view != prevView) {
+            // 切换筛选 / 频道：不是新消息，重新开始计数
+            prevView = view; prevTop = top; newCount = 0
+            return@LaunchedEffect
+        }
+        val arrived = NewMessages.arrived(prevTop, shown.map { it.id })
+        val first = listState.layoutInfo.visibleItemsInfo.firstOrNull()
+        val wasAtTop = NewMessages.wasAtTop(prevTop, first?.key, listState.firstVisibleItemScrollOffset, slop)
+        prevTop = top
+        if (arrived == 0) return@LaunchedEffect
+        if (wasAtTop) { newCount = 0; listState.animateScrollToItem(0) } else newCount += arrived
+    }
+    // 自己滚到顶部：提示消失
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset <= slop }
+            .collect { if (it) newCount = 0 }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -161,12 +195,23 @@ fun HomeScreen(open: (Long) -> Unit, openSettings: () -> Unit, openE2E: () -> Un
                     )
                 }
             } else {
-                LazyColumn(Modifier.fillMaxSize().testTag("messageList")) {
-                    items(shown, key = { it.id }) { m ->
-                        // 频道显示名从这里传进去：频道设置变了（包括别的设备改的）消息行跟着更新
-                        val ch = channels[m.topic]?.alias?.takeIf { it.isNotBlank() } ?: m.topic
-                        MessageRow(m, ch, unread = m.id !in read, clock = clock, e2eOn = e2eOn) { open(m.id) }
-                        HorizontalDivider(Modifier.padding(start = 30.dp), color = MaterialTheme.colorScheme.surfaceVariant)
+                Box(Modifier.fillMaxSize()) {
+                    LazyColumn(Modifier.fillMaxSize().testTag("messageList"), state = listState) {
+                        items(shown, key = { it.id }) { m ->
+                            // 频道显示名从这里传进去：频道设置变了（包括别的设备改的）消息行跟着更新
+                            val ch = channels[m.topic]?.alias?.takeIf { it.isNotBlank() } ?: m.topic
+                            MessageRow(m, ch, unread = m.id !in read, clock = clock, e2eOn = e2eOn) { open(m.id) }
+                            HorizontalDivider(Modifier.padding(start = 30.dp), color = MaterialTheme.colorScheme.surfaceVariant)
+                        }
+                    }
+                    if (newCount > 0) Surface(
+                        onClick = { newCount = 0; listScope.launch { listState.animateScrollToItem(0) } },
+                        modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp).testTag("newMessages"),
+                        shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.primary,
+                        shadowElevation = 3.dp,
+                    ) {
+                        Text("有 $newCount 条新消息 ↑", Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                            fontSize = 13.sp, color = MaterialTheme.colorScheme.onPrimary)
                     }
                 }
             }
@@ -260,3 +305,19 @@ fun stateColor(s: ConnState) = when (s) {
 
 @Composable
 fun Spacer8() = Spacer(Modifier.height(8.dp))
+
+/** 首页「新消息」的判断（纯函数，方便单元测试） */
+internal object NewMessages {
+    /** 判断「在顶部」的容差：第一条只被滚走这么多时仍算在顶部 */
+    const val TOP_SLOP_DP = 24
+
+    /** 列表（按 id 从新到旧）最前面比上次的第一条（prevTop）新的有几条；第一次显示、或没有更新的消息时为 0 */
+    fun arrived(prevTop: Long?, ids: List<Long>): Int = if (prevTop == null) 0 else ids.takeWhile { it > prevTop }.size
+
+    /**
+     * 新消息到达之前是否停在顶部：可见区第一条还是上次的第一条，并且几乎没被滚走。
+     * 列表按 key 保持位置，插入后第一条可见的仍是原来那条，所以不管布局是否已经更新都能判断
+     */
+    fun wasAtTop(prevTop: Long?, firstVisibleKey: Any?, offsetPx: Int, slopPx: Int): Boolean =
+        prevTop != null && firstVisibleKey == prevTop && offsetPx <= slopPx
+}
