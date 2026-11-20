@@ -264,6 +264,17 @@ struct KeyRow: View {
     let onRevoke: () -> Void
     var onDelete: (() -> Void)? = nil
     let onDiscard: () -> Void
+    /// 普通 pushkey 收在折叠项里（§11.6）；正在改 key 内容时自动展开
+    @State private var showPlain = false
+
+    /// 默认复制的加密发送密钥（§11.6）：已同步、有效、本机钉住过公钥时才有
+    var encrypted: String? {
+        guard draft.original != nil, !draft.revoked, case .key(let k) = sendKey else { return nil }
+        return k
+    }
+
+    /// 普通 pushkey 这一行要不要展开：没有加密发送密钥、用户点开了、或者正在改 key 内容
+    var plainVisible: Bool { encrypted == nil || showPlain || draft.replacesKey || draft.error != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -286,8 +297,10 @@ struct KeyRow: View {
                 }
                 if !draft.revoked {
                     if draft.original != nil {
-                        Button("复制") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(draft.key, forType: .string) }
+                        // 默认复制加密发送密钥（§11.6）；还没有时复制普通 pushkey
+                        Button("复制") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(encrypted ?? draft.key, forType: .string) }
                             .buttonStyle(SoftButtonStyle())
+                            .help(encrypted != nil ? "复制加密发送密钥" : "复制 pushkey")
                         Button("吊销", action: onRevoke).buttonStyle(SoftButtonStyle(destructive: true))
                     } else {
                         Button("放弃", action: onDiscard).buttonStyle(SoftButtonStyle())
@@ -296,21 +309,39 @@ struct KeyRow: View {
             }
             if draft.revoked {
                 Text(draft.key).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(Theme.text3).strikethrough()
+            } else if let k = encrypted {
+                // 加密发送密钥放在最前面（§11.6）
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Label("加密发送密钥", systemImage: "lock.fill")
+                            .font(.system(size: 11.5, weight: .medium)).foregroundStyle(Theme.text2).fixedSize()
+                        Text(k).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.text2)
+                            .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                        Spacer(minLength: 4)
+                        if let mode { modePicker(mode) }
+                    }
+                    Text(E2E.T.t70).font(.system(size: 11)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
+                    DisclosureGroup(isExpanded: Binding(get: { plainVisible }, set: { showPlain = $0 })) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(E2E.T.t66).font(.system(size: 11)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
+                            HStack(spacing: 8) {
+                                WarmField(placeholder: "key", text: $draft.key, mono: true)
+                                Button("复制") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(draft.key, forType: .string) }
+                                    .buttonStyle(SoftButtonStyle()).help("复制普通 pushkey")
+                            }
+                        }
+                        .padding(.top, 4)
+                    } label: {
+                        Text("显示普通 pushkey").font(.system(size: 11.5)).foregroundStyle(Theme.text3)
+                    }
+                }
             } else {
                 HStack(spacing: 8) {
                     WarmField(placeholder: draft.original == nil ? "留空自动生成，或填 16–64 位自定义 key" : "key", text: $draft.key, mono: true)
-                    if let mode {
-                        Picker("本机", selection: Binding(get: { mode }, set: { onMode($0) })) {
-                            Text("提醒").tag("notify")
-                            Text("静默").tag("silent")
-                            Text("不接收").tag("off")
-                        }
-                        .pickerStyle(.menu).fixedSize()
-                        .help("这把 key 发来的消息在本机：提醒 = 按通知设置弹出；静默 = 只进列表；不接收 = 本机看不到")
-                    }
+                    if let mode { modePicker(mode) }
                 }
             }
-            if sendKey != .hidden, !draft.revoked {
+            if sendKey != .hidden, !draft.revoked, encrypted == nil {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Label("加密发送密钥", systemImage: "lock.fill")
@@ -323,7 +354,7 @@ struct KeyRow: View {
                             Button("复制") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(k, forType: .string) }
                                 .buttonStyle(SoftButtonStyle())
                         case .mismatch:
-                            Text(E2E.T.t43).font(.system(size: 11.5)).foregroundStyle(Theme.danger).fixedSize(horizontal: false, vertical: true)
+                            Text(E2E.T.t46).font(.system(size: 11.5)).foregroundStyle(Theme.danger).fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 4)
                         default:
                             Text(E2E.T.t73).font(.system(size: 11.5)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
@@ -348,6 +379,16 @@ struct KeyRow: View {
         .overlay(alignment: .bottom) {
             if !last { Rectangle().fill(Theme.border.opacity(0.7)).frame(height: 1) }
         }
+    }
+
+    func modePicker(_ mode: String) -> some View {
+        Picker("本机", selection: Binding(get: { mode }, set: { onMode($0) })) {
+            Text("提醒").tag("notify")
+            Text("静默").tag("silent")
+            Text("不接收").tag("off")
+        }
+        .pickerStyle(.menu).fixedSize()
+        .help("这把 key 发来的消息在本机：提醒 = 按通知设置弹出；静默 = 只进列表；不接收 = 本机看不到")
     }
 
     @ViewBuilder var status: some View {

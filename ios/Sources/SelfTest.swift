@@ -480,6 +480,14 @@ final class SelfTest {
         check("登录：旧账号（PBKDF2）登录后自动升级到新登录协议，记下「已升级」",
               E2E.UpgradeMarks(defaults: .standard).isUpgraded(server: model.settings.server, username: user)
               && model.settings.accountID != nil, "accountID=\(String(describing: model.settings.accountID))")
+        // §11.1：密码登录后，账号还没开启加密时在后台自动开启（不生成恢复码、不弹恢复码页），本机随即解锁
+        if model.supports("e2e.auto") == true {
+            for _ in 0..<60 where model.e2eStatus != .unlocked { try? await Task.sleep(nanoseconds: 250_000_000) }
+            check("登录：自动开启加密并解锁，没有恢复码、不弹恢复码页（T23）",
+                  model.e2eStatus == .unlocked && model.e2eRecovery == nil && model.e2eState?.hasRecovery == false
+                  && model.e2ePasswordKeys == nil && model.e2eRing?.pinned != nil,
+                  "\(String(describing: model.e2eStatus))")
+        }
         check("频道显示名（train → 训练）", model.channelName("train") == "训练", model.channelName("train"))
         check("频道设置已落盘（后台冷启动可用）", model.settings.channels.contains { $0.topic == "train" && $0.alias == "训练" }
               && model.settings.channels.contains { $0.topic == "debug" && $0.hidden })
@@ -544,11 +552,23 @@ final class SelfTest {
         } catch { check("长轮询超时", false, shortError(error)) }
 
         // 附件下载 + sha256 校验
-        if let m = model.messages.last(where: { $0.attachments.contains { $0.isImage } }), let a = m.attachments.first(where: \.isImage) {
+        if let m = model.messages.last(where: { $0.attachments.contains { $0.isImage } }), let idx = m.attachments.firstIndex(where: \.isImage) {
+            let a = m.attachments[idx]
             await model.download(a)
-            let f = AppPaths.attachmentFile(a)
-            let sum = try? API.sha256(of: f)
-            check("附件下载并校验（\(a.name)）", model.attState(a) == .done && sum == a.sha256.lowercased(), "\(model.attState(a))")
+            // 服务端 0.8 登录后自动开启加密，会把演示账号的历史明文补加密、换新的附件 id（§11.5）：旧 id 下载返回 410 sealed，
+            // App 重新拉取这条消息，再下载新 id 的同一个附件（解密成原文件）。按「消息 id + 附件序号」找替换后的附件
+            let cur = model.message(m.id).flatMap { $0.attachments.indices.contains(idx) ? $0.attachments[idx] : nil } ?? a
+            let f = AppPaths.attachmentFile(cur)
+            let ok: Bool
+            if cur.key != nil {
+                // 加密附件：服务端的 sha256 是密文的（下载时已校验），落盘的是解密后的原文件
+                ok = model.attState(cur) == .done && FileManager.default.fileExists(atPath: f.path)
+            } else {
+                ok = model.attState(cur) == .done && (try? API.sha256(of: f)) == cur.sha256.lowercased()
+            }
+            check("附件下载并校验（\(cur.name)\(cur.id != a.id ? "，补加密后换成新 id 重新下载" : "")）", ok,
+                  "\(model.attState(cur))，旧 id \(a.id) → \(cur.id)")
+            if cur.id != a.id { check("补加密：旧附件 id 不再记状态（不显示「附件已丢失」）", model.attState(a) == .idle, "\(model.attState(a))") }
             check("图片缩略图可解码", Thumbnail.load(f) != nil)
         } else {
             check("演示数据里有图片附件", false)
@@ -698,6 +718,17 @@ final class SelfTest {
         out("— 端到端加密：接到 AppModel 上")
         guard model.settings.accountID != nil else { check("端到端加密：取到账号 id", false, "/v1/me 没有账号 id"); return }
         let savedSecrets = model.e2eSecrets
+        // 登录时账号可能已经自动开启了加密（§11.1）并钉住了真实公钥：先记下、清掉（这里要测「从没钉住过」），结束后原样恢复
+        let pinsKey = "huijian.e2e.pinned"
+        let pinScope = model.e2eRing?.scope
+        let savedPin = model.e2eRing?.pinned
+        func setPin(_ pub: String?) {
+            guard let pinScope else { return }
+            var pins = (UserDefaults.standard.dictionary(forKey: pinsKey) as? [String: String]) ?? [:]
+            pins[pinScope] = pub
+            UserDefaults.standard.set(pins, forKey: pinsKey)
+        }
+        setPin(nil)
         model.e2eSecrets = E2E.MemorySecrets()
         let base = model.settings.cursor + 300_000
         let ids = [base + 1, base + 2, base + 4, base + 5]
@@ -727,6 +758,28 @@ final class SelfTest {
             }
             let m1 = try msg(ids[0], env)
             check("解码服务端的加密消息：保留信封 e2e", m1.isE2E && m1.e2eStatus == nil)
+            // §11.5 服务器代加密：sealed "server" 识别出来（详情页显示 T64）；发送端加密的没有这个字段
+            let sealedJSON = #"{"id": 1, "type": "e2e", "text": "x", "e2e": "hje1.x", "sealed": "server", "created_at": "2026-11-20T08:00:00Z"}"#
+            let sm = try JSONCoding.decoder.decode(Message.self, from: Data(sealedJSON.utf8))
+            check("服务器代加密的消息：sealed == server", sm.isServerSealed && !m1.isServerSealed)
+            check("写盘读回仍是服务器代加密", (try? JSONCoding.decoder.decode(Message.self, from: JSONCoding.encoder.encode(sm)))?.isServerSealed == true)
+            // 附件 410：reason sealed → 重新拉消息；missing 或没有 reason → 附件丢失
+            // 补加密重新拉取（审查 M2）：只接受「本地明文 → 服务器代加密的同一条」，不能改写发送端加密的或换成别的 id
+            let plainOld = try JSONCoding.decoder.decode(Message.self, from: Data(#"{"id": 1, "text": "明文", "created_at": "2026-11-20T08:00:00Z"}"#.utf8))
+            let notSealed = try JSONCoding.decoder.decode(Message.self, from: Data(#"{"id": 1, "type": "e2e", "e2e": "hje1.x", "created_at": "2026-11-20T08:00:00Z"}"#.utf8))
+            let otherID = try JSONCoding.decoder.decode(Message.self, from: Data(#"{"id": 2, "type": "e2e", "e2e": "hje1.x", "sealed": "server", "created_at": "2026-11-20T08:00:00Z"}"#.utf8))
+            check("补加密替换：明文 → 服务器代加密，接受", AppModel.acceptsSealedReplacement(old: plainOld, fresh: sm, id: 1))
+            check("补加密替换：发送端加密的不能被改写、新记录不是代加密的不接受、id 对不上不接受",
+                  !AppModel.acceptsSealedReplacement(old: sm, fresh: sm, id: 1)
+                  && !AppModel.acceptsSealedReplacement(old: plainOld, fresh: notSealed, id: 1)
+                  && !AppModel.acceptsSealedReplacement(old: plainOld, fresh: otherID, id: 1)
+                  && !AppModel.acceptsSealedReplacement(old: plainOld, fresh: plainOld, id: 1))
+            check("附件 410 sealed：重新拉取这条消息",
+                  AttachmentSealed.parse(status: 410, body: Data(#"{"code":410,"error":"附件已加密，请刷新消息","reason":"sealed","message_id":42}"#.utf8))
+                      == AttachmentSealed(messageID: 42))
+            check("附件 410 missing / 其他状态：不是补加密",
+                  AttachmentSealed.parse(status: 410, body: Data(#"{"code":410,"error":"附件文件已丢失","reason":"missing"}"#.utf8)) == nil
+                  && AttachmentSealed.parse(status: 404, body: Data(#"{"reason":"sealed"}"#.utf8)) == nil)
             model.merge(await model.prepareE2E([m1]))
             var got = model.message(ids[0])
             check("锁定期间收到：标题 T60、正文为空，附件仍是密文", got?.text == E2E.T.t60 && got?.desp == "" && got?.e2eStatus == "locked"
@@ -809,14 +862,21 @@ final class SelfTest {
             let m6 = try msg(base + 6, try E2ESelfTest.sealPayload(pub: kp.pub, text: "y", desp: ""))
             let got6 = await model.prepareE2E([m6]).first
             check("载荷和服务端附件数不一致：T62", got6?.e2eStatus == "format" && got6?.text == E2E.T.t62, "\(String(describing: got6?.e2eStatus))")
-            // 加密附件下载：拿一个真实的（明文）附件冒充密文，解密必然失败：卡片显示「解密失败」，不留文件
-            if var a = model.messages.flatMap(\.attachments).first(where: { $0.name == "metrics.xlsx" }) {
-                a.key = fileKey
+            // 加密附件下载：拿一个服务器上真实存在的附件，配一把不对的附件钥匙，解密必然失败：卡片显示「解密失败」，不留文件。
+            // 服务端 0.8 会补加密演示账号的历史消息、换新附件 id（旧 id 410）：优先用已经补加密好的消息；还没有的先按补加密重拉一次
+            // （服务器没有补加密时返回明文、不替换，附件照样能下载）
+            var target = model.messages.first { $0.isServerSealed && !$0.attachments.isEmpty }
+            if target == nil, let m = model.messages.first(where: { $0.attachments.contains { $0.name == "metrics.xlsx" } }) {
+                await model.refetchSealedBatch([m.id])
+                target = model.message(m.id)
+            }
+            if var a = target?.attachments.first {
+                a.key = fileKey         // 这条消息的附件钥匙不是它：HJF1 解密失败（明文附件同样失败）
                 await model.download(a)
                 check("加密附件解密失败：显示「解密失败」，不留文件", model.attState(a) == .failed("解密失败")
                       && !FileManager.default.fileExists(atPath: AppPaths.attachmentFile(a).path), "\(model.attState(a))")
             } else {
-                check("演示数据里有 metrics.xlsx 附件", false)
+                check("演示数据里有带附件的消息", false)
             }
             // 删除服务器上的明文（§7.4）：收到 purge 变更时本机保留副本，记为「仅本机保留」；对账跳过；之后 delete 变更照常删除
             func plain(_ id: Int64) throws -> Message {
@@ -850,13 +910,11 @@ final class SelfTest {
         }
         model._testRemove(ids)
         model.e2eWipe()
-        // 测试钉住的假公钥不留下（钉住的公钥退出登录也不删，这里是自检自己清理）
-        if let scope = model.e2eRing?.scope, var pins = UserDefaults.standard.dictionary(forKey: "huijian.e2e.pinned") {
-            pins[scope] = nil
-            UserDefaults.standard.set(pins, forKey: "huijian.e2e.pinned")
-        }
+        // 测试钉住的假公钥不留下，恢复测试前真实账号钉住的公钥（钉住的公钥退出登录也不删，这里是自检自己清理）
+        setPin(savedPin)
         model.e2eSecrets = savedSecrets
         model.loadE2EKeys()
+        await model.refreshE2E()
         try? await model.persistNow()
     }
 

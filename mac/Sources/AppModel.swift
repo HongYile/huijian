@@ -192,6 +192,26 @@ final class AppModel: ObservableObject {
     @Published var e2eSetupNote: String?
     /// 更换恢复码结果不确定时的提示（§7 第 3 项）；新恢复码本身存在钥匙串（KeyRing.pendingRecovery）
     @Published var e2eRecoveryNote: String?
+    /// 这次用密码算出的钥匙（只在内存里，不存盘、不留密码原文）：只在账号还没开启、需要自动开启（§11.1）时留着，
+    /// 开启成功、发现已开启（已解锁，或用它解锁过一次）就立即丢掉
+    var e2ePasswordKeys: E2E.PasswordKeys?
+    /// 登录时密码是否偏弱：拿到账号 id 之后（下一次刷新）按账号记下（T24）
+    var e2ePendingWeak: Bool?
+    /// 自动开启失败后的退避：30 秒起，每次翻倍，最多 30 分钟（避免耗尽服务端核对当前密码的限额）
+    var e2eAutoSetupDelay: TimeInterval = 0
+    var e2eAutoSetupNext = Date.distantPast
+    /// 当前账号在本机「活着」：退出登录、换账号时 kill 并换一个新的（进行中的自动开启、重置完成时不再写旧账号的钥匙）
+    var e2eAlive = E2E.AliveFlag()
+    /// 进行中的 refetchSealed 个数（变更触发的和同步循环重试的可能同时在跑）；同步循环里有在跑的就不再发起重试
+    var e2eSealedRuns = 0
+    var e2eSealedRetrying: Bool { e2eSealedRuns > 0 }
+    /// 自动开启加密进行中 / 暂时没成功（加密页显示「正在开启加密…」或说明，并保留手动开启入口）
+    @Published var e2eAutoSetupRunning = false
+    @Published var e2eAutoSetupFailed = false
+    /// 手动开启（§4.1）进行中：这期间不自动开启
+    @Published var e2eManualSetupRunning = false
+    /// 刚重置加密 / 更换了加密钥匙：加密页显示 T.resetDone 和「去 Pushkey 页」，用户关掉为止
+    @Published var e2eResetDone = false
     /// 刚生成的恢复码（开启加密或更换后）：放在 App 状态里，关掉设置窗口再打开还在，用户点「完成」才清除
     @Published var e2eRecoveryCode: String?
     @Published var e2eRecoveryFromSetup = false
@@ -553,6 +573,7 @@ final class AppModel: ObservableObject {
             try adopt(try JSONDecoder().decode(APIClient.PairResult.self, from: r.response), server: trimmed)
             e2eLoginNote = r.note
             e2ePendingLoginKey = r.pendingKey
+            e2eNotePasswordKeys(r.passwordKeys, keep: !r.unlocked)     // 登录时已经解锁：钥匙不留
         } catch APIError.unsupported {
             throw APIError.invalid("这个服务端版本较旧，还不支持账号登录（需要 0.5.0 以上），请用配对码配对")
         } catch let f as E2E.Failure where f.kind == .unsupported {
@@ -590,6 +611,7 @@ final class AppModel: ObservableObject {
         canAdmin = nil
         account = nil
         changesCursor = nil     // 下次登录（可能是别的账号）先对账
+        e2eSealedRetry = [:]    // 等着重新拉取的补加密消息：退出登录后不再拉（审查 N2）
         serverInfo = nil
         serverLegacy = false
         state = .unpaired
@@ -622,12 +644,34 @@ final class AppModel: ObservableObject {
         e2eApprovalPhases = [:]
         defaults.removeObject(forKey: Self.key("e2eEnabled"))
         e2ePlainKept = []
+        e2eSealedRetry = [:]
         save()
         refreshLocalFiles()
     }
 
     /// 「仅本机保留」的消息：服务器的「删除明文消息」删掉了（收到 purge 变更），本机保留副本（docs/e2ee-client.md §7.4）。
     /// 对账时不当作「别处删除」；之后的 delete 变更或用户手动删除照常删（同时移出这个集合）
+    /// 收到 kind "sealed" 变更、但重新拉取没成功的消息 id → 连续失败次数（变更游标已经前进）：之后每次同步成功时重试，
+    /// 拉到或 404 后移除；连续失败 e2eSealedMaxFailures 次、或服务器明确拒绝（4xx，404 / 410 / 408 / 429 除外）就放弃。
+    /// 不分账号：换账号、退出登录时清空
+    var e2eSealedRetry: [Int64: Int] {
+        get {
+            var out: [Int64: Int] = [:]
+            for (k, v) in (defaults.dictionary(forKey: Self.key("e2eSealedRetryCount")) as? [String: Int]) ?? [:] {
+                if let id = Int64(k) { out[id] = v }
+            }
+            // 早期测试版只存了 id 列表
+            for id in (defaults.array(forKey: Self.key("e2eSealedRetry")) as? [Int64]) ?? [] where out[id] == nil { out[id] = 0 }
+            return out
+        }
+        set {
+            defaults.removeObject(forKey: Self.key("e2eSealedRetry"))
+            if newValue.isEmpty { defaults.removeObject(forKey: Self.key("e2eSealedRetryCount")) }
+            else { defaults.set(Dictionary(uniqueKeysWithValues: newValue.map { (String($0.key), $0.value) }), forKey: Self.key("e2eSealedRetryCount")) }
+        }
+    }
+    static let e2eSealedMaxFailures = 5
+
     var e2ePlainKept: Set<Int64> {
         get { Set((defaults.array(forKey: Self.key("e2ePlainKept")) as? [Int64]) ?? []) }
         set {
@@ -733,6 +777,11 @@ final class AppModel: ObservableObject {
                 backoff = 1
                 autoDownload(merge(await prepareE2E(fresh), notify: true))
                 applyChanges(changes)
+                // 上次没拉成的被补加密消息（网络出错）：这次连得上，再试（审查 L1）
+                if !e2eSealedRetrying {
+                    let retry = Array(e2eSealedRetry.keys)
+                    if !retry.isEmpty { Task { await refetchSealed(retry) } }
+                }
                 continue
             } catch let e as APIError {
                 if case .unauthorized = e {
@@ -781,6 +830,7 @@ final class AppModel: ObservableObject {
         "sync.settings": "设置实时同步（pushkey、设备、账户）",
         "poll.long": "省电的实时接收（按网络自适应等待时长）",
         "e2e": "端到端加密",
+        "e2e.auto": "默认自动加密（服务器代加密、重置加密）",
         // 下面三项 Mac 客户端不需要做什么（iPhone 的 Bark 转发和软件源、服务端在管理后台自更新），认识即可，不提示「更新客户端」
         "bark": "iPhone 锁屏通知（Bark 转发）", "ios.source": "iPhone 客户端软件源", "server.update": "服务端一键更新",
     ]
@@ -1049,12 +1099,14 @@ final class AppModel: ObservableObject {
     /// 不认识的 kind 忽略
     func applyChanges(_ changes: [APIClient.MsgChange]) {
         guard !changes.isEmpty else { return }
-        var del: [Int64] = [], purge: [Int64] = [], arch: [Int64: Int] = [:], channelsChanged = false, keys = false, account = false, e2e = false
+        var del: [Int64] = [], purge: [Int64] = [], sealed: [Int64] = [], arch: [Int64: Int] = [:], channelsChanged = false, keys = false, account = false, e2e = false
         for c in changes {
             switch c.kind {
             case "delete": del.append(c.id); arch[c.id] = nil
             // 「删除服务器上的明文消息」删掉的（0.7.0 起）：服务器上没有了，本机保留副本（docs/e2ee-client.md §7.4）
             case "purge": purge.append(c.id); arch[c.id] = nil
+            // 服务器补加密了这条消息（0.8.0 起）：重新拉取、替换本地记录（docs/e2ee-client.md §11.5）
+            case "sealed": sealed.append(c.id)
             case "archive": arch[c.id] = c.state ?? 0
             case "channels": channelsChanged = true
             case "keys": keys = true
@@ -1064,6 +1116,7 @@ final class AppModel: ObservableObject {
             }
         }
         if e2e { Task { await refreshE2E() } }
+        if !sealed.isEmpty { Task { await refetchSealed(sealed) } }
         if channelsChanged { Task { await refreshChannels() } }
         if keys || account { noteSettingsChanged(keys: keys, account: account) }
         if !purge.isEmpty {
@@ -1587,7 +1640,97 @@ final class AppModel: ObservableObject {
         if token != nil, syncTask != nil { startSync() }
     }
 
-    func download(_ att: Attachment) async {
+    /// 被服务器补加密的消息（kind "sealed" 变更、下载附件 410 reason=sealed）：GET /v1/messages/{id} 重新拉取，
+    /// 替换本地记录（变成 sealed: "server" 的加密消息），丢掉旧附件的缓存（旧附件 id 已作废），再按 §6.1 解密。
+    /// 本地没有这条、或服务器返回 404（本机设为不接收）时保留本地记录不动。返回替换成功的消息
+    @discardableResult
+    func refetchSealed(_ ids: [Int64]) async -> [Message] {
+        guard let client else { return [] }
+        let tok = token
+        e2eSealedRuns += 1
+        defer { e2eSealedRuns -= 1 }
+        var fresh: [Message] = []
+        // 这一轮的结果：结束时在当时最新的集合上增量修改（同时在跑的另一轮可能已经改过）
+        var settled = Set<Int64>()      // 拉到 / 404 / 本地不用拉 / 被拒绝：移出集合
+        var failed = Set<Int64>()       // 网络出错等：失败次数加一
+        // 本地没有、或本地已经是加密消息（已补加密过 / 发送端加密）的不用拉：替换规则也不会接受
+        let local = Dictionary(messages.map { ($0.id, $0.isE2E) }, uniquingKeysWith: { a, _ in a })
+        var todo: [Int64] = []
+        for id in Set(ids).sorted() {
+            if local[id] == false { todo.append(id) } else { settled.insert(id) }
+        }
+        // 补加密历史可能一次几十上百条：并发拉取（最多 4 个同时），单条失败不影响其他条
+        enum Got { case message(Message), notFound, rejected, failed }
+        var results: [Int64: Got] = [:]
+        await withTaskGroup(of: (Int64, Got).self) { group in
+            var next = 0
+            func add() {
+                guard next < todo.count else { return }
+                let id = todo[next]
+                next += 1
+                group.addTask {
+                    do {
+                        return (id, try await client.message(id: id).map { .message($0) } ?? .notFound)
+                    } catch APIError.http(let code, _) where (400...499).contains(code) && ![408, 410, 429].contains(code) {
+                        return (id, .rejected)      // 服务器明确拒绝（不是网络问题）：再试也一样，放弃
+                    } catch {
+                        return (id, .failed)
+                    }
+                }
+            }
+            for _ in 0..<min(4, todo.count) { add() }
+            for await (id, got) in group {
+                results[id] = got
+                add()
+            }
+        }
+        guard token == tok else { return [] }
+        for id in todo {
+            switch results[id] ?? .failed {
+            case .message(let m): settled.insert(id); fresh.append(m)
+            case .notFound, .rejected: settled.insert(id)   // 404（本机设为不接收）：保留本地记录；被拒绝：放弃
+            case .failed: failed.insert(id)                  // 网络出错：记下来，下次同步成功时再试
+            }
+        }
+        var retry = e2eSealedRetry
+        for id in settled { retry[id] = nil }
+        for id in failed {
+            let n = (retry[id] ?? 0) + 1
+            retry[id] = n >= Self.e2eSealedMaxFailures ? nil : n     // 连续失败 5 次：放弃（本地明文记录保留）
+        }
+        if retry != e2eSealedRetry { e2eSealedRetry = retry }
+        guard !fresh.isEmpty else { return [] }
+        let prepared = await prepareE2E(fresh)
+        guard token == tok else { return [] }
+        var list = messages
+        var replaced: [Message] = []
+        for m in prepared {
+            guard let i = list.firstIndex(where: { $0.id == m.id }) else { continue }
+            let old = list[i]
+            // 只替换「本地明文 → 服务器代加密」，其余（发送端加密的、已解开的、已是代加密的、id 不对、没标 server）一律丢弃（共用规则）
+            guard E2E.acceptResealed(old: old, new: m, id: old.id) else { continue }
+            for a in old.attachments where !m.attachments.contains(where: { $0.id == a.id }) {
+                cancelDownload(a.id)
+                cache.remove(a.id)
+                downloadErrors[a.id] = nil
+            }
+            var x = m
+            // 已被服务器补加密的不再是「仅本机保留」的明文；没经过 prepareE2E 的按锁定处理，之后后台解密
+            if x.isE2E && x.e2eStatus == nil { x.applyE2E(.locked) }
+            list[i] = x
+            replaced.append(x)
+        }
+        let ids = Set(replaced.map(\.id))
+        if !e2ePlainKept.isDisjoint(with: ids) { e2ePlainKept.subtract(ids) }
+        replaceMessages(list)
+        refreshLocalFiles()
+        autoDownload(replaced.filter { !$0.e2eUnreadable })
+        if replaced.contains(where: \.e2eUnreadable), !e2eKeys.isEmpty { Task { await decryptPending() } }
+        return replaced
+    }
+
+    /// resealedRetries：410 reason=sealed 时还能重新拉取几次（每次点击最多 E2E.maxResealedRetries 次，防止服务器一直给新 id）
+    func download(_ att: Attachment, resealedRetries: Int = E2E.maxResealedRetries) async {
         guard let client else { downloadErrors[att.id] = "未配对"; return }
         guard progress[att.id] == nil else { return }
         downloadErrors[att.id] = nil
@@ -1604,6 +1747,23 @@ final class AppModel: ObservableObject {
         } catch {
             progress[att.id] = nil
             if (error as? URLError)?.code == .cancelled { return }
+            if case APIError.attachmentSealed(let mid) = error, resealedRetries > 0 {
+                // 消息被服务器补加密了：重新拉取（附件换了新 id），再下载同一位置的新附件；不记成「附件已丢失」。
+                // 这里每次都是整个文件重新下载（临时文件不续传），不会把半截的旧文件和新文件拼起来
+                let holder = messages.first { $0.attachments.contains { $0.id == att.id } }?.id
+                let owner = mid ?? holder
+                let pos = owner == holder ? messages.first { $0.id == owner }?.attachments.firstIndex { $0.id == att.id } : nil
+                // 服务端说的消息和本地放这个附件的消息不是同一条：两条都重新拉取，提示用户重新点开（审查 L9）
+                let refreshed = await refetchSealed([owner, holder].compactMap { $0 })
+                if let pos, let m = refreshed.first(where: { $0.id == owner }) {
+                    if pos < m.attachments.count, m.e2eStatus == "ok", m.attachments[pos].id != att.id {
+                        await download(m.attachments[pos], resealedRetries: resealedRetries - 1)
+                    }
+                    return
+                }
+                downloadErrors[att.id] = refreshed.isEmpty ? E2E.sealedGoneMessage : "附件已更新，请重新点开"
+                return
+            }
             downloadErrors[att.id] = (error as? APIError)?.localizedDescription ?? Self.shortError(error)
             if case APIError.unauthorized = error { state = .unauthorized }
         }

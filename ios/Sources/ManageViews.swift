@@ -87,6 +87,8 @@ struct KeysView: View {
     @State private var unsupported = false
     @State private var notice: ManageNotice?
     @State private var showNew = false
+    /// 刚新建的 key：进入它的详情页（优先显示加密发送密钥，docs/e2ee-client.md §11.6）
+    @State private var created: PushKey?
     @State private var revokeTarget: PushKey?
     @State private var deleteTarget: PushKey?
 
@@ -118,15 +120,20 @@ struct KeysView: View {
                         .swipeActions(edge: .trailing) {
                             Button("吊销") { revokeTarget = k }.tint(Theme.danger)
                         }
+                        // 默认复制加密发送密钥（§11.6）；账号没开启加密、本机还没解锁过时复制普通 key
                         .swipeActions(edge: .leading) {
-                            Button("复制") { copySecret(k.key); notice = .init(text: "已复制「\(k.name)」的 key（只在本机，5 分钟后清除）") }.tint(Theme.accent)
+                            Button("复制") { copyDefault(k) }.tint(Theme.accent)
                         }
                         .contextMenu {
-                            Button { copySecret(k.key) } label: { Label("复制 key", systemImage: "doc.on.doc") }
                             if case .key(let sk) = model.e2eSendKey(k.key) {
                                 Button { copySecret(sk); notice = .init(text: "已复制「\(k.name)」的加密发送密钥（只在本机，5 分钟后清除）") } label: {
                                     Label("复制加密发送密钥", systemImage: "lock")
                                 }
+                                Button { copySecret(k.key); notice = .init(text: "已复制「\(k.name)」的普通 pushkey（只在本机，5 分钟后清除）") } label: {
+                                    Label("复制普通 pushkey", systemImage: "doc.on.doc")
+                                }
+                            } else {
+                                Button { copySecret(k.key) } label: { Label("复制 key", systemImage: "doc.on.doc") }
                             }
                             Button(role: .destructive) { revokeTarget = k } label: { Label("吊销…", systemImage: "nosign") }
                         }
@@ -135,7 +142,7 @@ struct KeysView: View {
                     // 不要自动转大写（用户名、Pushkey 保持原样）
                     Text(model.settings.username.isEmpty ? "Pushkey" : "账号「\(model.settings.username)」的 Pushkey").textCase(nil)
                 } footer: {
-                    Text("pushkey 属于账号：这个账号的所有设备看到的是同一组。发送方用 pushkey 把消息发给你。建议每台机器、每个项目各用一把，泄露时只吊销那一把。左滑吊销，右滑复制，点进去可以改名、换 key、看发送示例。")
+                    Text("pushkey 属于账号：这个账号的所有设备看到的是同一组。发送方用 pushkey 把消息发给你。建议每台机器、每个项目各用一把，泄露时只吊销那一把。左滑吊销，右滑复制（有加密发送密钥时复制它），点进去可以改名、换 key、看发送示例和普通 pushkey。")
                 }
                 if !revoked.isEmpty {
                     Section {
@@ -181,8 +188,10 @@ struct KeysView: View {
             NewKeySheet(defaultName: active.isEmpty ? "default" : "") { k, gen in
                 model.noteKey(k, session: gen)
                 notice = .init(text: "已新建「\(k.name)」")
+                created = k
             }
         }
+        .navigationDestination(item: $created) { k in KeyDetailView(key: k) }
         .confirmationDialog("吊销「\(revokeTarget?.name ?? "")」？", isPresented: Binding(get: { revokeTarget != nil }, set: { if !$0 { revokeTarget = nil } }),
                             titleVisibility: .visible) {
             Button("吊销", role: .destructive) { if let t = revokeTarget { Task { await revoke(t) } } }
@@ -206,6 +215,17 @@ struct KeysView: View {
             unsupported = true
         } catch {
             notice = .failed("加载失败", error)
+        }
+    }
+
+    /// 右滑「复制」：有加密发送密钥时复制它（§11.6），否则复制普通 key
+    private func copyDefault(_ k: PushKey) {
+        if case .key(let sk) = model.e2eSendKey(k.key) {
+            copySecret(sk)
+            notice = .init(text: "已复制「\(k.name)」的加密发送密钥（只在本机，5 分钟后清除）")
+        } else {
+            copySecret(k.key)
+            notice = .init(text: "已复制「\(k.name)」的 key（只在本机，5 分钟后清除）")
         }
     }
 
@@ -249,18 +269,26 @@ private struct KeyRow: View {
                 if key.isRevoked { statusTag("已吊销", Theme.danger) }
                 if let m = mode, m != "notify" { statusTag(m == "silent" ? "本机静默" : "本机不接收", Theme.warning) }
             }
-            Text(key.key).font(.caption.monospaced()).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.middle)
-                .strikethrough(key.isRevoked)
-            if !key.isRevoked, sendKey != .hidden {
+            // 有加密发送密钥时只显示它（默认用它发送，§11.6）；普通 key 收在详情页的「显示普通 pushkey」里
+            if !key.isRevoked, case .key(let k) = sendKey {
                 Label {
-                    switch sendKey {
-                    case .key(let k): Text(k).font(.caption.monospaced()).lineLimit(1).truncationMode(.middle)
-                    case .mismatch: Text(E2E.T.t43).font(.caption).foregroundStyle(Theme.danger).lineLimit(2)
-                    default: Text("加密发送密钥：" + E2E.T.t73).font(.caption).lineLimit(2)
-                    }
+                    Text(k).font(.caption.monospaced()).lineLimit(1).truncationMode(.middle)
                 } icon: { Image(systemName: "lock.fill") }
                     .font(.caption).foregroundStyle(Theme.text2)
                     .accessibilityLabel("加密发送密钥")
+            } else {
+                Text(key.key).font(.caption.monospaced()).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.middle)
+                    .strikethrough(key.isRevoked)
+                if !key.isRevoked, sendKey != .hidden {
+                    Label {
+                        switch sendKey {
+                        case .mismatch: Text(E2E.T.t46).font(.caption).foregroundStyle(Theme.danger).lineLimit(2)
+                        default: Text("加密发送密钥：" + E2E.T.t73).font(.caption).lineLimit(2)
+                        }
+                    } icon: { Image(systemName: "lock.fill") }
+                        .font(.caption).foregroundStyle(Theme.text2)
+                        .accessibilityLabel("加密发送密钥")
+                }
             }
             if !key.isRevoked {
                 Text(key.last_used.map { "最近使用 " + TimeText.relative($0) } ?? "从未使用").font(.caption).foregroundStyle(Theme.text2)
@@ -347,8 +375,21 @@ struct KeyDetailView: View {
     @State private var confirmRekey = false
     @State private var confirmRevoke = false
     @State private var testing = false
+    @State private var showPlain = false
 
     init(key: PushKey) { initial = key }
+
+    private var hasSendKey: Bool {
+        if !key.isRevoked, !gone, case .key = model.e2eSendKey(key.key) { return true }
+        return false
+    }
+
+    @ViewBuilder private var plainKeyRows: some View {
+        CopyField(text: key.key, lines: 2)
+        if !key.isRevoked && !gone {
+            Button("换一个 key…") { newKey = ManageRules.randomKey(); showRekey = true }
+        }
+    }
 
     private var key: PushKey { model.keys?.first { $0.id == initial.id } ?? initial }
     /// 在别的设备上被删除了
@@ -374,17 +415,20 @@ struct KeyDetailView: View {
                     }
                 }
             }
-            Section {
-                CopyField(text: key.key, lines: 2)
-                if !key.isRevoked && !gone {
-                    Button("换一个 key…") { newKey = ManageRules.randomKey(); showRekey = true }
-                }
-            } header: { Text("Key") } footer: {
-                Text("创建于 \(key.created_at.map { TimeText.full($0) } ?? "—")；" + (key.last_used.map { "最近使用 \(TimeText.full($0))" } ?? "从未使用"))
-            }
-            // 账号开启了端到端加密：加密发送密钥 <pushkey>.e2e.<钉住的公钥>（docs/e2ee-client.md §7 第 1 项）
+            // 账号开启了端到端加密：默认用加密发送密钥 <pushkey>.e2e.<钉住的公钥>（§7 第 1 项、§11.6），放在最前面
             if !key.isRevoked && !gone {
                 E2ESendKeySection(sendKey: model.e2eSendKey(key.key)) { CopyField(text: $0, lines: 3) }
+            }
+            Section {
+                if hasSendKey {
+                    // 普通 key 收进折叠项（T66）
+                    DisclosureGroup("显示普通 pushkey", isExpanded: $showPlain) { plainKeyRows }
+                } else {
+                    plainKeyRows
+                }
+            } header: { Text(hasSendKey ? "普通 pushkey" : "Key") } footer: {
+                Text((hasSendKey ? E2E.T.t66 + "\n" : "") + "创建于 \(key.created_at.map { TimeText.full($0) } ?? "—")；"
+                     + (key.last_used.map { "最近使用 \(TimeText.full($0))" } ?? "从未使用"))
             }
             if let m = mode, !key.isRevoked, !gone {
                 Section {
@@ -800,7 +844,8 @@ private struct DeviceDetailView: View {
 }
 
 /// 设置 / 修改用户名和密码（POST /v1/account/credentials）
-private struct CredentialsView: View {
+/// 设置 / 修改用户名和密码。首页 T67 提示条在账号还没有密码时也用它（设置成功后自动开启加密）
+struct CredentialsView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     let hasPassword: Bool

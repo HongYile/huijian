@@ -187,6 +187,30 @@ struct Settings {
             if newValue.isEmpty { d.removeObject(forKey: "e2ePlainKept") } else { d.set(newValue.map { NSNumber(value: $0) }, forKey: "e2ePlainKept") }
         }
     }
+    /// 被服务器补加密、重新拉取时网络出错的消息 id（§11.5）：下次刷新时重试，成功或 404 后移出
+    var e2eSealedRetry: Set<Int64> {
+        get { Set((d.array(forKey: "e2eSealedRetry") as? [NSNumber])?.map(\.int64Value) ?? []) }
+        nonmutating set {
+            if newValue.isEmpty { d.removeObject(forKey: "e2eSealedRetry") } else { d.set(newValue.map { NSNumber(value: $0) }, forKey: "e2eSealedRetry") }
+        }
+    }
+    /// 上面每个 id 连续失败的次数（到 5 次丢弃）
+    var e2eSealedRetryCounts: [Int64: Int] {
+        get {
+            let raw = d.dictionary(forKey: "e2eSealedRetryCounts") as? [String: Int] ?? [:]
+            return Dictionary(raw.compactMap { k, v in Int64(k).map { ($0, v) } }, uniquingKeysWith: { a, _ in a })
+        }
+        nonmutating set {
+            if newValue.isEmpty { d.removeObject(forKey: "e2eSealedRetryCounts") }
+            else { d.set(Dictionary(newValue.map { (String($0.key), $0.value) }, uniquingKeysWith: { a, _ in a }), forKey: "e2eSealedRetryCounts") }
+        }
+    }
+    /// 密码偏弱（docs/e2ee-client.md §11.1 第 5 步）：照样自动开启加密，加密页显示 T24。改密码后按新密码重算
+    /// 按账号记（「服务器#账号 id」，见 AppModel.e2eWeakPassword），本机下次输入这个账号的密码时重新计算
+    var e2eWeakAccounts: [String] {
+        get { d.stringArray(forKey: "e2eWeakAccounts") ?? [] }
+        nonmutating set { if newValue.isEmpty { d.removeObject(forKey: "e2eWeakAccounts") } else { d.set(Array(newValue.suffix(20)), forKey: "e2eWeakAccounts") } }
+    }
     /// 已经通知过的设备批准请求（T50，同一个请求只通知一次）
     var e2eNotified: [String] {
         get { d.stringArray(forKey: "e2eNotified") ?? [] }
@@ -203,7 +227,7 @@ struct Settings {
     /// 退出登录 / 换账号：清掉和账号有关的状态（保留服务器地址和用户名，方便重新登录）
     func resetAccountState() {
         for k in ["cursor", "initialSyncDone", "lastContact", "barkOn", "barkURL", "barkEncrypted", "deviceID", "deviceName",
-                  "changesCursor", "changesEpoch", "serverFeatures", "serverVersion", "accountID", "e2eEnabled", "e2ePlainKept"] {
+                  "changesCursor", "changesEpoch", "serverFeatures", "serverVersion", "accountID", "e2eEnabled", "e2ePlainKept", "e2eSealedRetry", "e2eSealedRetryCounts"] {
             d.removeObject(forKey: k)
         }
         Keychain.delete(account: "bark-cipher")

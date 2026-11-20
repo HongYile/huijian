@@ -16,6 +16,15 @@ protocol E2ETransport {
     func e2eSend(_ method: String, _ path: String, query: [URLQueryItem], body: Data?) async throws -> E2E.Response
 }
 
+/// 各端的消息类型（Mac / iPhone 的 Message）实现它，共用的规则（acceptResealed）就能直接判断
+protocol E2EMessageFacts {
+    var id: Int64 { get }
+    /// 带 e2e 信封（发送端加密，或服务器代加密）
+    var isE2E: Bool { get }
+    /// "server" = 服务器代加密
+    var sealed: String? { get }
+}
+
 /// 安全存储接入（钥匙串 / Keystore）。读不到返回 nil；读写失败抛错（界面当作「未解锁」并显示原因）。
 protocol E2ESecrets {
     func read(_ name: String) throws -> Data?
@@ -62,6 +71,15 @@ enum E2E {
         static let t71 = "打开后，服务器拒收没有加密的消息，防止有脚本忘了换成加密发送密钥。"
         static let t73 = "本机解锁一次后才显示（防止被冒充的服务器换掉公钥）。"
         static let t72 = "删除服务器上本账号的全部明文消息？加密消息不受影响，本机已同步的消息保留。服务器以前做的备份里仍有这些消息。"
+        // §11.7（服务端 0.8.0 起：默认自动加密）
+        static let t23 = "还没有设置恢复码。忘记密码、又没有其他设备时，只能靠恢复码找回加密消息。"
+        static let t24 = "你的密码比较弱，加密钥匙是用密码保护的，建议换一个更长的密码。"
+        static let t45 = "重置后会换一把新的加密钥匙：以前的加密消息只有还留着旧钥匙的设备能看，其他设备上会显示「用别的钥匙加密的消息」。发送端要换成新的加密发送密钥。确定重置吗？"
+        static let t46 = "账号的加密钥匙已经更换（可能在别的设备上重置过）。请用密码或恢复码解锁，确认新钥匙。"
+        static let t64 = "🔐 服务器加密：发送端没有加密，服务器收到后立即加密保存。"
+        static let t65 = "用普通 pushkey 发来的消息，服务器收到后立即用你的公钥加密再保存，数据库和备份里没有明文。服务器在收到的那一刻能看到内容；想让服务器完全看不到，请改用加密发送密钥。"
+        static let t66 = "普通 pushkey 适合 curl 等无法加密的发送端，消息由服务器收到后立即代为加密。"
+        static let t67 = "输入一次密码，开启端到端加密：之后服务器上只保存密文。"
 
         // 规格里没有编号、但各端最好一致的提示
         static let weakCurrent = "当前密码不够安全，请换一个新密码"
@@ -69,6 +87,11 @@ enum E2E {
         static let noPrelogin = "服务器没有给出新登录方式的参数（加密功能的服务器一定有），可能有人冒充服务器，已停止。"
         static let setupUncertain = "网络出错，暂时无法确认加密是否已经开启。新钥匙和恢复码已保存在本机，网络恢复后会自动检查结果；也可以稍后再点一次「开启」。"
         static let setupNotDone = "上次开启加密没有成功，请重新点「开启」。"
+        static let autoSetupRunning = "正在开启加密…"
+        static let autoSetupFailed = "自动开启加密暂时没有成功，下次刷新或用密码登录时会自动重试；也可以在下面手动开启。"
+        /// 重置加密 / 更换加密钥匙成功后的提示（带「去 Pushkey 页」跳转）
+        static let resetDone = "加密钥匙已更换，请到 Pushkey 页复制新的加密发送密钥，替换脚本里的旧密钥。"
+        static let resetUncertain = "网络出错，暂时无法确认是否已经重置。新钥匙已保存在本机，确认重置成功后会自动换上；24 小时内没有换上就按没有成功处理。也可以现在放弃这次重置，或者再试一次。"
         static let recoveryUncertain = "网络出错，暂时无法确认恢复码是否已经更换。新恢复码已保存在本机，确认更换成功后会自动显示；如果一直没有显示，说明没换成，旧恢复码仍然有效，可以稍后再换一次。"
         static let noRecovery = "这个账号没有设置恢复码，请用密码或另一台设备解锁"
         static let restarted = "对方重新发起了请求，请在列表里重新批准"
@@ -90,6 +113,7 @@ enum E2E {
             case wrongPassword      // T3
             case weakPassword       // 新密码不合格（原因在 message 里）
             case keyMismatch        // T43
+        case keyChanged         // T46：账号的钥匙已经更换（别的设备重置过加密），本机拿的是旧钥匙
             case conflict           // 409：状态变了（别的设备刚开启过、请求被接手……）
             case server             // 其他 HTTP 错误，message 是服务端的说明
             case unsupported        // 服务端没有这个接口（旧版本）
@@ -239,6 +263,10 @@ enum E2E {
         var recovery_wrap = ""
         var device = DeviceInfo()
         var requests: [Request] = []
+        /// 0.8.0 起：服务器代加密（始终为 true，没有开关）
+        var server_seal = false
+        /// 0.8.0 起：服务器上本账号还剩的明文消息条数
+        var plain_messages = 0
 
         init() {}
         init(from d: Decoder) throws {
@@ -251,6 +279,8 @@ enum E2E {
             recovery_wrap = (try? c.decodeIfPresent(String.self, forKey: .recovery_wrap)) ?? ""
             device = (try? c.decodeIfPresent(DeviceInfo.self, forKey: .device)) ?? DeviceInfo()
             requests = (try? c.decodeIfPresent([Request].self, forKey: .requests)) ?? []
+            server_seal = (try? c.decodeIfPresent(Bool.self, forKey: .server_seal)) ?? false
+            plain_messages = (try? c.decodeIfPresent(Int.self, forKey: .plain_messages)) ?? 0
         }
 
         /// 当前有效（接收新消息）的钥匙
@@ -329,22 +359,44 @@ enum E2E {
         /// 钉住的公钥存在这里（不是秘密）
         let defaults: UserDefaults
         var pinsKey = "huijian.e2e.pinned"
+        /// 这个账号在本机还「活着」（没有退出登录、没有换账号）。退出时调用方 kill()：
+        /// 正在进行的自动开启、重置等完成时，不再往钥匙串和偏好设置里写这个账号的东西（删除照常）
+        let alive: AliveFlag
 
-        init(secrets: E2ESecrets, scope: String, defaults: UserDefaults) {
+        init(secrets: E2ESecrets, scope: String, defaults: UserDefaults, alive: AliveFlag = AliveFlag()) {
             self.secrets = secrets
             self.scope = scope
             self.defaults = defaults
+            self.alive = alive
+        }
+
+        /// 写入都在 alive 的锁里执行：已经退出登录 / 换了账号就报错（调用方多数用 try?，等于丢弃）；
+        /// kill() 要等正在进行的写入结束，所以 kill() 之后的 removeAll() 一定在最后一次写入之后
+        private func write(_ body: () throws -> Void) throws {
+            try alive.whileAlive(body)
         }
 
         /// 钉住的账号公钥（§1）；本机从没保存过私钥时 nil
         var pinned: String? { (defaults.dictionary(forKey: pinsKey) as? [String: String])?[scope] }
 
+        /// 用新公钥替换钉住的（§11.4）：只用于服务器伪造不了的来源——本机生成、用密码解锁、用恢复码解锁
+        func replacePin(_ pub: String) {
+            try? write {
+                var all = (defaults.dictionary(forKey: pinsKey) as? [String: String]) ?? [:]
+                guard all[scope] != pub else { return }
+                all[scope] = pub
+                defaults.set(all, forKey: pinsKey)
+            }
+        }
+
         /// 还没钉住时钉住这把公钥；已经钉住的不改
         func pinIfNeeded(_ pub: String) {
-            var all = (defaults.dictionary(forKey: pinsKey) as? [String: String]) ?? [:]
-            guard all[scope] == nil else { return }
-            all[scope] = pub
-            defaults.set(all, forKey: pinsKey)
+            try? write {
+                var all = (defaults.dictionary(forKey: pinsKey) as? [String: String]) ?? [:]
+                guard all[scope] == nil else { return }
+                all[scope] = pub
+                defaults.set(all, forKey: pinsKey)
+            }
         }
 
         var keysName: String { "e2e-keys|" + scope }
@@ -359,7 +411,8 @@ enum E2E {
         }
 
         func savePendingRecovery(_ a: RecoveryAttempt) throws {
-            try secrets.write(recoveryName, try JSONEncoder().encode(a))
+            let d = try JSONEncoder().encode(a)
+            try write { try secrets.write(recoveryName, d) }
         }
 
         func deletePendingRecovery() throws { try secrets.remove(recoveryName) }
@@ -371,7 +424,8 @@ enum E2E {
         }
 
         func savePendingSetup(_ a: SetupAttempt) throws {
-            try secrets.write(setupName, try JSONEncoder().encode(a))
+            let d = try JSONEncoder().encode(a)
+            try write { try secrets.write(setupName, d) }
         }
 
         func deletePendingSetup() throws { try secrets.remove(setupName) }
@@ -382,10 +436,12 @@ enum E2E {
         }
 
         func addAccountKey(_ sk: String) throws {
-            var ks = try accountKeys()
-            guard !ks.contains(sk) else { return }
-            ks.append(sk)
-            try secrets.write(keysName, try JSONEncoder().encode(ks))
+            try write {
+                var ks = try accountKeys()
+                guard !ks.contains(sk) else { return }
+                ks.append(sk)
+                try secrets.write(keysName, try JSONEncoder().encode(ks))
+            }
         }
 
         func removeAccountKey(_ sk: String) throws {
@@ -401,7 +457,8 @@ enum E2E {
         }
 
         func saveDeviceKeypair(sk: String, pub: String) throws {
-            try secrets.write(deviceName, try JSONEncoder().encode(["sk": sk, "pub": pub]))
+            let d = try JSONEncoder().encode(["sk": sk, "pub": pub])
+            try write { try secrets.write(deviceName, d) }
         }
 
         func deleteDeviceKeypair() throws { try secrets.remove(deviceName) }
@@ -413,6 +470,24 @@ enum E2E {
             try secrets.remove(deviceName)
             try secrets.remove(setupName)
             try secrets.remove(recoveryName)
+        }
+    }
+
+    /// 账号「活着」的标记（线程安全）：KeyRing.alive。退出登录、换账号时 kill，之后这个账号的 KeyRing 不再写入。
+    /// 写入在锁里执行（whileAlive），kill() 拿同一把锁：kill() 返回时没有进行中的写入，之后也不会再有
+    final class AliveFlag: @unchecked Sendable {
+        /// 可重入：写入里再调用 isAlive / 嵌套写入不会死锁
+        private let lock = NSRecursiveLock()
+        private var value = true
+        init() {}
+        var isAlive: Bool { lock.lock(); defer { lock.unlock() }; return value }
+        func kill() { lock.lock(); value = false; lock.unlock() }
+
+        /// 还活着就在锁里执行 body，否则报错（不执行）
+        func whileAlive<R>(_ body: () throws -> R) throws -> R {
+            lock.lock(); defer { lock.unlock() }
+            guard value else { throw Failure(.storage, "已经退出登录，不再保存这个账号的钥匙") }
+            return try body()
         }
     }
 
@@ -459,11 +534,36 @@ enum E2E {
         return pub
     }
 
-    /// §4.5 核对后保存私钥；还没钉住公钥时钉住它
+    /// §4.5 核对后保存私钥；还没钉住公钥时钉住它。用于设备批准转交来的私钥：必须等于钉住的公钥，不能用来替换（§11.4）
     static func acceptKey(_ sk: String, keys: [Key], ring: KeyRing) throws {
         let pub = try verify(sk: sk, keys: keys, pinned: ring.pinned)
         try saveKey(sk, ring: ring)
         ring.pinIfNeeded(pub)
+    }
+
+    /// §11.4：服务器伪造不了的来源（本机生成、用密码解锁、用恢复码解锁）拿到的私钥。
+    /// 核对它是账号一把有效的钥匙（不和钉住的比），保存，并用它的公钥**替换**钉住的公钥；本机原有的旧私钥保留（解旧消息用）
+    static func acceptOwnKey(_ sk: String, keys: [Key], ring: KeyRing) throws {
+        let pub = try verify(sk: sk, keys: keys, pinned: nil)
+        try saveKey(sk, ring: ring)
+        ring.replacePin(pub)
+    }
+
+    /// §11.3 第 6 步：本机钉住过公钥，服务器的有效钥匙却不是它（别的设备重置过加密）→ 加密页显示 T46，引导用密码或恢复码解锁
+    static func keyChanged(_ st: State, pinned: String?) -> Bool {
+        guard st.enabled, let pin = pinned, let active = st.activeKey else { return false }
+        return active.pub != pin
+    }
+
+    /// 私钥对应的 kid（和信封里同一个算法）。上传锁住的副本（password_wrap、recovery_wrap、grant）时一并发送（§11.5）
+    static func kid(of sk: String) -> String { (try? Core.publicKey(sk).kid) ?? "" }
+
+    /// 上传副本时服务端返回 409：看看本机这把钥匙是否已经停用（账号在别的设备上重置过加密）→ T46；否则原样返回
+    static func staleKeyError(_ api: API, kid: String, _ error: Error) async -> Error {
+        guard let f = error as? Failure, f.status == 409, !kid.isEmpty else { return error }
+        guard let st = try? await api.state() else { return error }
+        if !st.keys.contains(where: { $0.kid == kid && $0.active }) { return Failure(.keyChanged, T.t46, status: 409) }
+        return error
     }
 
     /// Pushkey 页「加密发送密钥」这一行显示什么（§7 第 1 项）
@@ -471,7 +571,7 @@ enum E2E {
         case hidden             // 账号没开启加密：不显示这一行
         case key(String)        // <pushkey>.e2e.<钉住的公钥>
         case needsUnlock        // 本机从没解锁过（没有钉住的公钥）：显示 T73
-        case mismatch           // 服务器的有效钥匙和钉住的不同：显示 T43
+        case mismatch           // 服务器的有效钥匙和钉住的不同：显示 T46（§11.3 第 6 步）
     }
 
     /// 只用钉住的公钥（等于本机私钥算出的），不用服务器 keys 里给的
@@ -525,6 +625,8 @@ enum E2E {
         let value: String
         /// Argon2id 才有：解锁钥匙，只在内存里用完即弃
         let unlockKey: String?
+        /// Argon2id 才有：prelogin 给的盐（自动开启加密要用，省掉第二次 prelogin）
+        var salt: String? = nil
 
         /// 登录 / 注册请求里的字段
         var loginFields: [String: Any] {
@@ -559,7 +661,7 @@ enum E2E {
         case "argon2id":
             try checkArgon(p)
             let k = try await passwordKeys(password, salt: p.salt)
-            return Credential(kind: .auth, value: k.authKey, unlockKey: k.unlockKey)
+            return Credential(kind: .auth, value: k.authKey, unlockKey: k.unlockKey, salt: p.salt)
         case "pbkdf2-sha256":
             if upgraded { throw Failure(.downgrade, T.t1) }
             guard let n = p.iterations, isHex(p.salt) else { throw Failure(.weakParams, T.t2) }
@@ -613,6 +715,15 @@ enum E2E {
         var fingerprint: String
     }
 
+    /// 用当前密码按 Argon2id 算出的一组钥匙（只在内存里）：自动开启加密（§11.1）时直接复用，不用再算、也不用留着密码原文。
+    /// weak：这个密码没通过 Core.passwordProblem（照样开启，加密页显示 T24）
+    struct PasswordKeys: Equatable {
+        let salt: String
+        let authKey: String
+        let unlockKey: String
+        var weak = false
+    }
+
     struct LoginResult {
         /// /v1/login 或 /v1/register 的原始响应（各端自己解码 device_id、name、token、reused）
         let response: Data
@@ -625,8 +736,10 @@ enum E2E {
         var upgradedNow = false
         /// 给用户的一句说明（例如私钥对不上 T43）；nil = 不用提示
         var note: String?
-        /// 已解开并核对过、但还没取到账号 id 没法保存的私钥（只在内存里）：拿到账号 id 后用 acceptKey 保存
+        /// 已解开并核对过、但还没取到账号 id 没法保存的私钥（只在内存里）：拿到账号 id 后用 acceptOwnKey 保存（来自密码，可以替换钉住的公钥）
         var pendingKey: (sk: String, keys: [Key])?
+        /// 这次用密码算出的钥匙（Argon2id；旧服务端原文登录时 nil）：账号还没开启加密时，调用方拿它在后台自动开启（§11.1）
+        var passwordKeys: PasswordKeys?
     }
 
     /// 账号密码登录 / 注册（§2.1、§2.2）。server：没有 token 的传输；authed：用新 token 创建传输（取账号 id、自动升级用）。
@@ -639,6 +752,7 @@ enum E2E {
         var body: [String: Any] = ["username": username, "name": device.name, "platform": device.platform, "fingerprint": device.fingerprint]
         let p = try await prelogin(api, username: username)
 
+        var registerUnlock: String?
         if register {
             if let problem = Core.passwordProblem(password, username: username) { throw Failure(.weakPassword, problem) }
             if p == nil {
@@ -649,11 +763,16 @@ enum E2E {
                 let k = try await passwordKeys(password, salt: salt)
                 body["auth_key"] = k.authKey
                 body["auth_salt"] = salt
+                registerUnlock = k.unlockKey
             }
             let data = try await api.call("POST", "/v1/register", body: body)
             if p != nil { marks.mark(server: serverID, username: username) }
             let token = try tokenOf(data)
-            return LoginResult(response: data, token: token, accountID: await accountID(API(authed(token))), upgradedNow: p != nil)
+            var out = LoginResult(response: data, token: token, accountID: await accountID(API(authed(token))), upgradedNow: p != nil)
+            if let salt = body["auth_salt"] as? String, let auth = body["auth_key"] as? String, let unlock = registerUnlock {
+                out.passwordKeys = PasswordKeys(salt: salt, authKey: auth, unlockKey: unlock)
+            }
+            return out
         }
 
         let cred: Credential
@@ -677,6 +796,10 @@ enum E2E {
         switch cred.kind {
         case .auth:
             marks.mark(server: serverID, username: username)
+            if let unlock = cred.unlockKey, let p {
+                out.passwordKeys = PasswordKeys(salt: p.salt, authKey: cred.value, unlockKey: unlock,
+                                                weak: Core.passwordProblem(password, username: username) != nil)
+            }
             // 响应里带了用密码锁住的私钥：解开、核对后保存；失败（例如管理员重设过密码）进入「已锁定」，不阻止登录
             struct Wrap: Decodable { let e2e: LoginInfo? }
             if let info = (try? JSONDecoder().decode(Wrap.self, from: data))?.e2e, info.enabled, !info.password_wrap.isEmpty,
@@ -684,8 +807,9 @@ enum E2E {
                 do {
                     let sk = try coreCall { try Core.unwrap("hjp1", key: unlock, wrap: info.password_wrap) }
                     if let aid {
-                        try acceptKey(sk, keys: info.keys, ring: KeyRing(secrets: secrets, scope: scope(server: serverID, accountID: aid),
-                                                                          defaults: marks.defaults))
+                        // 用密码解开的：服务器伪造不了（hjp1 用只有本机知道的 unlock_key 锁住），可以替换钉住的公钥（§11.4）
+                        try acceptOwnKey(sk, keys: info.keys, ring: KeyRing(secrets: secrets, scope: scope(server: serverID, accountID: aid),
+                                                                             defaults: marks.defaults))
                         out.unlocked = true
                     } else {
                         // 取不到账号 id：先核对（还不知道钉住的公钥，保存时再核对一次），留在内存里，之后再保存
@@ -698,8 +822,10 @@ enum E2E {
             }
         case .pbkdf2:
             // §2.1.7：旧账号用 PBKDF2 登录成功后立即升级；失败不影响登录，下次再试
-            if await autoUpgrade(authedAPI, passwordKey: cred.value, password: password, server: serverID, username: username, marks: marks) {
+            if var k = await autoUpgrade(authedAPI, passwordKey: cred.value, password: password, server: serverID, username: username, marks: marks) {
                 out.upgradedNow = true
+                k.weak = Core.passwordProblem(password, username: username) != nil
+                out.passwordKeys = k
             }
         case .plain:
             break
@@ -708,28 +834,58 @@ enum E2E {
     }
 
     /// 旧账号（PBKDF2）升级到 Argon2id：先看加密是否已开启（已开启说明管理员重设过密码，旧副本失效，等解锁后在「重新设置密码」里完成），
-    /// 否则 PUT /v1/account/auth。返回是否升级成功
+    /// 否则 PUT /v1/account/auth。成功时返回新的一组钥匙（自动开启加密时复用），失败 nil
     @discardableResult
     static func autoUpgrade(_ api: API, passwordKey: String, password: String, server: String, username: String,
-                            marks: UpgradeMarks) async -> Bool {
-        guard let st = try? await api.state(), !st.enabled else { return false }
+                            marks: UpgradeMarks) async -> PasswordKeys? {
+        guard let st = try? await api.state(), !st.enabled else { return nil }
         do {
             let salt = try coreCall { try Core.newSalt() }
             let k = try await passwordKeys(password, salt: salt)
             try await api.call("PUT", "/v1/account/auth", body: ["current_password_key": passwordKey, "auth_salt": salt, "auth_key": k.authKey])
             marks.mark(server: server, username: username)
-            return true
+            return PasswordKeys(salt: salt, authKey: k.authKey, unlockKey: k.unlockKey)
         } catch {
-            return false
+            return nil
         }
     }
 
-    /// 刚设置了初始密码（只能以原文设置，服务端没有别的接口）：马上按 PBKDF2 → Argon2id 升级
+    /// T67 提示条（§11.1 末尾）：已经登录、内存里没有密码的设备，用户输入一次当前密码，算出自动开启要用的那组钥匙。
+    /// argon2id：按 prelogin 的盐重算（之后 setup 会核对当前凭证，密码不对返回 403 → T3）；
+    /// pbkdf2（还没升级的旧账号）：顺带升级到 Argon2id（PUT /v1/account/auth 会核对当前密码）。没有新登录协议的服务端报错。
+    /// 返回的钥匙只在调用方的局部变量里用一次，不要存起来
+    static func keysForPassword(_ api: API, server: String, username: String, password: String, marks: UpgradeMarks) async throws -> PasswordKeys {
+        let cred = try await currentCredential(api, server: server, username: username, password: password, marks: marks)
+        let weak = Core.passwordProblem(password, username: username) != nil
+        switch cred.kind {
+        case .auth:
+            // currentCredential 已经请求过 prelogin，盐就用那一次的（prelogin 按 IP 限流，不重复请求）
+            guard let salt = cred.salt, let unlock = cred.unlockKey else { throw Failure(.unsupported, T.noPrelogin) }
+            return PasswordKeys(salt: salt, authKey: cred.value, unlockKey: unlock, weak: weak)
+        case .pbkdf2:
+            let salt = try coreCall { try Core.newSalt() }
+            let k = try await passwordKeys(password, salt: salt)
+            do {
+                try await api.call("PUT", "/v1/account/auth", body: ["current_password_key": cred.value, "auth_salt": salt, "auth_key": k.authKey])
+            } catch { throw mapCurrent(error) }
+            marks.mark(server: server, username: username)
+            return PasswordKeys(salt: salt, authKey: k.authKey, unlockKey: k.unlockKey, weak: weak)
+        case .plain:
+            throw Failure(.unsupported, T.noPrelogin)
+        }
+    }
+
+    /// 刚设置了初始密码（只能以原文设置，服务端没有别的接口）：马上按 PBKDF2 → Argon2id 升级。
+    /// 成功时返回这组钥匙（weak 已按密码强度填好），调用方拿它自动开启加密（§11.1）
     @discardableResult
-    static func upgradeAfterInitialPassword(_ api: API, server: String, username: String, password: String, marks: UpgradeMarks) async -> Bool {
+    static func upgradeAfterInitialPassword(_ api: API, server: String, username: String, password: String, marks: UpgradeMarks) async -> PasswordKeys? {
         guard let p = try? await prelogin(api, username: username), p.kdf == "pbkdf2-sha256",
-              let cred = try? await derive(password: password, prelogin: p, upgraded: false) else { return false }
-        return await autoUpgrade(api, passwordKey: cred.value, password: password, server: server, username: username, marks: marks)
+              let cred = try? await derive(password: password, prelogin: p, upgraded: false) else { return nil }
+        guard var k = await autoUpgrade(api, passwordKey: cred.value, password: password, server: server, username: username, marks: marks) else {
+            return nil
+        }
+        k.weak = Core.passwordProblem(password, username: username) != nil
+        return k
     }
 
     private static func tokenOf(_ data: Data) throws -> String {
@@ -751,51 +907,97 @@ enum E2E {
 
     // MARK: - 开启加密（§4.1）
 
-    /// 一次开启加密：新钥匙对和恢复码。从生成起存在 KeyRing.pendingSetup，用户在「保存恢复码」页点「完成」才删除
+    /// 一次开启加密：新钥匙对和恢复码。从生成起存在 KeyRing.pendingSetup，用户在「保存恢复码」页点「完成」才删除。
+    /// 自动开启（§11.1）和重置加密（§11.3）不生成恢复码：code 为空，确认成功后直接删除，不显示恢复码页
     struct SetupAttempt: Codable, Equatable {
         let sk: String
         let pub: String
         let code: String
+        /// 重置加密（§11.3）留下的：服务器上原来的钥匙仍然有效时不能断定失败（核对规则见 checkPendingSetup）。旧记录没有这个字段 = nil
+        var reset: Bool? = nil
+        /// 生成时间（Unix 秒）。旧记录没有 = nil：从第一次读到时开始算（见 checkPendingSetup）
+        var createdAt: Double? = nil
+        var isReset: Bool { reset == true }
+    }
+
+    /// 重置加密结果不确定的记录最多保留多久：超过就按失败处理（私钥留着，记录删除）
+    static let resetPendingTTL: TimeInterval = 24 * 3600
+
+    /// 用户点了「放弃这次重置」（§11.3 结果不确定时）：删除记录，新私钥留在本机（万一其实重置成功了，这段时间的消息还能解开）。
+    /// 只处理重置留下的记录；返回是否删除了
+    @discardableResult
+    static func abandonReset(ring: KeyRing) -> Bool {
+        guard let a = try? ring.pendingSetup(), a.isReset else { return false }
+        try? ring.addAccountKey(a.sk)
+        try? ring.deletePendingSetup()
+        return true
     }
 
     /// 开启加密的结果暂时无法确认：attempt 已存在 KeyRing.pendingSetup，之后每次刷新状态由 checkPendingSetup 核对
     struct SetupPending: LocalizedError {
         let attempt: SetupAttempt
-        var errorDescription: String? { T.setupUncertain }
+        /// 重置加密（§11.3）的结果不确定
+        var reset = false
+        var errorDescription: String? { reset ? T.resetUncertain : T.setupUncertain }
     }
 
     /// 核对进行中的开启（§4.1）的结果
     enum SetupCheck: Equatable {
         case none                       // 没有进行中的开启
-        case completed(SetupAttempt)    // 服务端已经用这把钥匙开启：私钥已保存、公钥已钉住、已标记升级 → 显示恢复码页
+        case resetPending(SetupAttempt) // 进行中的重置：服务器还是原来的钥匙，还不能断定成败，保留
+        case completed(SetupAttempt)    // 服务端已经用这把钥匙开启：私钥已保存、公钥已钉住、已标记升级 → code 不为空时显示恢复码页
         case notEnabled(SetupAttempt)   // 服务端还没开启：保留，提示用户重试（T.setupNotDone）
         case discarded                  // 服务端用的是别的钥匙（或本机钉住的不是这把）：已删除
     }
 
     /// 有进行中的开启时，每次拿到 GET /v1/e2e 都调用（§4.1）。username 为空时不写「已升级」标记
     @discardableResult
-    static func checkPendingSetup(_ st: State, ring: KeyRing, server: String, username: String, marks: UpgradeMarks) throws -> SetupCheck {
+    static func checkPendingSetup(_ st: State, ring: KeyRing, server: String, username: String, marks: UpgradeMarks, now: Date = Date()) throws -> SetupCheck {
         guard let a = try ring.pendingSetup() else { return .none }
         guard st.enabled else { return .notEnabled(a) }
         guard st.activeKey?.pub == a.pub else {
+            if a.isReset {
+                // 重置：服务器上原来的钥匙仍然有效不说明失败（请求可能还在处理），保留，确定了再删。
+                // 这把钥匙出现在停用列表里 = 重置生效过、之后又被别处重置：私钥留着看那段时间的消息，记录删除
+                if let k = st.keys.first(where: { $0.pub == a.pub }), !k.active {
+                    try? ring.addAccountKey(a.sk)
+                    try? ring.deletePendingSetup()
+                    return .discarded
+                }
+                // 24 小时还没确认 = 重置没有成功：按放弃处理（私钥留着）。旧记录没有时间：补上现在，从现在开始算
+                guard let created = a.createdAt else {
+                    var b = a
+                    b.createdAt = now.timeIntervalSince1970
+                    try? ring.savePendingSetup(b)
+                    return .resetPending(b)
+                }
+                if now.timeIntervalSince1970 - created >= resetPendingTTL {
+                    abandonReset(ring: ring)
+                    return .discarded
+                }
+                return .resetPending(a)
+            }
             try? ring.removeAccountKey(a.sk)
             try? ring.deletePendingSetup()
             return .discarded
         }
         do {
-            try acceptKey(a.sk, keys: st.keys, ring: ring)
+            // 本机生成的钥匙：可以替换钉住的公钥（§11.4；重置加密后钉住的还是旧公钥）
+            try acceptOwnKey(a.sk, keys: st.keys, ring: ring)
         } catch let f as Failure where f.kind == .keyMismatch {
             try? ring.deletePendingSetup()
             return .discarded
         }
         if !username.isEmpty { marks.mark(server: server, username: username) }
+        // 没有恢复码（自动开启、重置加密）：不用等用户点「完成」
+        if a.code.isEmpty { try? ring.deletePendingSetup() }
         return .completed(a)
     }
 
     /// 已经确认开启、用户还没在「保存恢复码」页点「完成」的那次开启（私钥已经存进钥匙串就说明确认过）。
     /// App 启动、读钥匙时调用：不为 nil 就直接回到恢复码页，不用等联网
     static func confirmedSetup(ring: KeyRing) -> SetupAttempt? {
-        guard let a = try? ring.pendingSetup(), ((try? ring.accountKeys()) ?? []).contains(a.sk) else { return nil }
+        guard let a = try? ring.pendingSetup(), !a.code.isEmpty, ((try? ring.accountKeys()) ?? []).contains(a.sk) else { return nil }
         return a
     }
 
@@ -835,7 +1037,7 @@ enum E2E {
             switch try checkPendingSetup(st, ring: ring, server: server, username: username, marks: marks) {
             case .completed(let a): return a.code
             case .notEnabled: try? ring.deletePendingSetup()      // 上次其实没开启：丢掉，重新生成
-            case .discarded: throw Failure(.conflict, "别的设备刚开启了加密，已重新读取状态")
+            case .discarded, .resetPending: throw Failure(.conflict, "别的设备刚开启了加密，已重新读取状态")
             case .none: break
             }
         }
@@ -873,16 +1075,118 @@ enum E2E {
             guard let st = try? await api.state() else { throw SetupPending(attempt: attempt) }
             switch try checkPendingSetup(st, ring: ring, server: server, username: username, marks: marks) {
             case .completed(let a): return a.code
-            case .discarded: throw Failure(.conflict, "别的设备刚开启了加密，已重新读取状态")
+            case .discarded, .resetPending: throw Failure(.conflict, "别的设备刚开启了加密，已重新读取状态")
             case .notEnabled, .none: throw error            // 没开启：钥匙留着，下次点「开启」会先核对再重新生成
             }
         }
         // 第 5 步：保存私钥（我们自己生成、服务端刚接受的公钥）、钉住、标记升级。
         // 保存失败也照样返回恢复码：pendingSetup 还在，下次刷新状态时 checkPendingSetup 会再保存
         try? saveKey(kp.sk, ring: ring)
-        ring.pinIfNeeded(kp.pub)
+        ring.replacePin(kp.pub)
         marks.mark(server: server, username: username)
         return recovery.code
+    }
+
+    // MARK: - 自动开启（§11.1）、重置加密（§11.3）
+
+    enum AutoSetupResult: Equatable {
+        case enabled            // 这次开启成功（或核对出上次其实已经开启）
+        case unlocked           // 别的设备刚开启过（409）：改为用这个密码解锁
+        case alreadyEnabled     // 账号早已开启，本机已解锁
+        case manualPending      // 有用户手动开启留下、还没核对出结果的记录（带恢复码）：不自动开启，交给 checkPendingSetup 和用户
+    }
+
+    /// 自动开启加密（§11.1）：注册、账号密码登录、设置初始密码之后，账号还没开启时在后台调用。
+    /// 复用这次登录算出的钥匙（auth_salt、auth_key 不变），不生成恢复码。密码弱也照样开启（keys.weak → 加密页显示 T24）。
+    /// 进行中的开启照样先存进钥匙串，结果不确定时抛 SetupPending（之后刷新时 checkPendingSetup 核对，或下次再调用）
+    static func autoSetup(_ api: API, ring: KeyRing, server: String, username: String, keys: PasswordKeys,
+                          marks: UpgradeMarks) async throws -> AutoSetupResult {
+        let st = try await api.state()
+        if st.enabled {
+            if case .completed = try checkPendingSetup(st, ring: ring, server: server, username: username, marks: marks) { return .enabled }
+            if usableKey(st, localKeys: (try? ring.accountKeys()) ?? []) != nil { return .alreadyEnabled }
+            try await unlock(api, ring: ring, authKey: keys.authKey, unlockKey: keys.unlockKey)
+            return .unlocked
+        }
+        if let p = try? ring.pendingSetup() {
+            // 用户手动开启留下的（带恢复码）：不能删——那次可能晚到生效、也可能同时换了密码
+            if !p.code.isEmpty { return .manualPending }
+            // 自己上次留下、服务端确实没开启：作废，重新生成
+            try? ring.deletePendingSetup()
+        }
+        let kp = try coreCall { try Core.keypair() }
+        let wrap = try coreCall { try Core.wrap("hjp1", key: keys.unlockKey, data: kp.sk) }
+        let attempt = SetupAttempt(sk: kp.sk, pub: kp.pub, code: "")
+        do { try ring.savePendingSetup(attempt) } catch { throw Failure(.storage, "保存加密钥匙失败：\(error.localizedDescription)") }
+        let body: [String: Any] = ["current_auth_key": keys.authKey, "pub": kp.pub, "auth_salt": keys.salt, "auth_key": keys.authKey,
+                                   "password_wrap": wrap]
+        do {
+            try await api.call("POST", "/v1/e2e/setup", body: body)
+        } catch {
+            if let f = error as? Failure, f.status == 409 {
+                // 别的设备刚开启过：用这个密码解锁（§11.1 第 4 步）
+                try? ring.deletePendingSetup()
+                try await unlock(api, ring: ring, authKey: keys.authKey, unlockKey: keys.unlockKey)
+                return .unlocked
+            }
+            if let f = error as? Failure, (400...499).contains(f.status) {
+                try? ring.deletePendingSetup()
+                throw mapCurrent(error)
+            }
+            guard let st2 = try? await api.state() else { throw SetupPending(attempt: attempt) }
+            switch try checkPendingSetup(st2, ring: ring, server: server, username: username, marks: marks) {
+            case .completed: return .enabled
+            case .discarded, .resetPending:
+                try await unlock(api, ring: ring, authKey: keys.authKey, unlockKey: keys.unlockKey)
+                return .unlocked
+            case .notEnabled, .none: throw error
+            }
+        }
+        try? saveKey(kp.sk, ring: ring)
+        ring.replacePin(kp.pub)
+        marks.mark(server: server, username: username)
+        try? ring.deletePendingSetup()
+        return .enabled
+    }
+
+    /// 重置加密（§11.3）：换一把新钥匙。旧钥匙在服务端停用保留，本机的旧私钥也保留（解旧消息用）；新公钥替换钉住的。
+    /// 需要当前密码（管理员重设密码后账号回到旧登录方式时也能用，同 §4.4 第 4 步）。不换密码、不生成恢复码。
+    /// 新钥匙对先存进 pendingSetup：结果不确定时抛 SetupPending(reset: true)，之后刷新时 checkPendingSetup 核对
+    static func resetE2E(_ api: API, ring: KeyRing, server: String, username: String, password: String, marks: UpgradeMarks) async throws {
+        // 上次的重置结果不确定：先看是不是其实已经生效了
+        if let p = try? ring.pendingSetup(), p.isReset, let st = try? await api.state(),
+           case .completed = try checkPendingSetup(st, ring: ring, server: server, username: username, marks: marks) {
+            return
+        }
+        let cur = try await currentCredential(api, server: server, username: username, password: password, marks: marks, allowLegacy: true)
+        // 上次的重置还没有结果：这次的记录会覆盖它，先按放弃处理（那把私钥留着，万一上次其实生效了还能解开那段时间的消息）
+        abandonReset(ring: ring)
+        let kp = try coreCall { try Core.keypair() }
+        let salt = try coreCall { try Core.newSalt() }
+        let k = try await passwordKeys(password, salt: salt)
+        let wrap = try coreCall { try Core.wrap("hjp1", key: k.unlockKey, data: kp.sk) }
+        let attempt = SetupAttempt(sk: kp.sk, pub: kp.pub, code: "", reset: true, createdAt: Date().timeIntervalSince1970)
+        do { try ring.savePendingSetup(attempt) } catch { throw Failure(.storage, "保存加密钥匙失败：\(error.localizedDescription)") }
+        var body = cur.currentFields
+        body["pub"] = kp.pub
+        body["auth_salt"] = salt
+        body["auth_key"] = k.authKey
+        body["password_wrap"] = wrap
+        do {
+            try await api.call("POST", "/v1/e2e/reset", body: body)
+        } catch {
+            if let f = error as? Failure, (400...499).contains(f.status) {
+                try? ring.deletePendingSetup()
+                throw mapCurrent(error)
+            }
+            // 网络出错或 5xx：服务端可能已经重置了（同一把公钥重复提交服务端照样成功）
+            guard let st = try? await api.state() else { throw SetupPending(attempt: attempt, reset: true) }
+            guard st.activeKey?.pub == kp.pub else { throw SetupPending(attempt: attempt, reset: true) }
+        }
+        try saveKey(kp.sk, ring: ring)
+        ring.replacePin(kp.pub)
+        marks.mark(server: server, username: username)
+        try? ring.deletePendingSetup()
     }
 
     // MARK: - 解锁（§4.2、§4.4）
@@ -897,16 +1201,21 @@ enum E2E {
             // 已升级的账号收到 pbkdf2：最常见的原因是管理员重设过密码（T44，不是 T1）
             throw Failure(.downgrade, T.t44)
         }
-        guard cred.kind == .auth, let unlock = cred.unlockKey else { throw Failure(.conflict, T.t44) }
+        guard cred.kind == .auth, let unlockKey = cred.unlockKey else { throw Failure(.conflict, T.t44) }
+        try await unlock(api, ring: ring, authKey: cred.value, unlockKey: unlockKey)
+    }
+
+    /// POST /v1/e2e/unlock 取回用密码锁住的私钥，解开、核对后保存。来自密码，可以替换钉住的公钥（§11.4）
+    static func unlock(_ api: API, ring: KeyRing, authKey: String, unlockKey: String) async throws {
         struct R: Decodable { let password_wrap: String }
         let r: R
         do {
-            r = try JSONDecoder().decode(R.self, from: try await api.call("POST", "/v1/e2e/unlock", body: ["auth_key": cred.value]))
+            r = try JSONDecoder().decode(R.self, from: try await api.call("POST", "/v1/e2e/unlock", body: ["auth_key": authKey]))
         } catch {
             throw mapCurrent(error)
         }
-        guard let sk = try? Core.unwrap("hjp1", key: unlock, wrap: r.password_wrap) else { throw Failure(.conflict, T.t44) }
-        try acceptKey(sk, keys: try await api.state().keys, ring: ring)
+        guard let sk = try? Core.unwrap("hjp1", key: unlockKey, wrap: r.password_wrap) else { throw Failure(.conflict, T.t44) }
+        try acceptOwnKey(sk, keys: try await api.state().keys, ring: ring)
     }
 
     /// 用恢复码解锁
@@ -916,7 +1225,7 @@ enum E2E {
         let st = try await api.state()
         guard st.hasRecovery else { throw Failure(.badRecovery, T.noRecovery) }
         guard let sk = try? Core.unwrap("hjr1", key: key, wrap: st.recovery_wrap) else { throw Failure(.badRecovery, T.t41) }
-        try acceptKey(sk, keys: st.keys, ring: ring)
+        try acceptOwnKey(sk, keys: st.keys, ring: ring)      // 来自恢复码，可以替换钉住的公钥（§11.4）
     }
 
     /// 解锁后重新设置密码（§4.4.4）：用新密码派生凭证并重新锁住本机私钥
@@ -935,8 +1244,13 @@ enum E2E {
         var body = current.currentFields
         body["auth_salt"] = salt
         body["auth_key"] = k.authKey
-        if let sk { body["password_wrap"] = try coreCall { try Core.wrap("hjp1", key: k.unlockKey, data: sk) } }
-        do { try await api.call("PUT", "/v1/account/auth", body: body) } catch { throw mapCurrent(error) }
+        var kid = ""
+        if let sk {
+            body["password_wrap"] = try coreCall { try Core.wrap("hjp1", key: k.unlockKey, data: sk) }
+            kid = self.kid(of: sk)
+            body["kid"] = kid           // §11.5：服务端发现它已停用时返回 409 → T46
+        }
+        do { try await api.call("PUT", "/v1/account/auth", body: body) } catch { throw mapCurrent(await staleKeyError(api, kid: kid, error)) }
     }
 
     // MARK: - 设置项（§7）
@@ -1002,12 +1316,14 @@ enum E2E {
         do { try ring.savePendingRecovery(attempt) } catch { throw Failure(.storage, "保存恢复码失败：\(error.localizedDescription)") }
         var body = cur.currentFields
         body["recovery_wrap"] = wrap
+        let kid = self.kid(of: sk)
+        body["kid"] = kid               // §11.5：服务端发现它已停用时返回 409 → T46
         do {
             try await api.call("PUT", "/v1/e2e/recovery", body: body)
         } catch {
             if let f = error as? Failure, (400...499).contains(f.status) {
                 try? ring.deletePendingRecovery()          // 明确被拒：旧恢复码仍然有效
-                throw mapCurrent(error)
+                throw mapCurrent(await staleKeyError(api, kid: kid, error))
             }
             // 网络出错或 5xx：服务端可能已经换了，先看结果；不一样或取不到都先保留（可能还在处理），之后刷新再核对
             guard let st = try? await api.state(), st.recovery_wrap == wrap else { throw RecoveryPending(attempt: attempt) }
@@ -1091,7 +1407,8 @@ enum E2E {
             guard !stopped else { throw CancellationError() }
             let active = st.keys.filter(\.active)
             if let pin = ring.pinned {
-                guard active.contains(where: { $0.pub == pin }) else { phase = .failed(T.t43); throw Failure(.keyMismatch, T.t43) }
+                // 钉住的公钥不是服务器的有效钥匙：账号重置过加密（§11.3）。批准转交来的私钥不能替换钉住的公钥（§11.4），只能用密码或恢复码解锁
+                guard active.contains(where: { $0.pub == pin }) else { phase = .failed(T.t46); throw Failure(.keyChanged, T.t46) }
                 account = pin
             } else {
                 guard active.count == 1 else { phase = .failed(T.t43); throw Failure(.keyMismatch, T.t43) }
@@ -1257,12 +1574,15 @@ enum E2E {
         func approve(_ api: API, sk: String) async throws {
             guard !stopped, case .code = phase else { return }
             let grant = try coreCall { try Core.grantSeal(sk: sk, to: request.pub) }
+            let kid = E2E.kid(of: sk)
             do {
-                try await api.call("POST", "/v1/e2e/grant", body: ["device_id": request.device_id, "pub": request.pub, "grant": grant])
+                try await api.call("POST", "/v1/e2e/grant", body: ["device_id": request.device_id, "pub": request.pub, "grant": grant, "kid": kid])
                 phase = .approved
             } catch let f as Failure where f.kind == .conflict {
-                phase = .failed(f.message)
-                throw f
+                // 本机的钥匙已经停用（别的设备重置过加密）→ T46；其他 409 显示服务端说明
+                let e = await E2E.staleKeyError(api, kid: kid, f)
+                phase = .failed(e.localizedDescription)
+                throw e
             }
         }
 
@@ -1279,6 +1599,35 @@ enum E2E {
     }
 
     // MARK: - 收消息（§6）
+
+    /// 收到 kind "sealed" 变更（或下载附件 410 reason=sealed）后重新拉取的消息，能不能替换本地记录（审查 M2）：
+    /// 只有「本地是明文、拉回来的是服务器代加密的（带信封且 sealed == "server"）、id 就是请求的那条」才替换。
+    /// 否则丢弃——不然被攻破的服务器发一条 sealed 变更，就能改写任意本地消息（发送端加密的、已经解开的、已是代加密的）
+    static func acceptResealed<M: E2EMessageFacts>(old: M, new: M, id: Int64) -> Bool {
+        old.id == id && new.id == id && !old.isE2E && new.isE2E && new.sealed == "server"
+    }
+
+    /// 410 reason=sealed 时，同一次下载最多重新拉取几次（防止服务器一直给新 id）
+    static let maxResealedRetries = 2
+
+    /// 下载附件返回 410 的原因（服务端 0.8.0 起带 reason）：sealed = 消息被服务器补加密、附件换了新 id，
+    /// 要用 GET /v1/messages/{id} 重新拉取这条消息（续传从头开始）；missing = 附件文件丢失
+    struct Gone: Equatable {
+        let reason: String
+        let messageID: Int64?
+        var sealed: Bool { reason == "sealed" }
+    }
+
+    static let sealedGoneMessage = "附件已加密，请刷新消息"
+
+    static func gone(_ data: Data) -> Gone {
+        let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        // 没有 reason（0.8.0 以前的服务端，没有补加密）一律按附件丢失处理，不比较说明文字
+        var reason = obj["reason"] as? String ?? ""
+        if reason.isEmpty { reason = "missing" }
+        let id = (obj["message_id"] as? NSNumber)?.int64Value
+        return Gone(reason: reason, messageID: id)
+    }
 
     /// 解密后的附件：id、sha256 用服务端的（下载和校验密文），名字、类型、大小用载荷里的
     struct OpenedAttachment: Equatable {

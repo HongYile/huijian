@@ -218,6 +218,19 @@ struct API {
 
     // MARK: 消息
 
+    /// 取单条消息（服务端 0.8.0 起）：收到 kind "sealed" 的变更、或者下载附件遇到 410 sealed 时重新拉取。
+    /// 消息不存在（或本机设为不接收这把 key）时返回 nil；本地字段（解密状态、附件钥匙）丢弃
+    func message(id: Int64) async throws -> Message? {
+        struct R: Decodable { let message: Message }
+        do {
+            var m = try await decode(R.self, "/v1/messages/\(id)").message
+            m.dropLocalFields()
+            return m
+        } catch APIError.http(404, _) {
+            return nil
+        }
+    }
+
     /// 拉取 id > since 的消息；since 为 nil 时返回最新的 limit 条。wait > 0 时是长轮询（服务端上限见 /v1/info 的 long_poll_max，旧服务端 55 秒）。
     /// changesSince 不为 nil 时一并返回之后的删除 / 归档变更（有新变更也会立即唤醒长轮询）
     func messages(since: Int64?, limit: Int = 200, wait: Int = 0, changesSince: Int64? = nil) async throws -> MessagePage {
@@ -362,7 +375,10 @@ struct API {
         let (tmp, resp) = try await API.session.download(for: r)
         defer { try? FileManager.default.removeItem(at: tmp) }
         if let h = resp as? HTTPURLResponse, !(200...299).contains(h.statusCode) {
-            _ = try API.check(resp, (try? Data(contentsOf: tmp)) ?? Data())
+            let body = (try? Data(contentsOf: tmp)) ?? Data()
+            // 0.8.0：消息被服务器补加密、附件换了新 id（reason "sealed"）——不是附件丢失，调用方重新拉取这条消息（§11.5）
+            if let sealed = AttachmentSealed.parse(status: h.statusCode, body: body) { throw sealed }
+            _ = try API.check(resp, body)
         }
         let want = ((resp as? HTTPURLResponse)?.legacyHeader("Sha256") ?? att.sha256).lowercased()
         let got = try API.sha256(of: tmp)
@@ -380,6 +396,20 @@ struct API {
         var hasher = SHA256()
         while let chunk = try h.read(upToCount: 1 << 20), !chunk.isEmpty { hasher.update(data: chunk) }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// 下载附件返回 410 reason "sealed"：这条消息被服务器补加密了，附件 id 已作废，要重新拉取消息（docs/e2ee-client.md §11.5）
+struct AttachmentSealed: LocalizedError, Equatable {
+    let messageID: Int64?
+    var errorDescription: String? { "附件已加密，请刷新消息" }
+
+    /// 410 {"reason": "sealed", "message_id": N} → 已补加密；其他 410（reason "missing" 等）是附件文件丢失，返回 nil。
+    /// 判断规则用共用的 E2E.gone（和 Mac、安卓一致；没有 reason 的按说明文字判断）
+    static func parse(status: Int, body: Data) -> AttachmentSealed? {
+        guard status == 410 else { return nil }
+        let g = E2E.gone(body)
+        return g.sealed ? AttachmentSealed(messageID: g.messageID) : nil
     }
 }
 

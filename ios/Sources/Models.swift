@@ -58,6 +58,11 @@ struct Message: Codable, Hashable, Identifiable {
     var e2e: String?
     /// 本机解密结果：ok 已解开 / locked 本机没有私钥 / wrong_key 别的钥匙加密的 / format 已损坏；nil = 还没处理（或明文消息）
     var e2eStatus: String?
+    /// 0.8.0 起：服务器代加密的消息为 "server"（发送端没加密，服务器收到后立即加密保存，docs/e2ee-client.md §11.5）；发送端加密的没有
+    var sealed: String?
+
+    /// 服务器代加密的（详情页显示 T64，不是「🔒 端到端加密」）
+    var isServerSealed: Bool { isE2E && sealed == "server" }
 
     /// 端到端加密的消息
     var isE2E: Bool { !(e2e ?? "").isEmpty }
@@ -109,7 +114,7 @@ struct Message: Codable, Hashable, Identifiable {
     var title: String { text.isEmpty ? (attachments.first?.name ?? "（无标题）") : text }
 
     enum CodingKeys: String, CodingKey {
-        case id, topic, thread, priority, type, text, desp, source, attachments, silent, archive, doc, preview, e2e
+        case id, topic, thread, priority, type, text, desp, source, attachments, silent, archive, doc, preview, e2e, sealed
         case createdAt = "created_at"
         case e2eStatus = "e2e_status"
         case pushkeyID = "pushkey_id"
@@ -139,8 +144,13 @@ struct Message: Codable, Hashable, Identifiable {
         e2e = try? c.decodeIfPresent(String.self, forKey: .e2e)
         if e2e?.isEmpty == true { e2e = nil }
         e2eStatus = try? c.decodeIfPresent(String.self, forKey: .e2eStatus)
+        sealed = try? c.decodeIfPresent(String.self, forKey: .sealed)
+        if sealed?.isEmpty == true { sealed = nil }
     }
 }
+
+/// 共用规则（E2E.acceptResealed 等）直接判断本地消息
+extension Message: E2EMessageFacts {}
 
 /// 频道设置（服务端 0.5.5 起，所有设备共用）
 struct ChannelSetting: Codable, Hashable {

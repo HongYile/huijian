@@ -6,6 +6,8 @@ enum APIError: Error, LocalizedError, Equatable {
     case invalid(String)
     /// 服务端没有这个接口（版本较旧）
     case unsupported
+    /// 下载附件 410 reason=sealed（0.8.0 起）：这条消息被服务器补加密了，附件换了新 id，要重新拉取消息（不是附件丢失）
+    case attachmentSealed(Int64?)
 
     var errorDescription: String? {
         switch self {
@@ -18,6 +20,7 @@ enum APIError: Error, LocalizedError, Equatable {
             if !plain { return "请求失败（HTTP \(c)）" }
             return c >= 500 ? "服务器出错（HTTP \(c)）：\(m)" : m
         case .invalid(let m): return m
+        case .attachmentSealed: return E2E.sealedGoneMessage
         }
     }
 }
@@ -452,6 +455,19 @@ struct APIClient {
     }
 
     /// 对账：服务端这个账号全部消息的 (id, 归档状态)，以及当时的变更游标
+    /// GET /v1/messages/{id}（0.8.0 起）：取单条消息。不存在或本机设为不接收时 404 → nil。
+    /// 收到 kind "sealed" 的变更、或下载附件遇到 410 reason=sealed 时用它重新拉取
+    func message(id: Int64) async throws -> Message? {
+        struct R: Decodable { let message: Message }
+        do {
+            var m = try JSONCoding.decoder.decode(R.self, from: try await send("/v1/messages/\(id)", method: "GET", body: nil)).message
+            m.stripLocalFields()
+            return m
+        } catch APIError.http(404, _) {
+            return nil
+        }
+    }
+
     func messageStates() async throws -> (items: [Int64: Int], changesNext: Int64, epoch: String?) {
         struct R: Decodable { let items: [[Int64]]; let changes_next: Int64; let epoch: String? }
         let r = try JSONCoding.decoder.decode(R.self, from: try await send("/v1/messages/state", method: "GET", body: nil))

@@ -61,9 +61,9 @@ struct DetailView: View {
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(m.priority >= 5 ? Theme.danger : Theme.text)
                     .textSelection(.enabled)
-                // 端到端加密标记（docs/e2ee-client.md §6.3）：加密消息「🔒 端到端加密」；账号开启了加密、这条却是明文时显示 T63
+                // 端到端加密标记（docs/e2ee-client.md §6.3、§11.5）：服务器代加密的显示 T64，发送端加密的「🔒 端到端加密」；账号开启了加密、这条却是明文时显示 T63
                 Text(([m.source, TimeText.full(m.createdAt), "#\(m.id)"]
-                      + (m.isE2E ? ["🔒 端到端加密"] : model.e2eAccountEnabled ? [E2E.T.t63] : []))
+                      + (m.isServerSealed ? [E2E.T.t64] : m.isE2E ? ["🔒 端到端加密"] : model.e2eAccountEnabled ? [E2E.T.t63] : []))
                     .filter { !$0.isEmpty }.joined(separator: " · "))
                     .font(.caption)
                     .foregroundStyle(Theme.text3)

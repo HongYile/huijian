@@ -11,6 +11,9 @@ struct Attachment: Codable, Hashable, Identifiable {
     var key: String? = nil
 }
 
+/// 共用规则（E2E.acceptResealed）判断补加密的消息能不能替换本地记录
+extension Message: E2EMessageFacts {}
+
 struct Message: Codable, Hashable, Identifiable {
     let id: Int64
     let topic: String
@@ -35,6 +38,8 @@ struct Message: Codable, Hashable, Identifiable {
     var preview = ""
     /// 0.7.0 起：端到端加密的信封（hje1.…）。保留原文，锁定期间收到的消息解锁后重新解密
     var e2e: String?
+    /// 0.8.0 起：服务器代加密的消息为 "server"（发送端用普通 pushkey 发的明文，服务器收到后立即加密保存）；发送端加密的为 nil
+    var sealed: String?
     /// 本机解密结果：ok 已解开 / locked 本机没有私钥 / wrong_key 别的钥匙加密的 / format 已损坏；nil = 还没处理（或明文消息）
     var e2eStatus: String?
 
@@ -47,6 +52,8 @@ struct Message: Codable, Hashable, Identifiable {
 
     /// 端到端加密的消息
     var isE2E: Bool { !(e2e ?? "").isEmpty }
+    /// 服务器代加密的（§11.5）：详情页显示 T64，不是「🔒 端到端加密」
+    var serverSealed: Bool { isE2E && sealed == "server" }
     /// 加密消息还没解开（标题是 T60 / T61 / T62，附件是密文）
     var e2eUnreadable: Bool { isE2E && e2eStatus != "ok" }
 
@@ -84,7 +91,7 @@ struct Message: Codable, Hashable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, topic, thread, priority, type, text, desp, source, attachments, silent, archive, doc, preview, e2e
+        case id, topic, thread, priority, type, text, desp, source, attachments, silent, archive, doc, preview, e2e, sealed
         case createdAt = "created_at"
         case e2eStatus = "e2e_status"
         case pushkeyID = "pushkey_id"
@@ -110,6 +117,8 @@ struct Message: Codable, Hashable, Identifiable {
         preview = (try? c.decodeIfPresent(String.self, forKey: .preview)) ?? ""
         e2e = try? c.decodeIfPresent(String.self, forKey: .e2e)
         if e2e?.isEmpty == true { e2e = nil }
+        sealed = try? c.decodeIfPresent(String.self, forKey: .sealed)
+        if sealed?.isEmpty == true { sealed = nil }
         e2eStatus = try? c.decodeIfPresent(String.self, forKey: .e2eStatus)
     }
 }

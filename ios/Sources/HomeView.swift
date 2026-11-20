@@ -34,7 +34,10 @@ struct HomeView: View {
                            color: Theme.accent) { model.settingsAnchor = "about"; model.path = [.settings] }
                 }
                 // 账号已开启加密、这台设备还没有解锁（T10）：点开进入「端到端加密」页
-                if model.e2eLocked && model.conn != .unauthorized { E2ELockedBanner() }
+                // 账号还没开启加密、服务端支持自动开启（T67，不能关闭）；否则已开启、本机还没解锁时显示 T10
+                if model.conn != .unauthorized {
+                    if model.e2eNeedsEnable { E2EEnableBanner() } else if model.e2eLocked { E2ELockedBanner() }
+                }
                 if shown.isEmpty && !model.loaded {
                     ProgressView("正在加载消息…")
                         .frame(maxWidth: .infinity)

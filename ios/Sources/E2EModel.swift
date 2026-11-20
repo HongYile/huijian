@@ -11,7 +11,7 @@ extension AppModel {
 
     var e2eRing: E2E.KeyRing? {
         guard !settings.server.isEmpty, let id = settings.accountID else { return nil }
-        return E2E.KeyRing(secrets: e2eSecrets, scope: E2E.scope(server: e2eServerID, accountID: id), defaults: .standard)
+        return E2E.KeyRing(secrets: e2eSecrets, scope: E2E.scope(server: e2eServerID, accountID: id), defaults: .standard, alive: e2eAlive)
     }
 
     var e2eAPI: E2E.API? { api().map { E2E.API($0) } }
@@ -52,7 +52,7 @@ extension AppModel {
     /// 操作期间 session 变了：返回 true。换成了别的账号 / 服务器（§8）时，这次操作可能已经往旧账号存了私钥、设备钥匙对，一并删掉；
     /// 同一账号重新登录（钥匙范围没变）时不删
     func e2eStale(_ gen: Int, _ ring: E2E.KeyRing) -> Bool {
-        guard gen != session else { return false }
+        guard gen != session || !ring.alive.isAlive else { return false }
         if ring.scope != e2eRing?.scope {
             do { try ring.removeAll() } catch { NSLog("回笺 删除旧账号的加密钥匙失败: \(error.localizedDescription)") }
         }
@@ -72,7 +72,7 @@ extension AppModel {
         guard let ring = e2eRing else { e2eKeys = []; return }
         if let p = e2ePendingLoginKey {
             do {
-                try E2E.acceptKey(p.sk, keys: p.keys, ring: ring)
+                try E2E.acceptOwnKey(p.sk, keys: p.keys, ring: ring)     // 来自密码：可以替换钉住的公钥（§11.4）
                 e2ePendingLoginKey = nil
             } catch let f as E2E.Failure where f.kind == .keyMismatch {
                 e2ePendingLoginKey = nil
@@ -84,7 +84,7 @@ extension AppModel {
             if ks != e2eKeys { e2eKeys = ks }
             e2eStorageError = nil
             // 已确认开启、用户还没在「保存恢复码」页点「完成」（例如切去密码管理器时 App 被系统终止）：不用联网，直接回到这一页（§4.1）
-            if let a = E2E.confirmedSetup(ring: ring) { showSetupRecovery(a) }
+            if let a = E2E.confirmedSetup(ring: ring), !a.code.isEmpty { showSetupRecovery(a) }
             // 更换恢复码同理（§7 第 3 项）
             if let a = E2E.confirmedRecovery(ring: ring) { showRecovery(E2ERecoveryShow(code: a.code, fromSetup: false)) }
             // 读到了私钥：还有没解开的消息就在后台解（启动时、换账号、钥匙串恢复可读后，§6.1）
@@ -109,7 +109,11 @@ extension AppModel {
             let req = e2eRequest
             let requestGen = req?.generation
             let st: E2E.State
-            do { st = try await api.state() } catch { return }
+            do { st = try await api.state() } catch {
+                // 服务端没有 /v1/e2e（旧版本）：密码钥匙用不上，丢掉
+                if let f = error as? E2E.Failure, f.kind == .unsupported, gen == session { e2eClearPasswordKeys() }
+                return
+            }
             guard gen == session else { return }
             let wasUnlocked = e2eStatus == .unlocked
             if st != e2eState { e2eState = st }
@@ -128,6 +132,28 @@ extension AppModel {
                     showRecovery(E2ERecoveryShow(code: a.code, fromSetup: false))
                 }
                 E2E.repinIfNeeded(st, ring: ring, localKeys: e2eKeys)     // §4.5 末尾：有私钥没钉住时补钉
+                if let k = e2ePasswordKeys {
+                    if st.enabled {
+                        // 账号已经开启：这组密码钥匙只剩一个用处——本机还锁着时按 §4.2 试一次解锁。之后立刻丢掉（§2.1 用完即弃）
+                        if E2E.usableKey(st, localKeys: e2eKeys) == nil {
+                            try? await E2E.unlock(api, ring: ring, authKey: k.authKey, unlockKey: k.unlockKey)
+                            if e2eStale(gen, ring) { return }
+                            loadE2EKeys()
+                        }
+                        e2eClearPasswordKeys()
+                    } else if supports("e2e.auto") == false || !st.server_seal {
+                        e2eClearPasswordKeys()          // 服务端不支持自动开启（0.7）：用不上
+                    } else if !((try? ring.pendingSetup())?.code ?? "").isEmpty {
+                        // 有用户手动开启留下、带恢复码的进行中开启：不自动开启（不能删掉那份恢复码），交给 checkE2ESetup 核对；
+                        // 这组钥匙帮不上忙（手动那次可能同时换了密码），丢掉，不无限留着。之后由 T67 或下次密码登录再开
+                        e2eClearPasswordKeys()
+                    } else if supports("e2e.auto") == true, !e2eAutoSetupRunning, !e2eSetupBusy, Date() >= e2eAutoRetryAt {
+                        // §11.1：后台自动开启（成功后再刷新一次）。失败按退避等待。
+                        // 手动开启 / 重置正在进行时不同时开启（两者共用钥匙串里进行中的开启这一项）
+                        if await e2eAutoSetup(k, ring: ring) { e2eRefreshAgain = true }
+                        guard gen == session else { return }
+                    }
+                }
             }
             if let r = req, let g = requestGen, r === e2eRequest {
                 let ph = await r.handle(st, api: api, generation: g)
@@ -149,6 +175,9 @@ extension AppModel {
             if e2eStatus == .unlocked, !wasUnlocked || messages.contains(where: \.e2eUnreadable) {
                 await decryptPending()
             }
+            // 上次没拉到的被补加密的消息（§11.5）：再拉一次
+            // 不等它拉完：重试集合很大时不能拖住这次刷新（加密页每 3 秒的批准、核对刷新）
+            if !e2eSealedRetry.isEmpty, !e2eSealedRunning { Task { await refetchSealed([]) } }
         } while e2eRefreshAgain
     }
 
@@ -158,15 +187,25 @@ extension AppModel {
         let u = accountDetail?.account.username ?? settings.username
         let r: E2E.SetupCheck
         do { r = try E2E.checkPendingSetup(st, ring: ring, server: e2eServerID, username: u, marks: e2eMarks) } catch { return }
+        if case .resetPending = r {} else { e2eResetNote = nil }
         switch r {
-        case .none, .discarded:
+        case .none:
             e2ePendingSetup = nil
-        case .notEnabled(let a):
-            e2ePendingSetup = a
-        case .completed(let a):
+        case .resetPending:
+            // 重置加密的结果还不确定（服务器还是原来的钥匙，不能断定失败）：保留记录，提示和行为一致（确认成功后自动换上）
+            e2eResetNote = E2E.T.resetUncertain
+        case .discarded:
             e2ePendingSetup = nil
             loadE2EKeys()
-            showSetupRecovery(a)
+        case .notEnabled(let a):
+            // 只有用户手动开启（带恢复码）的才提示「请重新点开启」；自动开启留下的由自动开启自己重试，不打扰用户
+            e2ePendingSetup = a.code.isEmpty ? nil : a
+        case .completed(let a):
+            e2ePendingSetup = nil
+            e2eAutoSetupFailed = false
+            loadE2EKeys()
+            // 自动开启、重置加密没有恢复码：不显示恢复码页（§11.1）
+            if !a.code.isEmpty { showSetupRecovery(a) }
         }
     }
 
@@ -189,6 +228,159 @@ extension AppModel {
         e2eRecovery = nil
     }
 
+    // MARK: 默认自动加密（§11）
+
+    /// 登录 / 注册 / 设置初始密码后留下这次的密码钥匙（只在内存里），并记下密码是否偏弱（T24）
+    func e2eNotePasswordKeys(_ k: E2E.PasswordKeys?) {
+        guard let k else { return }
+        e2eClearPasswordKeys()
+        e2ePasswordKeys = k
+        e2eAutoSetupFailed = false
+        e2eWeakPassword = k.weak
+    }
+
+    /// 后台自动开启加密（§11.1）。返回是否有变化（开启了 / 解锁了）。失败不影响登录：下次刷新或下次用密码登录再试
+    private func e2eAutoSetup(_ k: E2E.PasswordKeys, ring: E2E.KeyRing) async -> Bool {
+        guard let api = e2eAPI, let u = try? e2eUsername() else { return false }
+        let gen = session
+        e2eAutoSetupRunning = true
+        defer { e2eAutoSetupRunning = false }
+        do {
+            let r = try await E2E.autoSetup(api, ring: ring, server: e2eServerID, username: u, keys: k, marks: e2eMarks)
+            // 期间退出登录 / 换了账号：共用代码可能已经把新私钥写回旧账号的钥匙串，e2eStale 删掉（§8）
+            if e2eStale(gen, ring) { return false }
+            // 有用户手动开启留下、还没核对出结果的记录（带恢复码）：不自动开启，交给 checkE2ESetup 和用户；钥匙留着，核对完再试
+            if r == .manualPending { e2eClearPasswordKeys(); return false }
+            e2eAutoSetupFailed = false
+            e2ePendingSetup = nil
+            e2eWeakPassword = k.weak
+            e2eClearPasswordKeys()
+            loadE2EKeys()
+            return true
+        } catch let f as E2E.Failure where f.kind == .wrongPassword || f.status == 403 || f.status == 429 {
+            // 密码已经在别处改过 / 当前密码核对被限速：停止自动重试，等下次输入密码（不再占用服务端的核对额度）
+            if e2eStale(gen, ring) { return false }
+            e2eClearPasswordKeys()
+            e2eAutoSetupFailed = true
+        } catch {
+            if e2eStale(gen, ring) { return false }
+            NSLog("回笺 自动开启加密没有成功: \(error.localizedDescription)")
+            e2eAutoSetupFailed = true
+            // 退避：30 秒起翻倍，上限 30 分钟
+            e2eAutoFailures += 1
+            let wait = min(30 * pow(2, Double(min(e2eAutoFailures - 1, 10))), 30 * 60)
+            e2eAutoRetryAt = Date().addingTimeInterval(wait)
+        }
+        return false
+    }
+
+    /// 这个账号的密码偏弱（T24，§11.1 第 5 步）：按「服务器#账号 id」记在偏好设置里；本机下次输入这个账号的密码时重新计算
+    var e2eWeakPassword: Bool {
+        get { e2eRing.map { settings.e2eWeakAccounts.contains($0.scope) } ?? (e2ePendingWeak ?? false) }
+        set {
+            // 还没取到账号 id：先记在内存里，noteAccountID 时保存
+            guard let scope = e2eRing?.scope else { e2ePendingWeak = newValue; return }
+            var list = settings.e2eWeakAccounts.filter { $0 != scope }
+            if newValue { list.append(scope) }
+            if list != settings.e2eWeakAccounts { settings.e2eWeakAccounts = list }
+        }
+    }
+
+    /// T67 提示条（§11.1 末尾）：账号还没开启加密、服务端支持自动开启（server_seal 为 true）时，首页顶部一直显示，不能关闭。
+    /// 本机或别的设备开启后（enabled 变为真）自动消失
+    var e2eNeedsEnable: Bool {
+        guard let st = e2eState, !st.enabled, st.server_seal else { return false }
+        return supports("e2e.auto") == true
+    }
+
+    /// T67 小窗：输入一次当前密码，按 §2.4 核对后自动开启。算出的钥匙只在这个函数里用一次，不留在内存里
+    func e2eEnableWithPassword(_ password: String) async throws {
+        let (api, ring, u) = try e2eContext()
+        // 小窗打开期间后台已经开始自动开启、或者手动开启 / 重置正在进行：不并发（共用钥匙串里进行中的开启这一项）
+        guard !e2eAutoSetupRunning, !e2eSetupBusy else { throw E2E.Failure(.conflict, E2E.T.autoSetupRunning) }
+        let gen = session
+        e2eAutoSetupRunning = true
+        defer { e2eAutoSetupRunning = false }
+        let r: E2E.AutoSetupResult
+        do {
+            let k = try await E2E.keysForPassword(api, server: e2eServerID, username: u, password: password, marks: e2eMarks)
+            if e2eStale(gen, ring) { throw CancellationError() }
+            r = try await E2E.autoSetup(api, ring: ring, server: e2eServerID, username: u, keys: k, marks: e2eMarks)
+        } catch {
+            if e2eStale(gen, ring) { throw CancellationError() }
+            throw error
+        }
+        if e2eStale(gen, ring) { throw CancellationError() }
+        if r == .manualPending { throw E2E.Failure(.conflict, E2E.T.setupUncertain) }
+        e2eAutoSetupFailed = false
+        e2ePendingSetup = nil
+        e2eClearPasswordKeys()
+        // T24 按这次输入的密码重新计算
+        e2eWeakPassword = Core.passwordProblem(password, username: u) != nil
+        loadE2EKeys()
+        await refreshE2E()
+    }
+
+    /// 丢掉内存里的密码钥匙（§2.1 用完即弃）：自动开启成功、账号已开启、服务端不支持、停止重试、App 进入后台、退出登录时
+    func e2eClearPasswordKeys() {
+        e2ePasswordKeys = nil
+        e2eAutoFailures = 0
+        e2eAutoRetryAt = .distantPast
+    }
+
+    /// 重置加密 / 更换加密钥匙（§11.3）：确认 T45 之后调用。成功后新公钥替换钉住的，本机旧私钥保留（解旧消息）
+    func e2eReset(password: String) async throws {
+        let (api, ring, u) = try e2eContext()
+        let gen = session
+        e2eSetupBusy = true
+        defer { e2eSetupBusy = false }
+        do {
+            try await E2E.resetE2E(api, ring: ring, server: e2eServerID, username: u, password: password, marks: e2eMarks)
+        } catch let p as E2E.SetupPending {
+            // 结果不确定：进行中的重置已存在钥匙串，刷新时 checkPendingSetup 核对，确定失败才删（§4.1 规则）
+            if e2eStale(gen, ring) { throw CancellationError() }
+            e2eResetNote = p.localizedDescription
+            throw p
+        } catch {
+            if e2eStale(gen, ring) { throw CancellationError() }
+            throw error
+        }
+        if e2eStale(gen, ring) { throw CancellationError() }
+        e2eResetNote = nil
+        e2eWeakPassword = Core.passwordProblem(password, username: u) != nil
+        e2ePendingSetup = nil
+        if e2eRequest != nil { await e2eCancelRequest() }
+        loadE2EKeys()
+        await refreshE2E()
+        await decryptPending()
+    }
+
+    /// 上传锁住的副本（改密码、换恢复码、批准设备）时服务端说本机的钥匙已停用（§11.5，T46）：刷新状态让加密页显示 T46，再把错误抛给界面
+    private func e2eRethrowKeyChanged(_ error: Error) async throws -> Never {
+        if let f = error as? E2E.Failure, f.kind == .keyChanged { await refreshE2E() }
+        throw error
+    }
+
+    /// 重置加密的结果还不确定（加密页显示 T.resetUncertain 和「放弃这次重置」）
+    var e2eResetPending: Bool { e2eResetNote == E2E.T.resetUncertain }
+
+    /// 用户确认「放弃这次重置」：删除记录，新私钥留在本机（万一其实成功了还能解开那段时间的消息），之后可以重新重置
+    func e2eAbandonReset() async {
+        guard let ring = e2eRing else { return }
+        E2E.abandonReset(ring: ring)
+        e2eResetNote = nil
+        loadE2EKeys()
+        await refreshE2E()
+    }
+
+    /// 钉住的公钥和服务器有效钥匙不同（别的设备重置过加密）：加密页显示 T46，引导用密码或恢复码解锁（§11.3 第 6 步、§11.4）
+    var e2eKeyChanged: Bool { e2eState.map { E2E.keyChanged($0, pinned: e2eRing?.pinned) } ?? false }
+
+    /// 账号还没开启、正在或将要自动开启（加密页显示「正在开启加密…」）
+    var e2eAutoSetupPending: Bool {
+        e2eAutoSetupRunning || (e2ePasswordKeys != nil && supports("e2e.auto") == true && e2eState?.enabled == false && !e2eAutoSetupFailed)
+    }
+
     /// 有设备请求批准：通知一次（T50，App 在前台或下次打开时）。只有已解锁的设备能批准，锁定的设备不提醒
     private func notifyE2ERequests(_ st: E2E.State) {
         guard e2eStatus == .unlocked, !st.requests.isEmpty else { return }
@@ -204,7 +396,10 @@ extension AppModel {
 
     /// 退出登录、设备被移除（§8）：删除本机为这个账号保存的全部私钥、设备钥匙对和进行中的开启。「已升级」标记、钉住的公钥不删
     func e2eWipe() {
-        // 先停下正在进行的批准流程（请求、批准），它们 await 回来后不会再写钥匙串；再删
+        // 先停下正在进行的批准流程（请求、批准），它们 await 回来后不会再写钥匙串；
+        // 正在进行的自动开启、重置、T67 开启拿着旧标记，完成时也不再写。然后再删
+        e2eAlive.kill()
+        e2eAlive = E2E.AliveFlag()
         e2eRequest?.stop()
         for a in e2eApprovals.values { a.stop() }
         if let ring = e2eRing {
@@ -220,6 +415,11 @@ extension AppModel {
         e2eApprovalPhases = [:]
         e2eRecovery = nil
         e2eRecoveryNote = nil
+        e2eResetNote = nil
+        e2ePendingWeak = nil
+        e2eClearPasswordKeys()
+        e2eAutoSetupFailed = false
+        e2eWeakPassword = false
         e2ePendingLoginKey = nil
         e2ePendingSetup = nil
         settings.e2eEnabled = false
@@ -297,16 +497,25 @@ extension AppModel {
             }
         }
         let a = try await setCredentials(username: username, password: password, current: "")
-        if !password.isEmpty { await upgradeAfterInitialPassword(username: username, password: password) }
+        guard gen == session else { throw CancellationError() }
+        if !password.isEmpty {
+            // 升级到新登录协议后，用这次算出的钥匙在后台自动开启加密（§11.1）。
+            // 期间退出登录 / 换了账号：钥匙和 T24 属于旧账号，丢掉
+            let k = await upgradeAfterInitialPassword(username: username, password: password)
+            guard gen == session else { throw CancellationError() }
+            e2eNotePasswordKeys(k)
+            Task { await refreshE2E() }
+        }
         return a
     }
 
     /// 刚用原文设置了初始密码（服务端没有别的接口）：服务端支持新登录协议时马上升级
-    func upgradeAfterInitialPassword(username: String, password: String) async {
+    /// 返回这次算出的密码钥匙（自动开启加密用）；旧服务端、升级失败时 nil
+    func upgradeAfterInitialPassword(username: String, password: String) async -> E2E.PasswordKeys? {
         // 不看功能清单（还没取到不算没有 e2e）：由 prelogin 决定，旧服务端返回纯文本 404 时什么也不做
-        guard let api = e2eAPI else { return }
-        await E2E.upgradeAfterInitialPassword(api, server: e2eServerID, username: ManageRules.normalizeUsername(username),
-                                              password: password, marks: e2eMarks)
+        guard let api = e2eAPI else { return nil }
+        return await E2E.upgradeAfterInitialPassword(api, server: e2eServerID, username: ManageRules.normalizeUsername(username),
+                                                     password: password, marks: e2eMarks)
     }
 
     /// 改用户名 / 密码（账号已有密码时）：一律按 §2.4 / §7.5 用当前密码派生的凭证（不发密码原文、已开启加密时重新锁住私钥），
@@ -317,10 +526,19 @@ extension AppModel {
         let gen = session
         let old = try e2eUsername()
         let st = try? await api.state()
-        _ = try await E2E.changeCredentials(api, state: st ?? e2eState, sk: st.flatMap { E2E.usableKey($0, localKeys: e2eKeys) },
-                                            server: e2eServerID, username: old, newUsername: ManageRules.normalizeUsername(username),
-                                            currentPassword: current, newPassword: password, marks: e2eMarks)
+        do {
+            _ = try await E2E.changeCredentials(api, state: st ?? e2eState, sk: st.flatMap { E2E.usableKey($0, localKeys: e2eKeys) },
+                                                server: e2eServerID, username: old, newUsername: ManageRules.normalizeUsername(username),
+                                                currentPassword: current, newPassword: password, marks: e2eMarks)
+        } catch {
+            try await e2eRethrowKeyChanged(error)
+        }
         guard gen == session else { throw CancellationError() }
+        if !password.isEmpty {
+            // 换了密码：T24 按新密码重算；内存里旧密码的钥匙作废（§11.1）
+            e2eWeakPassword = Core.passwordProblem(password, username: ManageRules.normalizeUsername(username)) != nil
+            e2eClearPasswordKeys()
+        }
         let a = try await requireAPI().account().account
         guard gen == session else { throw CancellationError() }
         noteAccount(a)
@@ -334,7 +552,10 @@ extension AppModel {
     /// 用户点「完成」（e2eFinishRecovery）才都删掉。结果不确定时之后每次刷新状态都会核对（§4.1）
     func e2eSetup(current: String, newPassword: String?) async throws {
         let (api, ring, u) = try e2eContext()
+        guard !e2eAutoSetupRunning else { throw E2E.Failure(.conflict, E2E.T.autoSetupRunning) }
         let gen = session
+        e2eSetupBusy = true
+        defer { e2eSetupBusy = false }
         do {
             let code = try await E2E.setup(api, ring: ring, server: e2eServerID, username: u, currentPassword: current,
                                            newPassword: newPassword, marks: e2eMarks)
@@ -360,6 +581,8 @@ extension AppModel {
         let gen = session
         try await E2E.unlockWithPassword(api, ring: ring, server: e2eServerID, username: u, password: password, marks: e2eMarks)
         if e2eStale(gen, ring) { throw CancellationError() }
+        // T24 按这次输入的密码重新计算（密码可能已在别的设备上改过）
+        e2eWeakPassword = Core.passwordProblem(password, username: u) != nil
         await e2eAfterUnlock()
     }
 
@@ -428,7 +651,7 @@ extension AppModel {
         guard let sk = e2eAccountKey else { throw E2E.Failure(.locked, "本机还没有解锁，不能批准其他设备") }
         let gen = session
         defer { if gen == session, e2eApprovals[deviceID] === a { e2eApprovalPhases[deviceID] = a.phase } }
-        try await a.approve(api, sk: sk)
+        do { try await a.approve(api, sk: sk) } catch { try await e2eRethrowKeyChanged(error) }
         await refreshE2E()
     }
 
@@ -474,6 +697,8 @@ extension AppModel {
             if e2eStale(gen, ring) { throw CancellationError() }
             e2eRecoveryNote = p.localizedDescription
             throw p
+        } catch {
+            try await e2eRethrowKeyChanged(error)
         }
         if e2eStale(gen, ring) { throw CancellationError() }
         e2eRecoveryNote = nil

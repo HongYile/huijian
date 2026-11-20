@@ -402,7 +402,7 @@ struct ThreadListView: View {
                 if !multi.isEmpty { selectionBar(groups) }
             }
             .safeAreaInset(edge: .top, spacing: 0) {
-                if model.e2eLocked { E2ELockedBanner() }
+                if model.e2eNeedsEnable { E2EEnableBanner() } else if model.e2eLocked { E2ELockedBanner() }
             }
             .onChange(of: model.filter) { _, _ in multi = [] }
             // 搜索、筛选、其他设备的操作、自动归档都会让会话从列表里消失：多选只保留还看得见的
@@ -826,7 +826,10 @@ struct MessageHeader: View {
                 Text(TimeFmt.full(message.createdAt)).monospacedDigit()
                 Text("·")
                 Text("#\(message.id)").monospacedDigit()
-                if message.isE2E {
+                if message.serverSealed {
+                    Text("·")
+                    Text(E2E.T.t64)          // §11.5：元信息行显示完整的 T64（各端一致）
+                } else if message.isE2E {
                     Text("·")
                     Text("🔒 端到端加密").help("内容在发送端加密，只有你的设备能解开（不表示来源一定可信）")
                 } else if model.e2eAccountEnabled {
@@ -2079,6 +2082,77 @@ struct E2ELockedBanner: View {
         .onHover { hover = $0 }
         .padding(.horizontal, 8).padding(.top, 6)
         .background(Theme.bg)
+    }
+}
+
+/// 消息列表顶部：账号还没开启加密、服务端支持自动开启（§11.1 末尾，T67），不能关闭。
+/// 有密码：弹出只输当前密码的小窗；没有密码：去「账户」页设置密码，设置后自动开启。开启后（本机或别的设备）自动消失
+struct E2EEnableBanner: View {
+    @EnvironmentObject var model: AppModel
+    @State private var hover = false
+    @State private var asking = false
+
+    var body: some View {
+        Button {
+            if model.account?.has_password == true { asking = true } else { AppDelegate.shared?.showSettings(tab: .account) }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "lock.shield").font(.system(size: 12)).foregroundStyle(Theme.accent)
+                Text(E2E.T.t67).font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.text)
+                Spacer(minLength: 0)
+                if model.e2eAutoSetupRunning { ProgressView().controlSize(.small) }
+                Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.text3)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 9)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.accent.opacity(hover ? 0.16 : 0.1)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(model.e2eAutoSetupRunning)
+        .onHover { hover = $0 }
+        .padding(.horizontal, 8).padding(.top, 6)
+        .background(Theme.bg)
+        .sheet(isPresented: $asking) { E2EEnableSheet().environmentObject(model) }
+    }
+}
+
+/// T67 的小窗：只输当前密码。密码和算出的钥匙都不留在内存里
+struct E2EEnableSheet: View {
+    @EnvironmentObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var password = ""
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("开启端到端加密").font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.text)
+            Text(E2E.T.t67).font(.system(size: 13)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
+            SecureField("当前密码", text: $password).textFieldStyle(.roundedBorder).onSubmit { Task { await submit() } }
+            if let error { Text(error).font(.system(size: 12)).foregroundStyle(Theme.danger).fixedSize(horizontal: false, vertical: true) }
+            HStack {
+                Spacer()
+                Button("取消") { password = ""; dismiss() }.keyboardShortcut(.cancelAction)
+                Button(busy ? "正在开启…" : "开启") { Task { await submit() } }
+                    .keyboardShortcut(.defaultAction).disabled(busy || password.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
+    }
+
+    func submit() async {
+        guard !password.isEmpty, !busy else { return }
+        busy = true; error = nil
+        defer { busy = false }
+        do {
+            try await model.e2eEnableWithPassword(password)
+            password = ""
+            dismiss()
+        } catch {
+            password = ""
+            self.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
     }
 }
 

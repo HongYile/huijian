@@ -35,14 +35,45 @@ struct E2ESettings: View {
                         }
                     }
                 case .off:
+                    // §11.1：账号一有密码就自动开启；手动开启页只作为自动开启失败时的出口
+                    if model.e2eAutoSetupRunning {
+                        SettingsCard {
+                            SettingsRow(label: E2E.T.autoSetupRunning, divider: false) { ProgressView().controlSize(.small) }
+                        }
+                    } else if model.e2eAutoSetupFailed {
+                        E2ENote(text: E2E.T.autoSetupFailed)
+                    }
                     E2ESetupCard()
                 case .locked:
+                    if model.e2eKeyChanged { E2ENote(text: E2E.T.t46) }
                     E2EUnlockCards()
+                    E2EResetCard(locked: true)
                 case .unlocked:
+                    if model.e2eResetDone {
+                        // §11.3：换了钥匙，发送端要换成新的加密发送密钥
+                        SettingsCard {
+                            FormBlock {
+                                Label(E2E.T.resetDone, systemImage: "checkmark.circle.fill")
+                                    .font(.system(size: 13)).foregroundStyle(Theme.success).fixedSize(horizontal: false, vertical: true)
+                                HStack {
+                                    Spacer()
+                                    Button("知道了") { model.e2eResetDone = false }.buttonStyle(SoftButtonStyle())
+                                    Button("去 Pushkey 页") {
+                                        model.e2eResetDone = false
+                                        AppDelegate.shared?.showSettings(tab: .keys)
+                                    }
+                                    .buttonStyle(SoftButtonStyle())
+                                }
+                            }
+                        }
+                    }
                     if model.e2eNeedsPasswordReset { E2EResetPasswordCard() }
+                    if model.e2eWeakPassword { E2ENote(text: E2E.T.t24) }
+                    if model.e2eState?.hasRecovery == false { E2ERecoveryCard() }
                     E2EStatusCard()
                     E2ERequestsCard()
                     E2EOptionsCard()
+                    E2EResetCard(locked: false)
                 }
             }
         }
@@ -161,7 +192,7 @@ struct E2ESetupCard: View {
                         }
                     }
                     .buttonStyle(SoftButtonStyle())
-                    .disabled(busy || !canSubmit)
+                    .disabled(busy || !canSubmit || model.e2eAutoSetupRunning)      // 自动开启进行中不能手动开启
                 }
             }
         }
@@ -403,11 +434,123 @@ struct E2EStatusCard: View {
             SettingsRow(label: "本机") {
                 Text("已解锁，可以查看加密消息").font(.system(size: 13.5)).foregroundStyle(Theme.text2)
             }
-            SettingsRow(label: "恢复码", divider: false) {
+            SettingsRow(label: "恢复码", divider: !(st?.server_seal ?? false)) {
                 Text(st?.hasRecovery == true ? "已设置" : "未设置")
                     .font(.system(size: 13.5)).foregroundStyle(st?.hasRecovery == true ? Theme.text2 : Theme.warning)
             }
+            if st?.server_seal == true {
+                // §11.5：服务器代加密始终开启，没有开关，只读说明 T65
+                SettingsRow(label: "服务器代加密", divider: false) {
+                    Text((st?.plain_messages ?? 0) > 0 ? "始终开启 · 服务器上还有 \(st?.plain_messages ?? 0) 条明文" : "始终开启")
+                        .font(.system(size: 13.5)).foregroundStyle(Theme.text2)
+                }
+                Text(E2E.T.t65).font(.system(size: 12)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 12)
+            }
         }
+    }
+}
+
+// MARK: 恢复码可选（§11.2）
+
+struct E2ERecoveryCard: View {
+    @EnvironmentObject var model: AppModel
+    @State private var open = false
+    @State private var password = ""
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        SettingsCard(title: "恢复码") {
+            FormBlock {
+                Text(E2E.T.t23).font(.system(size: 13)).foregroundStyle(Theme.warning).fixedSize(horizontal: false, vertical: true)
+                if open {
+                    HStack(spacing: 10) {
+                        WarmField(placeholder: "先输入当前密码", text: $password, secure: true)
+                        Button("取消") { open = false; password = ""; error = nil }.buttonStyle(SoftButtonStyle())
+                        Button(busy ? "生成中…" : "生成恢复码") { Task { await submit() } }
+                            .buttonStyle(SoftButtonStyle()).disabled(busy || password.isEmpty)
+                    }
+                } else {
+                    HStack {
+                        Spacer()
+                        Button("设置恢复码") { open = true }.buttonStyle(SoftButtonStyle())
+                    }
+                }
+                errorText(error)
+            }
+        }
+    }
+
+    func submit() async {
+        busy = true; error = nil
+        defer { busy = false }
+        do {
+            try await model.e2eRotateRecovery(password: password)      // 和更换恢复码同一个接口（§7 第 3 项）
+            password = ""; open = false
+        } catch { self.error = describe(error) }
+    }
+}
+
+// MARK: 重置加密 / 更换加密钥匙（§11.3）
+
+struct E2EResetCard: View {
+    @EnvironmentObject var model: AppModel
+    /// 锁定时是「都不行？重置加密」，已解锁时是「更换加密钥匙」
+    let locked: Bool
+    @State private var open = false
+    @State private var password = ""
+    @State private var confirm = false
+    @State private var busy = false
+    @State private var error: String?
+    @State private var confirmAbandon = false
+
+    var body: some View {
+        SettingsCard(title: locked ? "都不行？重置加密" : "更换加密钥匙",
+                     footer: locked ? "忘了密码、没有其他已解锁的设备、也没有恢复码时，用当前密码换一把新的加密钥匙。以前的加密消息在这台设备上解不开。"
+                                    : "换一把新的加密钥匙：以后的新消息用新钥匙加密，本机仍保留旧钥匙，能看以前的消息。") {
+            FormBlock {
+                // 上次的重置结果不确定（提示在页面上方）：可以不等了，放弃这次重置
+                if model.e2eResetPending && !open {
+                    HStack {
+                        Text("上次的重置还没有结果").font(.system(size: 12.5)).foregroundStyle(Theme.text2)
+                        Spacer()
+                        Button("放弃这次重置…") { confirmAbandon = true }.buttonStyle(SoftButtonStyle())
+                    }
+                }
+                if open {
+                    HStack(spacing: 10) {
+                        WarmField(placeholder: "当前密码", text: $password, secure: true)
+                        Button("取消") { open = false; password = ""; error = nil }.buttonStyle(SoftButtonStyle())
+                        Button(busy ? "正在生成钥匙…" : (locked ? "重置加密" : "更换")) { confirm = true }
+                            .buttonStyle(SoftButtonStyle(destructive: true)).disabled(busy || password.isEmpty)
+                    }
+                } else {
+                    HStack {
+                        Spacer()
+                        Button(locked ? "重置加密…" : "更换…") { open = true; error = nil }.buttonStyle(SoftButtonStyle(destructive: true))
+                    }
+                }
+                errorText(error)
+            }
+        }
+        .confirmationDialog(E2E.T.t45, isPresented: $confirm) {
+            Button(locked ? "重置" : "更换", role: .destructive) { Task { await submit() } }
+        }
+        .confirmationDialog("放弃这次重置？", isPresented: $confirmAbandon) {
+            Button("放弃这次重置", role: .destructive) { Task { await model.e2eAbandonReset() } }
+        } message: {
+            Text("不再等这次重置的结果。这次生成的钥匙仍留在本机；之后可以重新重置。")
+        }
+    }
+
+    func submit() async {
+        busy = true; error = nil
+        defer { busy = false }
+        do {
+            try await model.e2eReset(password: password)
+            password = ""; open = false
+        } catch { self.error = describe(error) }
     }
 }
 
@@ -550,7 +693,7 @@ struct E2EOptionsCard: View {
             Text(E2E.T.t71).font(.system(size: 12)).foregroundStyle(Theme.text3)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 10)
                 .overlay(alignment: .bottom) { Rectangle().fill(Theme.border.opacity(0.7)).frame(height: 1) }
-            SettingsRow(label: "更换恢复码") {
+            SettingsRow(label: model.e2eState?.hasRecovery == false ? "设置恢复码" : "更换恢复码") {
                 if !rotating {
                     Button("更换…") { rotating = true; message = nil }.buttonStyle(SoftButtonStyle())
                 }

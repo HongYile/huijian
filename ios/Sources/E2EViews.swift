@@ -37,14 +37,34 @@ struct E2EView: View {
                         }
                     }
                 case .off:
+                    // §11.1：有密码的账号在后台自动开启；手动开启（§4.1）只作为出口保留
+                    if model.e2eAutoSetupPending {
+                        Section {
+                            HStack(spacing: 10) {
+                                ProgressView()
+                                Text(E2E.T.autoSetupRunning).foregroundStyle(Theme.text2)
+                            }
+                        }
+                    } else if model.e2eAutoSetupFailed {
+                        Section {
+                            Label(E2E.T.autoSetupFailed, systemImage: "exclamationmark.triangle.fill")
+                                .font(.subheadline).foregroundStyle(Theme.warning)
+                        }
+                    }
                     E2ESetupSection()
                 case .locked:
+                    if model.e2eKeyChanged { E2EKeyChangedSection() }
                     E2EUnlockSections()
+                    E2EResetSection(locked: true) { notice = E2E.T.resetDone }
                 case .unlocked:
+                    if model.e2eKeyChanged { E2EKeyChangedSection() }
                     if model.e2eNeedsPasswordReset { E2EResetPasswordSection() }
+                    if model.e2eWeakPassword { E2EWeakPasswordSection() }
                     E2EStatusSection()
+                    E2ERecoverySection()
                     E2ERequestsSection()
                     E2EOptionsSections()
+                    E2EResetSection(locked: false) { notice = E2E.T.resetDone }
                 }
             }
         }
@@ -74,12 +94,12 @@ struct E2EView: View {
     }
 
     @ViewBuilder private var notices: some View {
-        ForEach([model.e2eStorageError, model.e2eLoginNote, model.e2eRecoveryNote, notice].compactMap { $0 }, id: \.self) { t in
+        ForEach([model.e2eStorageError, model.e2eLoginNote, model.e2eRecoveryNote, model.e2eResetNote, notice].compactMap { $0 }, id: \.self) { t in
             Section {
                 Label(t, systemImage: t == notice ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                     .font(.subheadline)
                     .foregroundStyle(t == notice ? Theme.success : Theme.warning)
-                if t == E2E.T.t22 {
+                if t == E2E.T.t22 || t == E2E.T.resetDone {
                     Button("打开 Pushkey 页") { model.path = [.settings, .keys] }
                 }
             }
@@ -173,7 +193,8 @@ struct E2ESetupSection: View {
             } label: {
                 BusyLabel(text: busy ? "正在生成钥匙…" : "开启端到端加密", busy: busy)
             }
-            .disabled(busy || !canSubmit)
+            // 后台正在自动开启时不能同时手动开启（两次 setup 并发，手动那次会拿到 409）
+            .disabled(busy || !canSubmit || model.e2eAutoSetupRunning)
         } header: {
             Text(E2E.T.t20Title)
         } footer: {
@@ -530,8 +551,6 @@ struct E2ERequestsSection: View {
 
 struct E2EOptionsSections: View {
     @EnvironmentObject private var model: AppModel
-    @State private var rotating = false
-    @State private var password = ""
     @State private var busy = false
     @State private var message: String?
     @State private var confirmDelete = false
@@ -548,15 +567,13 @@ struct E2EOptionsSections: View {
         } footer: {
             Text(E2E.T.t71)
         }
+        // 服务器代加密（§11.5）：始终开启、没有开关，只显示说明 T65
         Section {
-            if rotating {
-                SecureField("先输入当前密码", text: $password).textContentType(.password)
-                Button { Task { await rotate() } } label: { BusyLabel(text: busy ? "生成中…" : "生成新的恢复码", busy: busy) }
-                    .disabled(busy || password.isEmpty)
-                Button("取消") { rotating = false; password = "" }.disabled(busy)
-            } else {
-                Button("更换恢复码…") { rotating = true; message = nil }
-            }
+            LabeledContent("服务器代加密") { Text("始终开启").foregroundStyle(Theme.text2) }
+        } footer: {
+            Text(E2E.T.t65)
+        }
+        Section {
             Button("删除服务器上的明文消息…", role: .destructive) { confirmDelete = true }
                 .disabled(busy)
                 .confirmationDialog("删除服务器上的明文消息", isPresented: $confirmDelete, titleVisibility: .visible) {
@@ -569,16 +586,6 @@ struct E2EOptionsSections: View {
         }
     }
 
-    private func rotate() async {
-        busy = true; message = nil
-        defer { busy = false }
-        do {
-            try await model.e2eRotateRecovery(password: password)      // 恢复码在 model.e2eRecovery
-            password = ""
-            rotating = false
-        } catch { message = describe(error) }
-    }
-
     private func deletePlain() async {
         busy = true
         defer { busy = false }
@@ -586,6 +593,133 @@ struct E2EOptionsSections: View {
             let n = try await model.e2eDeletePlain()
             message = "已删除服务器上的 \(n) 条明文消息（本机已同步的保留）。"
         } catch { message = "删除失败：\(describe(error))" }
+    }
+}
+
+/// 恢复码（§7 第 3 项、§11.2）：自动开启的账号没有恢复码，显示 T23 和「设置恢复码」；已设置时可以更换
+struct E2ERecoverySection: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var editing = false
+    @State private var password = ""
+    @State private var busy = false
+    @State private var message: String?
+
+    var body: some View {
+        let has = model.e2eState?.hasRecovery == true
+        Section {
+            if !has {
+                Label(E2E.T.t23, systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote).foregroundStyle(Theme.warning).fixedSize(horizontal: false, vertical: true)
+            }
+            if editing {
+                SecureField("先输入当前密码", text: $password).textContentType(.password)
+                Button { Task { await generate() } } label: { BusyLabel(text: busy ? "生成中…" : "生成新的恢复码", busy: busy) }
+                    .disabled(busy || password.isEmpty)
+                Button("取消") { editing = false; password = "" }.disabled(busy)
+            } else {
+                Button(has ? "更换恢复码…" : "设置恢复码…") { editing = true; message = nil }
+            }
+            errorText(message)
+        } header: {
+            Text("恢复码")
+        } footer: {
+            if has { Text("更换后旧的恢复码立即失效。") }
+        }
+    }
+
+    private func generate() async {
+        busy = true; message = nil
+        defer { busy = false }
+        do {
+            try await model.e2eRotateRecovery(password: password)      // 恢复码在 model.e2eRecovery，显示「保存恢复码」页
+            password = ""
+            editing = false
+        } catch { message = describe(error) }
+    }
+}
+
+// MARK: 默认自动加密（§11）
+
+/// 账号的钥匙已经更换（别的设备重置过加密，§11.3 第 6 步）：T46，引导用密码或恢复码解锁
+struct E2EKeyChangedSection: View {
+    var body: some View {
+        Section {
+            Label(E2E.T.t46, systemImage: "key.fill")
+                .font(.subheadline).foregroundStyle(Theme.warning).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// 密码偏弱（§11.1 第 5 步）：加密已照常开启，T24 引导去改密码
+struct E2EWeakPasswordSection: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        Section {
+            Label(E2E.T.t24, systemImage: "exclamationmark.triangle.fill")
+                .font(.subheadline).foregroundStyle(Theme.warning).fixedSize(horizontal: false, vertical: true)
+            Button("去改密码") { model.path = [.settings, .account] }
+        }
+    }
+}
+
+/// 重置加密（已锁定：「都不行？重置加密」）/ 更换加密钥匙（已解锁），§11.3：当前密码 + 二次确认 T45
+struct E2EResetSection: View {
+    @EnvironmentObject private var model: AppModel
+    let locked: Bool
+    @State private var expanded = false
+    @State private var password = ""
+    @State private var busy = false
+    @State private var error: String?
+    @State private var confirm = false
+    @State private var confirmAbandon = false
+    /// 成功后由加密页显示 T.resetDone（带「打开 Pushkey 页」）：锁定时重置成功后这一节会换成「更换加密钥匙」，提示不能放在这里
+    var onDone: () -> Void = {}
+
+    var body: some View {
+        Section {
+            if expanded {
+                SecureField("当前密码", text: $password).textContentType(.password)
+                errorText(error)
+                Button(role: .destructive) { confirm = true } label: {
+                    BusyLabel(text: busy ? "正在生成新钥匙…" : (locked ? "重置加密" : "更换加密钥匙"), busy: busy)
+                }
+                .disabled(busy || password.isEmpty)
+                Button("取消") { expanded = false; password = ""; error = nil }.disabled(busy)
+            } else {
+                // 上次的重置结果不确定（提示在页面上方）：可以不等了，放弃这次重置
+                if model.e2eResetPending {
+                    Button("放弃这次重置…") { confirmAbandon = true }
+                }
+                Button(locked ? "都不行？重置加密…" : "更换加密钥匙…", role: .destructive) { expanded = true }
+            }
+        } footer: {
+            Text(locked ? "上面几种方式都用不了（没有别的已解锁设备、也没有恢复码）时，输入当前密码换一把新的加密钥匙。以前的加密消息只有还留着旧钥匙的设备能看。"
+                        : "换一把新的加密钥匙，本机的旧钥匙保留，以前的消息照常能看。其他设备要用密码或恢复码重新解锁。")
+        }
+        .confirmationDialog(locked ? "重置加密" : "更换加密钥匙", isPresented: $confirm, titleVisibility: .visible) {
+            Button(locked ? "重置" : "更换", role: .destructive) { Task { await submit() } }
+        } message: {
+            Text(E2E.T.t45)
+        }
+        .confirmationDialog("放弃这次重置？", isPresented: $confirmAbandon, titleVisibility: .visible) {
+            Button("放弃这次重置", role: .destructive) { Task { await model.e2eAbandonReset() } }
+        } message: {
+            Text("不再等这次重置的结果。这次生成的钥匙仍留在本机；之后可以重新重置。")
+        }
+    }
+
+    private func submit() async {
+        busy = true; error = nil
+        defer { busy = false }
+        do {
+            try await model.e2eReset(password: password)
+            password = ""
+            expanded = false
+            onDone()
+        } catch {
+            self.error = describe(error)
+        }
     }
 }
 
@@ -603,7 +737,7 @@ struct E2ESendKeySection<Field: View>: View {
                 switch sendKey {
                 case .key(let k): field(k)
                 case .needsUnlock: Text(E2E.T.t73).font(.footnote).foregroundStyle(Theme.text2)
-                case .mismatch: Label(E2E.T.t43, systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(Theme.danger)
+                case .mismatch: Label(E2E.T.t46, systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(Theme.danger)
                 case .hidden: EmptyView()
                 }
             } header: {
@@ -666,6 +800,108 @@ struct E2ELockedBanner: View {
         .buttonStyle(.plain)
         .listRowBackground(Color.clear)
         .listRowSeparator(.hidden)
+    }
+}
+
+/// 首页顶部：账号还没开启加密、服务端支持自动开启（§11.1 末尾，T67），不能关闭。
+/// 账号有密码：弹出只输当前密码的小窗；没有密码：设置密码（成功后自动开启）。开启后（本机或别的设备）自动消失
+struct E2EEnableBanner: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var sheet: Sheet?
+
+    enum Sheet: String, Identifiable {
+        case password, setPassword
+        var id: String { rawValue }
+    }
+
+    var body: some View {
+        Button {
+            if model.accountHasPassword == true {
+                sheet = .password
+            } else if model.accountHasPassword == false && model.canAdmin != false {
+                sheet = .setPassword
+            } else {
+                // 还不知道有没有密码，或者这台设备不能设置初始密码：去「账户与设备」页（那里有说明和入口）
+                model.path = [.settings, .account]
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield").foregroundStyle(Theme.accent)
+                Text(E2E.T.t67).font(.subheadline.weight(.medium)).foregroundStyle(Theme.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 4)
+                if model.e2eAutoSetupRunning { ProgressView() }
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(Theme.text3)
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.accent.opacity(0.1)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(model.e2eAutoSetupRunning)
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .sheet(item: $sheet) { s in
+            switch s {
+            case .password:
+                E2EEnableSheet()
+            case .setPassword:
+                NavigationStack {
+                    CredentialsView(hasPassword: false, initialName: model.accountDetail?.account.username ?? model.settings.username) { a in
+                        model.noteAccount(a)      // setInitialCredentials 成功后会在后台自动开启（§11.1）
+                    }
+                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { sheet = nil } } }
+                }
+            }
+        }
+    }
+}
+
+/// T67 的小窗：只输当前密码。密码和算出的钥匙都不留在内存里
+struct E2EEnableSheet: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var password = ""
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    SecureField("当前密码", text: $password)
+                        .textContentType(.password)
+                        .submitLabel(.go)
+                        .onSubmit { Task { await submit() } }
+                    errorText(error)
+                } footer: {
+                    Text(E2E.T.t67)
+                }
+                Section {
+                    Button { Task { await submit() } } label: { BusyLabel(text: busy ? "正在开启…" : "开启", busy: busy) }
+                        .disabled(busy || password.isEmpty)
+                }
+            }
+            .navigationTitle("开启端到端加密")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { password = ""; dismiss() }.disabled(busy) } }
+        }
+        .presentationDetents([.medium])
+        .interactiveDismissDisabled(busy)
+    }
+
+    private func submit() async {
+        guard !password.isEmpty, !busy else { return }
+        busy = true; error = nil
+        defer { busy = false }
+        do {
+            try await model.e2eEnableWithPassword(password)
+            password = ""
+            dismiss()
+        } catch {
+            password = ""
+            self.error = describe(error)
+        }
     }
 }
 

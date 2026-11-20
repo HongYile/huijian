@@ -26,6 +26,49 @@ enum E2ESelfTest {
         }
     }
 
+    /// 写入很慢的安全存储：记录写入开始、结束（测 AliveFlag 持锁写入）
+    final class SlowSecrets: E2ESecrets {
+        let inner = E2E.MemorySecrets()
+        let started = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var _endedAt: Date?
+        var endedAt: Date? { lock.lock(); defer { lock.unlock() }; return _endedAt }
+        func read(_ name: String) throws -> Data? { try inner.read(name) }
+        func write(_ name: String, _ value: Data) throws {
+            started.signal()
+            Thread.sleep(forTimeInterval: 0.2)
+            try inner.write(name, value)
+            lock.lock(); _endedAt = Date(); lock.unlock()
+        }
+        func remove(_ name: String) throws { try inner.remove(name) }
+    }
+
+    /// 写入进行中调用 kill()：kill() 要等写入结束才返回；kill() 之后 removeAll() 删得干干净净，再写报错
+    static func aliveKillWaitsForWrite() -> Bool {
+        let flag = E2E.AliveFlag()
+        let secrets = SlowSecrets()
+        let suite = "io.github.hongyile.huijian.e2e-selftest-alive2"
+        UserDefaults().removePersistentDomain(forName: suite)
+        let ring = E2E.KeyRing(secrets: secrets, scope: "alive#2", defaults: UserDefaults(suiteName: suite)!, alive: flag)
+        final class Box: @unchecked Sendable { let ring: E2E.KeyRing; init(_ r: E2E.KeyRing) { ring = r } }
+        let box = Box(ring)
+        let done = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            try? box.ring.saveDeviceKeypair(sk: "s", pub: "p")
+            done.signal()
+        }
+        secrets.started.wait()
+        flag.kill()
+        let killedAt = Date()
+        try? ring.removeAll()
+        done.wait()
+        var threw = false
+        do { try ring.saveDeviceKeypair(sk: "s2", pub: "p2") } catch { threw = true }
+        ring.replacePin("p2")
+        guard let ended = secrets.endedAt else { return false }
+        return killedAt >= ended && (try? ring.deviceKeypair()) == nil && threw && ring.pinned == nil
+    }
+
     static func freshMarks(_ suite: String) -> E2E.UpgradeMarks {
         UserDefaults().removePersistentDomain(forName: suite)
         return E2E.UpgradeMarks(defaults: UserDefaults(suiteName: suite)!)
@@ -576,6 +619,571 @@ enum E2ESelfTest {
         } catch {
             check("停止批准流程用例", false, "\(error)")
         }
+        await offlineAuto(check)
+    }
+
+    // MARK: 默认自动加密（§11，服务端 0.8.0）离线用例
+
+    static func stateObj(_ st: E2E.State) -> Any { (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(st))) ?? [:] }
+
+    static func enabledState(_ keys: [E2E.Key]) -> E2E.State {
+        var s = E2E.State()
+        s.enabled = keys.contains { $0.active }
+        s.auth_key = true
+        s.has_password_wrap = true
+        s.server_seal = true
+        s.keys = keys
+        return s
+    }
+
+    static func offlineAuto(_ check: Check) async {
+        let server = "http://127.0.0.1:2"
+        let good: [String: Any] = ["kdf": "argon2id", "salt": String(repeating: "ab", count: 16), "time": 3, "memory_kib": 65536, "lanes": 1]
+        var ringCount = 0
+        func newRing() -> E2E.KeyRing {
+            ringCount += 1
+            let suite = "io.github.hongyile.huijian.e2e-selftest-auto-\(ringCount)"
+            UserDefaults().removePersistentDomain(forName: suite)
+            return E2E.KeyRing(secrets: E2E.MemorySecrets(), scope: "auto#\(ringCount)", defaults: UserDefaults(suiteName: suite)!)
+        }
+        let marks = freshMarks("io.github.hongyile.huijian.e2e-selftest-auto-marks")
+        guard let k1 = try? Core.keypair(), let k2 = try? Core.keypair(), let unlock = try? Core.random32() else { check("生成钥匙", false, ""); return }
+        let key1 = E2E.Key(kid: k1.kid, pub: k1.pub, active: true)
+        let key1Old = E2E.Key(kid: k1.kid, pub: k1.pub, active: false)
+        let key2 = E2E.Key(kid: k2.kid, pub: k2.pub, active: true)
+
+        // 状态里的 0.8.0 字段
+        let decoded = try? JSONDecoder().decode(E2E.State.self, from: Data(#"{"enabled":true,"server_seal":true,"plain_messages":3,"keys":[]}"#.utf8))
+        check("GET /v1/e2e 的 server_seal、plain_messages（0.8.0）能读出", decoded?.server_seal == true && decoded?.plain_messages == 3, "")
+
+        // §11.4 钉住公钥的更新规则
+        do {
+            let ring = newRing()
+            try E2E.acceptKey(k1.sk, keys: [key1], ring: ring)
+            let afterReset = enabledState([key1Old, key2])
+            check("别的设备重置过加密：钉住的公钥不是服务器的有效钥匙 → T46，发送密钥不显示，本机旧钥匙解不了新消息",
+                  E2E.keyChanged(afterReset, pinned: ring.pinned) && E2E.sendKey(pushkey: "PK", state: afterReset, pinned: ring.pinned) == .mismatch
+                  && E2E.status(afterReset, localKeys: [k1.sk]) == .locked, "")
+            do {
+                try E2E.acceptKey(k2.sk, keys: afterReset.keys, ring: ring)
+                check("批准转交来的新私钥不能替换钉住的公钥", false, "")
+            } catch {
+                check("批准转交来的新私钥不能替换钉住的公钥（T43），钉住的不变", error.localizedDescription == E2E.T.t43 && ring.pinned == k1.pub, "")
+            }
+            let req = E2E.ApprovalRequest(ring: ring)
+            do {
+                try await req.start(E2E.API(MockTransport { _, _, _ in (200, ["ok": true]) }), state: afterReset)
+                check("钉住的公钥已停用时请求批准", false, "")
+            } catch {
+                check("钉住的公钥已停用时不能请求批准：T46（只能用密码或恢复码解锁）",
+                      (error as? E2E.Failure)?.kind == .keyChanged && req.phase == .failed(E2E.T.t46), "")
+            }
+            try E2E.acceptOwnKey(k2.sk, keys: afterReset.keys, ring: ring)
+            check("用密码 / 恢复码解锁拿到的新私钥：替换钉住的公钥，本机旧私钥保留",
+                  ring.pinned == k2.pub && ((try? ring.accountKeys()) ?? []) == [k1.sk, k2.sk] && !E2E.keyChanged(afterReset, pinned: ring.pinned)
+                  && E2E.sendKey(pushkey: "PK", state: afterReset, pinned: ring.pinned) == .key("PK.e2e.\(k2.pub)"), "")
+            do {
+                try E2E.acceptOwnKey(k1.sk, keys: afterReset.keys, ring: ring)
+                check("已停用的旧私钥不能用来替换", false, "")
+            } catch { check("已停用的旧私钥不能用来替换钉住的公钥（T43）", ring.pinned == k2.pub, "") }
+        } catch { check("钉住公钥规则用例", false, "\(error)") }
+
+        // §11.1 自动开启：复用这次登录的钥匙、不生成恢复码
+        let pk = E2E.PasswordKeys(salt: String(repeating: "cd", count: 16), authKey: "AUTH_KEY_X", unlockKey: unlock, weak: true)
+        do {
+            var served = E2E.State()
+            var setupBody: [String: Any] = [:]
+            let mock = MockTransport { _, path, body -> (Int, Any) in
+                switch path {
+                case "/v1/e2e": return (200, stateObj(served))
+                case "/v1/e2e/setup":
+                    setupBody = body
+                    served = enabledState([E2E.Key(kid: "kn", pub: body["pub"] as? String ?? "", active: true)])
+                    return (200, ["kid": "kn"])
+                default: return (500, ["error": "x"])
+                }
+            }
+            let ring = newRing()
+            let r = try await E2E.autoSetup(E2E.API(mock), ring: ring, server: server, username: "auto1", keys: pk, marks: marks)
+            let pub = setupBody["pub"] as? String ?? ""
+            let wrapped = (setupBody["password_wrap"] as? String).flatMap { try? Core.unwrap("hjp1", key: unlock, wrap: $0) }
+            check("自动开启：成功；不生成恢复码、不换密码（auth_salt / auth_key / current_auth_key 都是这次登录的）",
+                  r == .enabled && setupBody["recovery_wrap"] == nil && setupBody["auth_salt"] as? String == pk.salt
+                  && setupBody["auth_key"] as? String == pk.authKey && setupBody["current_auth_key"] as? String == pk.authKey, "\(r)")
+            check("自动开启：password_wrap 用这次的 unlock_key 锁住新私钥；私钥已保存、公钥已钉住、标记升级，没有留下进行中的开启",
+                  wrapped.map { (try? Core.publicKey($0).pub) == pub } == true && ring.pinned == pub
+                  && ((try? ring.accountKeys()) ?? []) == [wrapped ?? "-"] && (try? ring.pendingSetup()) == nil
+                  && marks.isUpgraded(server: server, username: "auto1") && E2E.confirmedSetup(ring: ring) == nil, "")
+            let again = try await E2E.autoSetup(E2E.API(mock), ring: ring, server: server, username: "auto1", keys: pk, marks: marks)
+            check("已经开启、本机已解锁时再调用：什么都不做", again == .alreadyEnabled && mock.calls.filter { $0.path == "/v1/e2e/setup" }.count == 1, "\(again)")
+        } catch { check("自动开启用例", false, "\(error)") }
+
+        // §11.1 第 4 步：409（别的设备刚开启过）→ 用这个密码解锁
+        do {
+            var served = E2E.State()
+            let wrap = try Core.wrap("hjp1", key: unlock, data: k1.sk)
+            let mock = MockTransport { _, path, body -> (Int, Any) in
+                switch path {
+                case "/v1/e2e": return (200, stateObj(served))
+                case "/v1/e2e/setup":
+                    served = enabledState([key1])          // 另一台设备抢先开启了
+                    return (409, ["error": "这个账号已经开启了端到端加密"])
+                case "/v1/e2e/unlock":
+                    return body["auth_key"] as? String == pk.authKey ? (200, ["password_wrap": wrap]) : (403, ["error": "密码不对"])
+                default: return (500, ["error": "x"])
+                }
+            }
+            let ring = newRing()
+            let r = try await E2E.autoSetup(E2E.API(mock), ring: ring, server: server, username: "auto2", keys: pk, marks: marks)
+            check("自动开启遇到 409：改为用这个密码解锁，拿到账号私钥并钉住，没有留下进行中的开启",
+                  r == .unlocked && ((try? ring.accountKeys()) ?? []) == [k1.sk] && ring.pinned == k1.pub && (try? ring.pendingSetup()) == nil, "\(r)")
+        } catch { check("自动开启 409 用例", false, "\(error)") }
+
+        // 自动开启结果不确定：进行中的开启（没有恢复码）留在钥匙串，刷新时核对成功后直接删除，不显示恢复码页
+        do {
+            var setupPub = ""
+            let mock = MockTransport { _, path, body -> (Int, Any) in
+                switch path {
+                case "/v1/e2e": return setupPub.isEmpty ? (200, stateObj(E2E.State())) : (503, ["error": "暂时不可用"])
+                case "/v1/e2e/setup": setupPub = body["pub"] as? String ?? ""; return (502, "bad gateway")
+                default: return (500, ["error": "x"])
+                }
+            }
+            let ring = newRing()
+            do {
+                _ = try await E2E.autoSetup(E2E.API(mock), ring: ring, server: server, username: "auto3", keys: pk, marks: marks)
+                check("自动开启响应丢失", false, "居然成功了")
+            } catch let p as E2E.SetupPending {
+                check("自动开启响应丢失、状态也取不到：新钥匙存进钥匙串（没有恢复码），提示稍后核对",
+                      (try? ring.pendingSetup()) == p.attempt && p.attempt.code.isEmpty && p.attempt.pub == setupPub
+                      && ((try? ring.accountKeys()) ?? ["x"]).isEmpty, "")
+            }
+            let r = try E2E.checkPendingSetup(enabledState([E2E.Key(kid: "k", pub: setupPub, active: true)]), ring: ring, server: server,
+                                              username: "auto3", marks: marks)
+            var done = false
+            if case .completed(let a) = r { done = a.code.isEmpty }
+            check("刷新时核对出已经开启：保存私钥、钉住公钥，进行中的开启直接删除（没有恢复码页）",
+                  done && ring.pinned == setupPub && ((try? ring.accountKeys()) ?? []).count == 1 && (try? ring.pendingSetup()) == nil
+                  && E2E.confirmedSetup(ring: ring) == nil, "\(r)")
+        } catch { check("自动开启结果不确定用例", false, "\(error)") }
+
+        // §11.3 重置加密：新钥匙替换钉住的，旧私钥保留；不生成恢复码；只发 reset 接口
+        do {
+            var served = enabledState([key1])
+            var resetBody: [String: Any] = [:]
+            var resetStatus = 200
+            let mock = MockTransport { _, path, body -> (Int, Any) in
+                switch path {
+                case "/v1/prelogin": return (200, good)
+                case "/v1/e2e": return (200, stateObj(served))
+                case "/v1/e2e/reset":
+                    resetBody = body
+                    if resetStatus == 200 || resetStatus == 504 {
+                        served = enabledState([key1Old, E2E.Key(kid: "kr", pub: body["pub"] as? String ?? "", active: true)])
+                    }
+                    if resetStatus == 409 { return (409, ["error": "账号的登录凭证刚被改过，请刷新后重试"]) }
+                    return resetStatus == 200 ? (200, ["kid": "kr"]) : (resetStatus, "gateway timeout")
+                default: return (500, ["error": "x"])
+                }
+            }
+            let ring = newRing()
+            try E2E.acceptKey(k1.sk, keys: [key1], ring: ring)
+            try await E2E.resetE2E(E2E.API(mock), ring: ring, server: server, username: "reset1", password: "pw-weak", marks: marks)
+            let newPub = resetBody["pub"] as? String ?? ""
+            check("重置加密：新公钥替换钉住的，本机旧私钥保留（看旧消息），不发恢复码副本，用当前密码凭证核对",
+                  ring.pinned == newPub && newPub != k1.pub && ((try? ring.accountKeys()) ?? []).first == k1.sk
+                  && ((try? ring.accountKeys()) ?? []).count == 2 && resetBody["recovery_wrap"] == nil
+                  && resetBody["current_auth_key"] != nil && resetBody["password_wrap"] != nil && (try? ring.pendingSetup()) == nil, "")
+            // 结果不确定：服务端其实已经重置（响应丢了）→ 重新读状态确认成功
+            resetStatus = 504
+            try await E2E.resetE2E(E2E.API(mock), ring: ring, server: server, username: "reset1", password: "pw-weak", marks: marks)
+            check("重置加密响应丢失、重新读状态发现已经换成这把：照样成功", ring.pinned == resetBody["pub"] as? String, "")
+            // 结果不确定、服务端没换：保留进行中的重置，提示 T.resetUncertain
+            resetStatus = 503
+            do {
+                try await E2E.resetE2E(E2E.API(mock), ring: ring, server: server, username: "reset1", password: "pw-weak", marks: marks)
+                check("重置加密 503", false, "")
+            } catch let p as E2E.SetupPending {
+                check("重置加密结果不确定：新钥匙留在钥匙串，提示稍后核对", p.localizedDescription == E2E.T.resetUncertain
+                      && (try? ring.pendingSetup()) == p.attempt, "")
+                let r = try E2E.checkPendingSetup(served, ring: ring, server: server, username: "reset1", marks: marks)
+                check("刷新时服务端还是原来的钥匙：不能断定失败，保留进行中的重置（审查 L7）",
+                      r == .resetPending(p.attempt) && (try? ring.pendingSetup()) == p.attempt && p.attempt.isReset, "\(r)")
+                // 之后发现其实生效了 → 完成：保存、替换钉住的公钥、删除记录
+                served = enabledState(served.keys.map { E2E.Key(kid: $0.kid, pub: $0.pub, active: false) }
+                                      + [E2E.Key(kid: "late", pub: p.attempt.pub, active: true)])
+                let r2 = try E2E.checkPendingSetup(served, ring: ring, server: server, username: "reset1", marks: marks)
+                var lateOK = false
+                if case .completed = r2 { lateOK = true }
+                check("晚到生效的重置：刷新时核对出来，换上新钥匙", lateOK && ring.pinned == p.attempt.pub && (try? ring.pendingSetup()) == nil
+                      && ((try? ring.accountKeys()) ?? []).contains(p.attempt.sk), "\(r2)")
+            }
+            // 进行中的重置那把钥匙已经出现在停用列表里（生效过、又被别处重置）：私钥留着看那段时间的消息，记录删除
+            let stray = try Core.keypair()
+            try ring.savePendingSetup(E2E.SetupAttempt(sk: stray.sk, pub: stray.pub, code: "", reset: true))
+            let r3 = try E2E.checkPendingSetup(enabledState([E2E.Key(kid: "s", pub: stray.pub, active: false), key2]), ring: ring,
+                                               server: server, username: "reset1", marks: marks)
+            check("进行中的重置那把钥匙已停用：私钥保留、记录删除", r3 == .discarded && (try? ring.pendingSetup()) == nil
+                  && ((try? ring.accountKeys()) ?? []).contains(stray.sk), "\(r3)")
+            // 再点重置时先核对上次的：已经生效就不再提交
+            let x = try Core.keypair()
+            try ring.savePendingSetup(E2E.SetupAttempt(sk: x.sk, pub: x.pub, code: "", reset: true))
+            served = enabledState([E2E.Key(kid: "x", pub: x.pub, active: true)])
+            let posts = mock.calls.filter { $0.path == "/v1/e2e/reset" }.count
+            try await E2E.resetE2E(E2E.API(mock), ring: ring, server: server, username: "reset1", password: "pw-weak", marks: marks)
+            check("再点重置：先核对出上次其实已经生效，不再提交", mock.calls.filter { $0.path == "/v1/e2e/reset" }.count == posts
+                  && ring.pinned == x.pub && (try? ring.pendingSetup()) == nil, "")
+            let oldRecord = try JSONDecoder().decode(E2E.SetupAttempt.self, from: Data(#"{"sk":"a","pub":"b","code":"c"}"#.utf8))
+            check("以前存下的进行中开启（没有 reset 字段）照常读出", oldRecord.reset == nil && !oldRecord.isReset && oldRecord.createdAt == nil, "")
+            // 复核 N5：结果不确定的重置 24 小时后按失败处理；用户也可以手动放弃。两种都是私钥保留、记录删除
+            let notYet = enabledState([key2])
+            let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+            let y = try Core.keypair()
+            try ring.savePendingSetup(E2E.SetupAttempt(sk: y.sk, pub: y.pub, code: "", reset: true))
+            let r4 = try E2E.checkPendingSetup(notYet, ring: ring, server: server, username: "reset1", marks: marks, now: t0)
+            let stamped = try? ring.pendingSetup()
+            check("没有时间的旧重置记录：从第一次核对开始计时（补上时间存回去）",
+                  stamped?.createdAt == t0.timeIntervalSince1970 && r4 == .resetPending(stamped!), "\(r4)")
+            let r5 = try E2E.checkPendingSetup(notYet, ring: ring, server: server, username: "reset1", marks: marks,
+                                               now: t0.addingTimeInterval(23 * 3600))
+            check("不到 24 小时：继续等", r5 == .resetPending(stamped!) && (try? ring.pendingSetup()) != nil, "\(r5)")
+            let r6 = try E2E.checkPendingSetup(notYet, ring: ring, server: server, username: "reset1", marks: marks,
+                                               now: t0.addingTimeInterval(24 * 3600))
+            check("满 24 小时还没换上：按失败处理，私钥保留、记录删除", r6 == .discarded && (try? ring.pendingSetup()) == nil
+                  && ((try? ring.accountKeys()) ?? []).contains(y.sk), "\(r6)")
+            let z = try Core.keypair()
+            try ring.savePendingSetup(E2E.SetupAttempt(sk: z.sk, pub: z.pub, code: "", reset: true, createdAt: Date().timeIntervalSince1970))
+            check("放弃这次重置：私钥保留、记录删除", E2E.abandonReset(ring: ring) && (try? ring.pendingSetup()) == nil
+                  && ((try? ring.accountKeys()) ?? []).contains(z.sk), "")
+            let notReset = try Core.keypair()
+            try ring.savePendingSetup(E2E.SetupAttempt(sk: notReset.sk, pub: notReset.pub, code: "KEEP"))
+            check("放弃重置不动普通开启的记录", !E2E.abandonReset(ring: ring) && (try? ring.pendingSetup())?.code == "KEEP"
+                  && !((try? ring.accountKeys()) ?? []).contains(notReset.sk), "")
+            try ring.deletePendingSetup()
+            // 上次的重置还在等结果时再点重置：上次那把私钥保留，再提交新的
+            let w = try Core.keypair()
+            try ring.savePendingSetup(E2E.SetupAttempt(sk: w.sk, pub: w.pub, code: "", reset: true, createdAt: Date().timeIntervalSince1970))
+            served = notYet
+            resetStatus = 200
+            try await E2E.resetE2E(E2E.API(mock), ring: ring, server: server, username: "reset1", password: "pw-weak", marks: marks)
+            check("上次的重置没有结果时再点重置：上次那把私钥保留，这次照常完成", ((try? ring.accountKeys()) ?? []).contains(w.sk)
+                  && ring.pinned == resetBody["pub"] as? String && ring.pinned != w.pub && (try? ring.pendingSetup()) == nil, "")
+            resetStatus = 409
+            do {
+                try await E2E.resetE2E(E2E.API(mock), ring: ring, server: server, username: "reset1", password: "pw-weak", marks: marks)
+                check("重置加密 409", false, "")
+            } catch {
+                check("重置加密 409（凭证刚被改过）：报错，不留进行中的重置", (error as? E2E.Failure)?.kind == .conflict && (try? ring.pendingSetup()) == nil, "")
+            }
+        } catch { check("重置加密用例", false, "\(error)") }
+
+        // §11.5 上传锁住的副本带 kid；本机钥匙已停用时 409 → T46
+        do {
+            var stale = true
+            let mock = MockTransport { _, path, _ -> (Int, Any) in
+                switch path {
+                case "/v1/prelogin": return (200, good)
+                case "/v1/e2e": return (200, stateObj(stale ? enabledState([key1Old, key2]) : enabledState([key1])))
+                case "/v1/account/auth", "/v1/e2e/recovery", "/v1/e2e/grant":
+                    return (409, ["error": "这把钥匙已经停用"])
+                case "/v1/e2e/challenge": return (200, ["ok": true])
+                default: return (500, ["error": "x"])
+                }
+            }
+            let api = E2E.API(mock)
+            do {
+                _ = try await E2E.changeCredentials(api, state: enabledState([key1]), sk: k1.sk, server: server, username: "zed", newUsername: "zed",
+                                                    currentPassword: "old-pw", newPassword: "Tq7#mZ2!pL9x-new", marks: marks)
+                check("改密码 409", false, "")
+            } catch {
+                let body = mock.calls.last { $0.path == "/v1/account/auth" }?.body ?? [:]
+                check("改密码：password_wrap 带 kid；本机钥匙已停用时 409 → T46",
+                      body["kid"] as? String == k1.kid && (error as? E2E.Failure)?.kind == .keyChanged && error.localizedDescription == E2E.T.t46, error.localizedDescription)
+            }
+            let ring = newRing()
+            do {
+                _ = try await E2E.rotateRecovery(api, ring: ring, sk: k1.sk, server: server, username: "zed", password: "old-pw", marks: marks)
+                check("换恢复码 409", false, "")
+            } catch {
+                let body = mock.calls.last { $0.path == "/v1/e2e/recovery" }?.body ?? [:]
+                check("换恢复码：带 kid；本机钥匙已停用时 409 → T46，新恢复码删除",
+                      body["kid"] as? String == k1.kid && error.localizedDescription == E2E.T.t46 && (try? ring.pendingRecovery()) == nil, error.localizedDescription)
+            }
+            stale = false
+            do {
+                _ = try await E2E.rotateRecovery(api, ring: ring, sk: k1.sk, server: server, username: "zed", password: "old-pw", marks: marks)
+            } catch {
+                check("钥匙仍然有效时的 409：照样显示服务端的说明（不是 T46）", (error as? E2E.Failure)?.kind == .conflict && error.localizedDescription != E2E.T.t46, "")
+            }
+            stale = true
+            let dev = try Core.keypair()
+            let nb = try Core.random32()
+            let rq = E2E.Request(device_id: "d_kid", name: "x", platform: "ios", pub: dev.pub, requested_at: 1,
+                                 commit: try Core.sasCommit(pub: dev.pub, account: k1.pub, nonce: nb))
+            let a = try await E2E.Approval.begin(api, request: rq, sk: k1.sk)
+            var x = rq
+            x.challenge = mock.calls.last { $0.path == "/v1/e2e/challenge" }?.body["nonce"] as? String ?? ""
+            x.reveal = nb
+            var sx = E2E.State()
+            sx.requests = [x]
+            _ = await a.handle(sx, api: api)
+            do { try await a.approve(api, sk: k1.sk); check("批准 409", false, "") } catch {
+                let body = mock.calls.last { $0.path == "/v1/e2e/grant" }?.body ?? [:]
+                check("批准设备：grant 带 kid；本机钥匙已停用时 409 → T46", body["kid"] as? String == k1.kid && a.phase == .failed(E2E.T.t46), "\(a.phase)")
+            }
+        } catch { check("kid 用例", false, "\(error)") }
+
+        // 审查 M2：有用户手动开启留下的记录（带恢复码）时不自动开启，也不删它
+        do {
+            let mock = MockTransport { _, path, _ -> (Int, Any) in path == "/v1/e2e" ? (200, stateObj(E2E.State())) : (500, ["error": "x"]) }
+            let ring = newRing()
+            let manual = E2E.SetupAttempt(sk: k2.sk, pub: k2.pub, code: "MANUAL-CODE")
+            try ring.savePendingSetup(manual)
+            let r = try await E2E.autoSetup(E2E.API(mock), ring: ring, server: server, username: "m2", keys: pk, marks: marks)
+            check("有手动开启留下的记录：不自动开启（manualPending），记录和恢复码都保留，没有提交",
+                  r == .manualPending && (try? ring.pendingSetup()) == manual && !mock.calls.contains { $0.path == "/v1/e2e/setup" }, "\(r)")
+        } catch { check("手动记录用例", false, "\(error)") }
+
+        // T67：输入一次当前密码换成自动开启用的钥匙（argon2id 直接算；PBKDF2 顺带升级；没有新登录协议报错）
+        do {
+            let argon = MockTransport { _, path, _ -> (Int, Any) in
+                if path == "/v1/prelogin" { return (200, good as Any) }
+                return (500, ["error": "x"] as Any)
+            }
+            let k = try await E2E.keysForPassword(E2E.API(argon), server: server, username: "t67", password: "123456", marks: marks)
+            check("T67 密码 → 钥匙（argon2id）：盐用 prelogin 的，标出弱密码", k.salt == good["salt"] as? String && !k.authKey.isEmpty
+                  && !k.unlockKey.isEmpty && k.weak, "")
+            check("T67 密码 → 钥匙只请求一次 prelogin（按 IP 限流，复核 N7）",
+                  argon.calls.filter { $0.path == "/v1/prelogin" }.count == 1, "\(argon.calls.map(\.path))")
+            var putBody: [String: Any] = [:]
+            var putStatus = 200
+            let pb = MockTransport { _, path, body -> (Int, Any) in
+                switch path {
+                case "/v1/prelogin": return (200, ["kdf": "pbkdf2-sha256", "salt": String(repeating: "cd", count: 16), "iterations": 600000])
+                case "/v1/account/auth": putBody = body; return putStatus == 200 ? (200, ["ok": true]) : (403, ["error": "密码不对"])
+                default: return (500, ["error": "x"])
+                }
+            }
+            let k2p = try await E2E.keysForPassword(E2E.API(pb), server: server, username: "t67pb", password: "Tq7#mZ2!pL9x-new", marks: marks)
+            check("T67 密码 → 钥匙（PBKDF2 旧账号）：先升级到 Argon2id，返回新盐的钥匙，标记已升级",
+                  putBody["current_password_key"] != nil && putBody["auth_salt"] as? String == k2p.salt && putBody["auth_key"] as? String == k2p.authKey
+                  && !k2p.weak && marks.isUpgraded(server: server, username: "t67pb"), "")
+            putStatus = 403
+            do {
+                _ = try await E2E.keysForPassword(E2E.API(pb), server: server, username: "t67pb2", password: "wrong-pw-xx", marks: freshMarks("io.github.hongyile.huijian.e2e-selftest-t67"))
+                check("T67 密码不对", false, "")
+            } catch { check("T67 密码不对（PBKDF2 升级被拒）：T3", error.localizedDescription == E2E.T.t3, error.localizedDescription) }
+            let old = MockTransport { _, _, _ -> (Int, Any) in (404, "404 page not found") }
+            do {
+                _ = try await E2E.keysForPassword(E2E.API(old), server: server, username: "t67old", password: "x", marks: freshMarks("io.github.hongyile.huijian.e2e-selftest-t67b"))
+                check("T67 旧服务端", false, "")
+            } catch { check("T67 没有新登录协议的服务端：报错，不发密码原文", (error as? E2E.Failure)?.kind == .unsupported, "") }
+        } catch { check("T67 用例", false, "\(error)") }
+
+        // 审查 M2（iOS）：补加密的消息只在「本地明文 → 服务器代加密、id 一致」时替换本地记录
+        struct FM: E2EMessageFacts { let id: Int64; let isE2E: Bool; let sealed: String? }
+        let plainOld = FM(id: 7, isE2E: false, sealed: nil), resealed = FM(id: 7, isE2E: true, sealed: "server")
+        check("补加密替换规则：本地明文 + 拉回服务器代加密、id 一致 → 替换", E2E.acceptResealed(old: plainOld, new: resealed, id: 7), "")
+        check("补加密替换规则：本地是发送端加密 / 已解开的、已是代加密的、id 不对、没标 server、拉回来是明文 → 都不替换",
+              !E2E.acceptResealed(old: FM(id: 7, isE2E: true, sealed: nil), new: resealed, id: 7)
+              && !E2E.acceptResealed(old: FM(id: 7, isE2E: true, sealed: "server"), new: resealed, id: 7)
+              && !E2E.acceptResealed(old: plainOld, new: FM(id: 8, isE2E: true, sealed: "server"), id: 7)
+              && !E2E.acceptResealed(old: plainOld, new: resealed, id: 8)
+              && !E2E.acceptResealed(old: plainOld, new: FM(id: 7, isE2E: true, sealed: nil), id: 7)
+              && !E2E.acceptResealed(old: plainOld, new: FM(id: 7, isE2E: false, sealed: "server"), id: 7)
+              && E2E.maxResealedRetries == 2, "")
+
+        // 自动开启进行中退出登录 / 换了账号：完成时不再写这个账号的钥匙
+        do {
+            let flag = E2E.AliveFlag()
+            let suite = "io.github.hongyile.huijian.e2e-selftest-alive"
+            UserDefaults().removePersistentDomain(forName: suite)
+            let ring = E2E.KeyRing(secrets: E2E.MemorySecrets(), scope: "alive#1", defaults: UserDefaults(suiteName: suite)!, alive: flag)
+            var served = E2E.State()
+            let mock = MockTransport { _, path, body -> (Int, Any) in
+                switch path {
+                case "/v1/e2e": return (200, stateObj(served))
+                case "/v1/e2e/setup":
+                    flag.kill()            // 请求在路上时用户退出了登录
+                    served = enabledState([E2E.Key(kid: "a", pub: body["pub"] as? String ?? "", active: true)])
+                    return (200, ["kid": "a"])
+                default: return (500, ["error": "x"])
+                }
+            }
+            _ = try? await E2E.autoSetup(E2E.API(mock), ring: ring, server: server, username: "alive", keys: pk, marks: marks)
+            check("自动开启进行中退出登录：完成时私钥、钉住的公钥、进行中的开启都没有写进这个账号",
+                  ((try? ring.accountKeys()) ?? ["x"]).isEmpty && ring.pinned == nil && (try? ring.pendingSetup()) == nil, "")
+            var threw = false
+            do { try ring.addAccountKey(k1.sk) } catch { threw = true }
+            check("退出后这个账号的 KeyRing 不再写入（删除照常）", threw && (try? ring.deletePendingSetup()) != nil, "")
+            check("kill() 等正在进行的写入结束才返回，之后不会再写（复核 N3）", aliveKillWaitsForWrite(), "")
+        }
+
+        // §11.5 下载附件 410：按 reason 区分
+        let g1 = E2E.gone(Data(#"{"code":410,"error":"附件已加密，请刷新消息","reason":"sealed","message_id":42}"#.utf8))
+        let g2 = E2E.gone(Data(#"{"code":410,"error":"附件文件已丢失","reason":"missing"}"#.utf8))
+        let g3 = E2E.gone(Data(#"{"error":"附件已加密，请刷新消息"}"#.utf8))      // 没有 reason：不看文字，一律按丢失
+        check("410 reason=sealed：重新拉取消息（带消息 id）；reason=missing：附件丢失；没有 reason 时一律按丢失（不比较说明文字）",
+              g1.sealed && g1.messageID == 42 && !g2.sealed && g2.reason == "missing" && !g3.sealed && g3.reason == "missing", "")
+    }
+
+    // MARK: 默认自动加密（§11）联网用例：服务端 0.8.0，注册要开放
+
+    /// 注册一个新账号（不设置恢复码），验证自动开启、服务器代加密、补加密的 sealed 变更、410 reason、重置加密与 T46、kid。
+    /// username / password：新账号（会注册）；server 必须已开放注册
+    static func onlineAuto(_ check: Check, server: URL, transport: @escaping (String?) -> E2ETransport,
+                           username: String, password: String) async {
+        let sid = server.absoluteString
+        let marks = freshMarks("io.github.hongyile.huijian.e2e-selftest-online-auto")
+        var n = 0
+        func ring(_ aid: Int64) -> E2E.KeyRing {
+            n += 1
+            return E2E.KeyRing(secrets: E2E.MemorySecrets(), scope: E2E.scope(server: sid, accountID: aid),
+                               defaults: freshMarks("io.github.hongyile.huijian.e2e-selftest-online-auto-\(n)").defaults)
+        }
+        func dev(_ name: String) -> E2E.Device { .init(name: name, platform: "macos", fingerprint: (try? Core.random32()) ?? name) }
+        do {
+            // 注册：服务端还没开启加密
+            let reg = try await E2E.login(server: transport(nil), authed: transport, serverID: sid, username: username, password: password,
+                                          device: dev("自动 R"), register: true, marks: marks, secrets: E2E.MemorySecrets())
+            guard let aid = reg.accountID, let keys = reg.passwordKeys else { check("注册后拿到账号 id 和这次的密码钥匙", false, ""); return }
+            let apiR = E2E.API(transport(reg.token))
+            var st = try await apiR.state()
+            check("注册后：账号还没开启加密，服务器代加密始终开启（server_seal）", !st.enabled && st.server_seal, "")
+            // 开启以前收到的明文消息（带附件）
+            struct K: Decodable { let key: String }
+            let pk = try JSONDecoder().decode(K.self, from: try await apiR.call("POST", "/v1/keys", body: ["name": "auto"])).key
+            let fileData = Data((0..<20_000).map { _ in UInt8.random(in: 0...255) })
+            try await push(server: server, fields: ["pushkey": pk, "text": "开启前的明文", "desp": "**旧正文**"], file: (name: "旧附件.bin", data: fileData))
+            guard let plain = try await messages(apiR, since: 0).last, let plainID = (plain["id"] as? NSNumber)?.int64Value else {
+                check("开启前的明文消息", false, ""); return
+            }
+            let oldAtt = ((plain["attachments"] as? [[String: Any]])?.first?["id"] as? String) ?? ""
+            st = try await apiR.state()
+            check("还没有钥匙时收到的消息先存明文（plain_messages 计数）", plain["e2e"] == nil && !oldAtt.isEmpty && st.plain_messages >= 1, "\(st.plain_messages)")
+            let stateData = try await apiR.call("GET", "/v1/messages/state")
+            let cursor = ((try JSONSerialization.jsonObject(with: stateData) as? [String: Any])?["changes_next"] as? NSNumber)?.int64Value ?? 0
+
+            // §11.1 自动开启
+            let ringR = ring(aid)
+            let r = try await E2E.autoSetup(apiR, ring: ringR, server: sid, username: username, keys: keys, marks: marks)
+            st = try await apiR.state()
+            let pub1 = st.activeKey?.pub ?? ""
+            let keysR1 = try ringR.accountKeys()
+            check("注册后自动开启：已开启、没有恢复码、本机已解锁并钉住公钥",
+                  r == .enabled && st.enabled && !st.hasRecovery && E2E.status(st, localKeys: keysR1) == .unlocked
+                  && ringR.pinned == pub1, "\(r)")
+
+            // 补加密：长轮询变更里出现 kind "sealed"，GET /v1/messages/{id} 拿到 sealed: "server" 的加密消息
+            var sealedSeen = false
+            for _ in 0..<40 where !sealedSeen {
+                let d = try await apiR.call("GET", "/v1/messages", query: [URLQueryItem(name: "since", value: String(plainID)),
+                                                                          URLQueryItem(name: "changes_since", value: String(cursor))])
+                let changes = ((try JSONSerialization.jsonObject(with: d) as? [String: Any])?["changes"] as? [[String: Any]]) ?? []
+                sealedSeen = changes.contains { $0["kind"] as? String == "sealed" && ($0["id"] as? NSNumber)?.int64Value == plainID }
+                if !sealedSeen { try await Task.sleep(nanoseconds: 100_000_000) }
+            }
+            check("开启后服务器补加密历史明文，变更里出现 kind \"sealed\"", sealedSeen, "")
+            let one = try JSONSerialization.jsonObject(with: try await apiR.call("GET", "/v1/messages/\(plainID)")) as? [String: Any]
+            let msg = one?["message"] as? [String: Any] ?? [:]
+            let newAtt = ((msg["attachments"] as? [[String: Any]])?.first?["id"] as? String) ?? ""
+            let opened = E2E.open(envelope: msg["e2e"] as? String ?? "", keys: try ringR.accountKeys(), serverAttachments: newAtt.isEmpty ? [] : [newAtt])
+            var sameText = false
+            if case .ok(let o) = opened { sameText = o.text == "开启前的明文" && o.desp == "**旧正文**" && o.atts.first?.name == "旧附件.bin" }
+            check("GET /v1/messages/{id}：sealed=\"server\" 的加密消息，附件换了新 id，本机解开后和原文一致",
+                  msg["sealed"] as? String == "server" && !newAtt.isEmpty && newAtt != oldAtt && sameText, "\(opened)")
+            let gone = try await transport(reg.token).e2eSend("GET", "/v1/att/\(oldAtt)", query: [], body: nil)
+            let g = E2E.gone(gone.data)
+            check("用旧附件 id 下载：410 reason=sealed，带消息 id（重新拉取，不是附件丢失）",
+                  gone.status == 410 && g.sealed && g.messageID == plainID, "\(gone.status) \(g)")
+            do {
+                let miss = try await transport(reg.token).e2eSend("GET", "/v1/att/a_not_exist_\(plainID)", query: [], body: nil)
+                if miss.status == 410 { check("其他 410 是附件丢失", !E2E.gone(miss.data).sealed, "") }
+            }
+
+            // 服务器代加密：开启后用普通 pushkey 发明文
+            try await push(server: server, fields: ["pushkey": pk, "text": "代加密的标题", "desp": "正文 *b*"], file: nil)
+            if let m = try await messages(apiR, since: plainID).last {
+                var ok = false
+                if case .ok(let o) = E2E.open(envelope: m["e2e"] as? String ?? "", keys: try ringR.accountKeys(), serverAttachments: []) {
+                    ok = o.text == "代加密的标题" && o.desp == "正文 *b*"
+                }
+                check("开启后普通 pushkey 发的明文：服务器立即加密（sealed=\"server\"），本机解开一致", m["sealed"] as? String == "server" && ok, "")
+            } else { check("代加密的消息", false, "") }
+
+            // 另一台设备用密码登录：自动解锁并钉住第一把公钥
+            let lgL = try await E2E.login(server: transport(nil), authed: transport, serverID: sid, username: username, password: password,
+                                          device: dev("自动 L"), register: false, marks: marks, secrets: E2E.MemorySecrets())
+            let ringL = ring(aid)
+            let apiL = E2E.API(transport(lgL.token))
+            try await E2E.unlockWithPassword(apiL, ring: ringL, server: sid, username: username, password: password, marks: marks)
+            check("另一台设备用密码解锁：钉住同一把公钥", ringL.pinned == pub1, "")
+            let skOld = try ringL.accountKeys().first ?? ""
+
+            // §11.3 R 重置加密
+            try await E2E.resetE2E(apiR, ring: ringR, server: sid, username: username, password: password, marks: marks)
+            st = try await apiR.state()
+            let pub2 = st.activeKey?.pub ?? ""
+            let keysR2 = try ringR.accountKeys()
+            check("重置加密：服务器换成新钥匙（旧钥匙停用保留），R 钉住新公钥、保留旧私钥",
+                  pub2 != pub1 && st.keys.contains { $0.pub == pub1 && !$0.active } && ringR.pinned == pub2
+                  && keysR2.count == 2 && E2E.status(st, localKeys: keysR2) == .unlocked, "")
+
+            // L 看到 T46；旧私钥上传副本被拒（kid）
+            let stL = try await apiL.state()
+            let keysL = try ringL.accountKeys()
+            check("其他设备：服务器的有效钥匙不是钉住的 → T46，不显示发送密钥，已锁定",
+                  E2E.keyChanged(stL, pinned: ringL.pinned) && E2E.sendKey(pushkey: pk, state: stL, pinned: ringL.pinned) == .mismatch
+                  && E2E.status(stL, localKeys: keysL) == .locked, "")
+            do {
+                _ = try await E2E.rotateRecovery(apiL, ring: ringL, sk: skOld, server: sid, username: username, password: password, marks: marks)
+                check("旧私钥换恢复码", false, "居然成功了")
+            } catch {
+                check("拿旧私钥换恢复码：服务端按 kid 拒绝（409）→ T46", error.localizedDescription == E2E.T.t46, error.localizedDescription)
+            }
+            try await E2E.unlockWithPassword(apiL, ring: ringL, server: sid, username: username, password: password, marks: marks)
+            let stL2 = try await apiL.state()
+            let keysL2 = try ringL.accountKeys()
+            check("用密码解锁后：新公钥替换钉住的，T46 消失，旧私钥保留",
+                  ringL.pinned == pub2 && !E2E.keyChanged(stL2, pinned: ringL.pinned) && keysL2.count == 2, "")
+            // 恢复码可选：之后设置（同一个 PUT /v1/e2e/recovery，带新钥匙的 kid）
+            let code = try await E2E.rotateRecovery(apiR, ring: ringR, sk: E2E.usableKey(st, localKeys: try ringR.accountKeys()) ?? "",
+                                                    server: sid, username: username, password: password, marks: marks)
+            let stR3 = try await apiR.state()
+            check("之后设置恢复码：成功，状态里恢复码已设置", !code.isEmpty && stR3.hasRecovery, "")
+            // 从没开启过才能用 setup
+            do {
+                _ = try await E2E.setup(apiR, ring: ring(aid), server: sid, username: username, currentPassword: password, newPassword: nil, marks: marks)
+                check("重置后再 setup", false, "")
+            } catch { check("开启过的账号不能再 setup（409），换钥匙用 reset", (error as? E2E.Failure)?.kind == .conflict, error.localizedDescription) }
+
+            // T67（§11.1 末尾）：已经登录、内存里没有密码的设备——用户输入一次当前密码再开启
+            let userB = username + "-b"
+            let regB = try await E2E.login(server: transport(nil), authed: transport, serverID: sid, username: userB, password: password,
+                                           device: dev("T67"), register: true, marks: marks, secrets: E2E.MemorySecrets())
+            guard let aidB = regB.accountID else { check("T67 账号", false, ""); return }
+            let apiB = E2E.API(transport(regB.token))
+            let ringB = ring(aidB)
+            let stB0 = try await apiB.state()
+            check("T67 提示条的条件：账号没开启、server_seal 为 true", !stB0.enabled && stB0.server_seal, "")
+            let wrongKeys = try await E2E.keysForPassword(apiB, server: sid, username: userB, password: password + "x", marks: marks)
+            do {
+                _ = try await E2E.autoSetup(apiB, ring: ringB, server: sid, username: userB, keys: wrongKeys, marks: marks)
+                check("T67 输错密码", false, "居然开启了")
+            } catch {
+                check("T67 输错密码：服务端核对当前凭证拒绝（T3），不留进行中的开启",
+                      error.localizedDescription == E2E.T.t3 && (try? ringB.pendingSetup()) == nil, error.localizedDescription)
+            }
+            let kB = try await E2E.keysForPassword(apiB, server: sid, username: userB, password: password, marks: marks)
+            let rB = try await E2E.autoSetup(apiB, ring: ringB, server: sid, username: userB, keys: kB, marks: marks)
+            let stB = try await apiB.state()
+            let keysB = try ringB.accountKeys()
+            check("T67 输入正确密码：开启成功（没有恢复码），本机解锁并钉住，提示条条件不再成立",
+                  rB == .enabled && stB.enabled && !stB.hasRecovery && E2E.status(stB, localKeys: keysB) == .unlocked
+                  && ringB.pinned == stB.activeKey?.pub, "\(rB)")
+        } catch {
+            check("默认自动加密联网流程", false, "\(error)")
+        }
     }
 
     // MARK: 联网
@@ -739,8 +1347,9 @@ enum E2ESelfTest {
             try await push(server: server, fields: ["pushkey": pushkey, "text": "加密 exp44", "desp": desp, "topic": "e2e"],
                            file: (name: "曲线.png", data: fileData))
             let msgs = try await messages(apiA, since: since)
-            guard let em = msgs.first(where: { ($0["e2e"] as? String)?.isEmpty == false }),
-                  let pm = msgs.first(where: { $0["e2e"] == nil && $0["text"] as? String == "加密 exp44" }) else {
+            // 0.8.0 起普通 pushkey 发的明文由服务器代加密（sealed: "server"），0.7 服务端存明文
+            guard let em = msgs.first(where: { ($0["e2e"] as? String)?.isEmpty == false && $0["sealed"] == nil }),
+                  let pm = msgs.first(where: { $0["sealed"] as? String == "server" || ($0["e2e"] == nil && $0["text"] as? String == "加密 exp44") }) else {
                 check("收到加密和明文两条消息", false, "\(msgs.count) 条"); return nil
             }
             let eAtts = (em["attachments"] as? [[String: Any]]) ?? [], pAtts = (pm["attachments"] as? [[String: Any]]) ?? []
@@ -750,14 +1359,26 @@ enum E2ESelfTest {
             guard case .ok(let o) = E2E.open(envelope: em["e2e"] as! String, keys: try ringA.accountKeys(), serverAttachments: eIDs) else {
                 check("解开收到的加密消息", false, ""); return nil
             }
+            // 明文那条的内容：服务器代加密的在本机解开，旧服务端的直接读（doc / preview 是服务端解析的）
+            var pText = pm["text"] as? String, pDesp = pm["desp"] as? String, pPreview = pm["preview"] as? String
+            var pNames = pAtts.compactMap { $0["name"] as? String }, pSize = (pAtts.first?["size"] as? NSNumber)?.int64Value
+            var pDoc = try JSONSerialization.data(withJSONObject: pm["doc"] ?? [:])
+            if let penv = pm["e2e"] as? String {
+                guard case .ok(let po) = E2E.open(envelope: penv, keys: try ringA.accountKeys(), serverAttachments: pIDs) else {
+                    check("解开服务器代加密的消息", false, ""); return nil
+                }
+                check("0.8.0：普通 pushkey 发的明文由服务器代加密（sealed=server，附件是密文），本机解开",
+                      pm["type"] as? String == "e2e" && (pAtts.first?["name"] as? String) == "encrypted-1.bin" && pm["doc"] == nil, "")
+                pText = po.text; pDesp = po.desp; pPreview = po.preview
+                pNames = po.atts.map(\.name); pSize = po.atts.first?.size
+                pDoc = po.doc ?? Data()
+            }
             check("解密后的标题、正文、附件名与明文消息一致",
-                  o.text == pm["text"] as? String && o.desp == pm["desp"] as? String && o.atts.map(\.name) == pAtts.compactMap { $0["name"] as? String }
-                  && o.atts.first?.size == (pAtts.first?["size"] as? NSNumber)?.int64Value, "")
-            let serverDoc = try JSONSerialization.data(withJSONObject: pm["doc"] ?? [:])
-            var normalized = String(decoding: serverDoc, as: UTF8.self)
+                  o.text == pText && o.desp == pDesp && o.atts.map(\.name) == pNames && o.atts.first?.size == pSize, "")
+            var normalized = String(decoding: pDoc, as: UTF8.self)
             for (p, e) in zip(pIDs, eIDs) { normalized = normalized.replacingOccurrences(of: p, with: e) }
-            check("本地解析的 doc、preview 与服务端解析的明文消息一致",
-                  canonical(o.doc ?? Data()) == canonical(Data(normalized.utf8)) && o.preview == pm["preview"] as? String, "")
+            check("本地解析的 doc、preview 与同样内容的另一条一致",
+                  canonical(o.doc ?? Data()) == canonical(Data(normalized.utf8)) && o.preview == pPreview, "")
             // 下载密文 → 校验密文的 sha256 → 解密
             if let a = eAtts.first, let id = a["id"] as? String, let sha = a["sha256"] as? String, let att = o.atts.first {
                 let ct = try await apiA.call("GET", "/v1/att/\(id)")
@@ -814,7 +1435,9 @@ enum E2ESelfTest {
                 .compactMap { ($0["id"] as? NSNumber)?.int64Value })
             let n = try await E2E.deletePlain(apiA)
             let left = try await messages(apiA, since: 0)
-            check("删除明文消息 \(n) 条，加密消息保留", n >= 1 && !left.isEmpty && left.allSatisfy { ($0["e2e"] as? String)?.isEmpty == false }, "")
+            // 0.8.0 起服务器代加密 + 补加密，开启后服务器上通常已经没有明文：删掉的条数等于删除前剩的明文条数
+            check("删除明文消息 \(n) 条（删除前服务器上有 \(plainIDs.count) 条明文），加密消息保留",
+                  n == plainIDs.count && !left.isEmpty && left.allSatisfy { ($0["e2e"] as? String)?.isEmpty == false }, "")
             let page = try JSONSerialization.jsonObject(with: try await apiC.call("GET", "/v1/messages", query: [
                 URLQueryItem(name: "since", value: String(Int64.max / 2)), URLQueryItem(name: "changes_since", value: String(cursor))])) as? [String: Any]
             let changes = (page?["changes"] as? [[String: Any]]) ?? []

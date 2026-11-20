@@ -77,7 +77,12 @@ final class DownloadEngine: NSObject, URLSessionDownloadDelegate {
         if status != 200 {
             let body = (try? Data(contentsOf: location)) ?? Data()
             let msg = APIClient.errorMessage(body)
-            p.result = .failure(status == 401 ? APIError.unauthorized(msg) : APIError.http(status, msg))
+            if status == 410, case let g = E2E.gone(body), g.sealed {
+                // 消息被服务器补加密了，附件换了新 id：重新拉取消息，不算附件丢失（docs/e2ee-client.md §11.5）
+                p.result = .failure(APIError.attachmentSealed(g.messageID))
+            } else {
+                p.result = .failure(status == 401 ? APIError.unauthorized(msg) : APIError.http(status, msg))
+            }
         } else {
             do {
                 let fm = FileManager.default
