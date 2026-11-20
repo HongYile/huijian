@@ -714,11 +714,14 @@ final class SelfTest {
             let fileKey = try Core.random32()
             let env = try E2ESelfTest.sealPayload(pub: kp.pub, text: "加密标题", desp: "**正文** ![图](attachment:曲线.png)",
                                                   atts: [["name": "曲线.png", "mime": "image/png", "size": 321, "key": fileKey]])
-            func msg(_ id: Int64, _ env: String) throws -> Message {
+            // withAttachment：服务端是否带一个附件（密文）。载荷里的附件数必须和它一致，否则按已损坏处理（T62）
+            func msg(_ id: Int64, _ env: String, withAttachment: Bool = true) throws -> Message {
+                let atts = withAttachment
+                    ? #"[{"id": "a_e2e_\#(id)", "name": "encrypted-1.bin", "mime": "application/octet-stream", "size": 400, "sha256": "ab"}]"#
+                    : "[]"
                 let json = """
                 {"id": \(id), "topic": "e2e", "priority": 4, "type": "e2e", "text": "🔒 加密消息（请把回笺更新到最新版查看）", "desp": "",
-                 "created_at": "2026-11-19T08:00:00Z", "e2e": "\(env)",
-                 "attachments": [{"id": "a_e2e_\(id)", "name": "encrypted-1.bin", "mime": "application/octet-stream", "size": 400, "sha256": "ab"}]}
+                 "created_at": "2026-11-19T08:00:00Z", "e2e": "\(env)", "attachments": \(atts)}
                 """
                 return try JSONCoding.decoder.decode(Message.self, from: Data(json.utf8))
             }
@@ -777,17 +780,17 @@ final class SelfTest {
             check("写盘读回：信封原文、解密后的内容、附件钥匙都在", saved?.e2e == env && saved?.text == "加密标题" && saved?.e2eStatus == "ok"
                   && saved?.attachments.first?.key == fileKey)
             // 直接 merge（没经过 prepareE2E）的也会在后台解开
-            let m2 = try msg(ids[1], try E2ESelfTest.sealPayload(pub: kp.pub, text: "第二条", desp: ""))
+            let m2 = try msg(ids[1], try E2ESelfTest.sealPayload(pub: kp.pub, text: "第二条", desp: ""), withAttachment: false)
             model.merge([m2])
             for _ in 0..<20 where model.message(ids[1])?.e2eStatus != "ok" { try? await Task.sleep(nanoseconds: 50_000_000) }
             check("直接合并的加密消息在后台解开", model.message(ids[1])?.text == "第二条")
             // 解密进行中又合并进来的加密消息：这一轮结束后补解，不会漏（§6.1）
-            var m4 = try msg(base + 4, try E2ESelfTest.sealPayload(pub: kp.pub, text: "第四条", desp: ""))
+            var m4 = try msg(base + 4, try E2ESelfTest.sealPayload(pub: kp.pub, text: "第四条", desp: ""), withAttachment: false)
             m4.applyE2E(.locked)
             model.merge([m4])
             let running = Task { await model.decryptPending() }
             await Task.yield()
-            model.merge([try msg(base + 5, try E2ESelfTest.sealPayload(pub: kp.pub, text: "第五条", desp: ""))])
+            model.merge([try msg(base + 5, try E2ESelfTest.sealPayload(pub: kp.pub, text: "第五条", desp: ""), withAttachment: false)])
             await running.value
             for _ in 0..<20 where model.message(base + 5)?.e2eStatus != "ok" { try? await Task.sleep(nanoseconds: 50_000_000) }
             check("解密进行中合并进来的加密消息：本轮结束后补解，不会漏", model.message(base + 4)?.text == "第四条"
@@ -802,6 +805,10 @@ final class SelfTest {
             let other = try Core.keypair()
             let m3 = try msg(base + 3, try E2ESelfTest.sealPayload(pub: other.pub, text: "x", desp: ""))
             check("别的钥匙加密的消息：T61", await model.prepareE2E([m3]).first?.text == E2E.T.t61)
+            // 载荷里没有附件、服务端却多出一个：按已损坏处理（T62），不把服务端的附件当明文显示
+            let m6 = try msg(base + 6, try E2ESelfTest.sealPayload(pub: kp.pub, text: "y", desp: ""))
+            let got6 = await model.prepareE2E([m6]).first
+            check("载荷和服务端附件数不一致：T62", got6?.e2eStatus == "format" && got6?.text == E2E.T.t62, "\(String(describing: got6?.e2eStatus))")
             // 加密附件下载：拿一个真实的（明文）附件冒充密文，解密必然失败：卡片显示「解密失败」，不留文件
             if var a = model.messages.flatMap(\.attachments).first(where: { $0.name == "metrics.xlsx" }) {
                 a.key = fileKey

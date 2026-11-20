@@ -1205,10 +1205,23 @@ enum SelfTest {
             let saved = Persistence.load(paths.messagesFile).messages.first { $0.id == 900001 }
             check(saved?.e2e == env && saved?.text == "加密标题" && saved?.e2eStatus == "ok" && saved?.attachments.first?.key == fileKey,
                   "写盘读回：信封原文、解密后的内容、附件钥匙都在")
+            // 没有附件的加密消息。注意：载荷里的附件数必须和服务端附件数一致，否则按已损坏处理（T62）。
+            // 所以不能拿上面带一个服务端附件的 json 去套一个没有 atts 的载荷
+            func bareMessage(_ id: Int64, _ envelope: String) throws -> Message {
+                let j = """
+                {"id": \(id), "topic": "e2e", "priority": 4, "type": "e2e", "text": "🔒 加密消息（请把回笺更新到最新版查看）", "desp": "",
+                 "created_at": "2026-11-19T08:00:00Z", "e2e": "\(envelope)"}
+                """
+                return try JSONCoding.decoder.decode(Message.self, from: Data(j.utf8))
+            }
+            // 载荷没有附件、服务端却有一个：按已损坏处理，不会把服务端的附件当明文
+            let mBad = try bareMessage(900005, try E2ESelfTest.sealPayload(pub: kp.pub, text: "x", desp: ""))
+            let mBadAtt = try JSONCoding.decoder.decode(Message.self, from: Data(json.replacingOccurrences(of: "900001", with: "900005")
+                .replacingOccurrences(of: env, with: mBad.e2e ?? "").utf8))
+            check(await m.prepareE2E([mBadAtt]).first?.text == E2E.T.t62, "载荷附件数和服务端附件数不一致：T62")
             // 直接 merge（没经过 prepareE2E）的也会在后台解开
             let env2 = try E2ESelfTest.sealPayload(pub: kp.pub, text: "第二条", desp: "")
-            let m2 = try JSONCoding.decoder.decode(Message.self, from: Data(json.replacingOccurrences(of: "900001", with: "900002")
-                .replacingOccurrences(of: env, with: env2).utf8))
+            let m2 = try bareMessage(900002, env2)
             m.merge([m2], notify: false)
             for _ in 0..<20 where m.messages.first(where: { $0.id == 900002 })?.e2eStatus != "ok" { try? await Task.sleep(nanoseconds: 50_000_000) }
             check(m.messages.first { $0.id == 900002 }?.text == "第二条", "直接合并的加密消息在后台解开")
@@ -1223,8 +1236,7 @@ enum SelfTest {
             check(await m.prepareE2E([m3]).first?.text == E2E.T.t61, "别的钥匙加密的消息：T61")
             // §6.1：解锁和同步同时进行——一轮解密进行中又合并进来的加密消息，这一轮结束后再解一轮，不会漏
             let env4 = try E2ESelfTest.sealPayload(pub: kp.pub, text: "第四条", desp: "")
-            let m4 = try JSONCoding.decoder.decode(Message.self, from: Data(json.replacingOccurrences(of: "900001", with: "900004")
-                .replacingOccurrences(of: env, with: env4).utf8))
+            let m4 = try bareMessage(900004, env4)
             let round = Task { await m.decryptPending() }
             await Task.yield()
             m.merge([m4], notify: false)
