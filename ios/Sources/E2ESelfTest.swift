@@ -1507,7 +1507,7 @@ enum E2ESelfTest {
                 func agentLogin(_ name: String, account: String) async throws -> (sid: String, sk: String, pub: String, nb: String) {
                     let kp = try Core.keypair()
                     let nb = try Core.random32()
-                    let commit = try Core.agentCommit(pub: kp.pub, account: account, nonce: nb)
+                    let commit = try Core.agentCommit(pub: kp.pub, account: account, nonce: nb, name: name)
                     let r = try JSONDecoder().decode(NewS.self, from: try await apiK.call("POST", "/v1/agent/sessions", body: ["name": name, "pub": kp.pub, "commit": commit]))
                     return (r.session_id, kp.sk, kp.pub, nb)
                 }
@@ -1528,8 +1528,10 @@ enum E2ESelfTest {
                 guard ap.phase == .approved, ls2.state == "approved", let stoken = ls2.token else { check("批准后 agent 拿到会话令牌", false, "\(ls2)"); return nil }
                 let apiS = E2E.API(transport(stoken))
                 var list = try await Agent.sessions(apiA)
-                let ver = Agent.verify(list, keys: [try Core.keypair().sk, skA])
+                let ver = Agent.verify(list, keys: [try Core.keypair().sk, skA], current: skA)
                 check("会话证明能核实，名称取自证明", ver[ag.sid] == Agent.Verified(name: "自检 agent", pub: ag.pub), "\(ver)")
+                let oldKey = Agent.verify(list, keys: [skA], current: try Core.keypair().sk)
+                check("不是当前钥匙写的证明：只算历史，不能回复", oldKey[ag.sid]?.current == false, "\(oldKey)")
 
                 // agent 用假的账号公钥登录：承诺对不上 → 自动拒绝
                 let fake = try await agentLogin("冒充", account: try Core.keypair().pub)
@@ -1552,8 +1554,8 @@ enum E2ESelfTest {
                       && (m["e2e"] as? String)?.hasPrefix("hje2.") == true && !"\(m)".contains("继续吗"), "")
                 let o = Agent.open(envelope: m["e2e"] as? String ?? "", sessionID: ag.sid, keys: [skA], verified: ver)
                 if case .ok(let x) = o {
-                    check("解开 agent 消息：标题、正文、快捷回复、名称", x.text == "继续吗？" && x.ask && x.choices == ["继续", "停"]
-                          && x.agentName == "自检 agent" && x.doc != nil, "\(x)")
+                    check("解开 agent 消息：标题、正文、快捷回复、名称、seq", x.text == "继续吗？" && x.ask && x.choices == ["继续", "停"]
+                          && x.agentName == "自检 agent" && x.doc != nil && x.agentSeq == 1, "\(x)")
                 } else { check("解开 agent 消息", false, "\(o)") }
                 check("会话没核实：来源无法核实", Agent.open(envelope: m["e2e"] as? String ?? "", sessionID: ag.sid, keys: [skA], verified: [:]) == .unverified, "")
                 check("换成别的会话公钥：解不开", Agent.open(envelope: m["e2e"] as? String ?? "", sessionID: ag.sid, keys: [skA],
@@ -1561,14 +1563,15 @@ enum E2ESelfTest {
 
                 // 设备回复 → agent 解开、发回执 → 设备核对回执显示 ✓✓
                 guard let v = ver[ag.sid] else { return nil }
-                let rid = try await Agent.reply(apiA, msgID: mid, sessionID: ag.sid, verified: v, sk: skA, text: "继续", device: "设备 A")
+                let rid = try await Agent.reply(apiA, msgID: mid, seq: 1, sessionID: ag.sid, verified: v, sk: skA, text: "继续", device: "设备 A")
                 var views = try await Agent.replies(apiA, msgID: mid, sessionID: ag.sid, keys: [skA], verified: v)
                 check("回复后显示「已发出」", views.map(\.text) == ["继续"] && views.first?.state == .sent, "\(views)")
                 let fd = try await apiS.call("GET", "/v1/agent/replies", query: [URLQueryItem(name: "wait", value: "0")])
                 let got = ((try JSONSerialization.jsonObject(with: fd) as? [String: Any])?["replies"] as? [[String: Any]]) ?? []
                 guard let g = got.first, let renv = g["e2e"] as? String else { check("agent 取到回复", false, "\(got)"); return nil }
                 let rp = try Core.agentReplyOpen(sk: ag.sk, account: acctPub, envelope: renv, msgID: mid)
-                check("agent 解开回复（发送方核对为账号公钥）", rp["text"] as? String == "继续" && rp["device"] as? String == "设备 A", "\(rp)")
+                check("agent 解开回复（发送方核对为账号公钥，带被回复消息的 seq）", rp["text"] as? String == "继续" && rp["device"] as? String == "设备 A"
+                      && (rp["re_seq"] as? NSNumber)?.int64Value == 1, "\(rp)")
                 let receipt = #"{"v":1,"kind":"receipt","reply_id":\#(rid),"n":"\#(rp["n"] as? String ?? "")","received_at":2}"#
                 try await apiS.call("POST", "/v1/agent/replies/ack", body: ["receipts": [["reply_id": rid, "e2e": try Core.agentSeal(account: acctPub, sk: ag.sk, sessionID: ag.sid, payload: receipt)]]])
                 views = try await Agent.replies(apiA, msgID: mid, sessionID: ag.sid, keys: [skA], verified: v)
@@ -1584,7 +1587,7 @@ enum E2ESelfTest {
                 try await Agent.end(apiA, sessionID: ag.sid)
                 list = try await Agent.sessions(apiA)
                 do {
-                    try await Agent.reply(apiA, msgID: mid, sessionID: ag.sid, verified: v, sk: skA, text: "再回", device: "设备 A")
+                    try await Agent.reply(apiA, msgID: mid, seq: 1, sessionID: ag.sid, verified: v, sk: skA, text: "再回", device: "设备 A")
                     check("会话结束后不能回复", false, "")
                 } catch { check("会话结束后不能回复（\(err(error))）", err(error) == Agent.T.ended, "") }
                 check("结束后会话状态为 ended", list.first { $0.id == ag.sid }?.state == "ended", "")

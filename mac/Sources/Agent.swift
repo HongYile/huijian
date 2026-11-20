@@ -130,15 +130,19 @@ enum Agent {
     struct Verified: Equatable, Codable {
         let name: String
         let pub: String
+        /// 证明是账号**当前**钥匙写的：只有这样的会话能回复。重置加密前的旧钥匙写的只用来显示历史消息
+        /// （旧私钥可能已经泄露：拿着旧私钥又控制服务器的人能给自己的公钥伪造证明）
+        var current = true
     }
 
-    /// 用账号私钥（可以多把：重置加密前批准的会话用旧钥匙写的证明）核对每个会话的证明；核对不过的不在结果里
-    static func verify(_ sessions: [Session], keys: [String]) -> [String: Verified] {
+    /// 用账号私钥（可以多把：重置加密前批准的会话用旧钥匙写的证明）核对每个会话的证明；核对不过的不在结果里。
+    /// current：账号当前的私钥（nil = 不知道，全部按旧钥匙处理）
+    static func verify(_ sessions: [Session], keys: [String], current: String?) -> [String: Verified] {
         var out: [String: Verified] = [:]
         for s in sessions where !s.attest.isEmpty && !s.pub.isEmpty {
             for k in keys {
                 if let name = try? Core.agentAttestOpen(sk: k, attest: s.attest, sessionID: s.id, pub: s.pub) {
-                    out[s.id] = Verified(name: name, pub: s.pub)
+                    out[s.id] = Verified(name: name, pub: s.pub, current: k == current)
                     break
                 }
             }
@@ -191,13 +195,14 @@ enum Agent {
                 phase = .failed(T.gone)
                 return phase
             }
-            guard s.pub == session.pub, s.commit == session.commit, s.challenge == na else {
+            guard s.pub == session.pub, s.commit == session.commit, s.name == session.name, s.challenge == na else {
                 phase = .failed(T.restarted)
                 return phase
             }
             guard !s.reveal.isEmpty else { return phase }
             // 用本机私钥算出的账号公钥核对承诺：agent 看到的是假的账号公钥时对不上
-            let commit = try? Core.agentCommit(pub: s.pub, account: account, nonce: s.reveal)
+            // 名称也在承诺里：服务器改不了设备上显示、写进证明的名称
+            let commit = try? Core.agentCommit(pub: s.pub, account: account, nonce: s.reveal, name: session.name)
             guard commit == s.commit, let code = try? Core.agentSAS(pub: s.pub, account: account, na: na, nb: s.reveal) else {
                 _ = try? await Agent.deny(api, sessionID: s.id)
                 phase = .failed(T.commitMismatch)
@@ -260,6 +265,7 @@ enum Agent {
         o.agentName = v.name
         o.ask = p["ask"] as? Bool ?? false
         o.choices = Array(choices.prefix(4))
+        o.agentSeq = (p["seq"] as? NSNumber)?.int64Value ?? 0
         return .ok(o)
     }
 
@@ -267,18 +273,21 @@ enum Agent {
 
     static let maxReplyBytes = 16 << 10
 
-    /// 回复一条 agent 消息 → reply_id。sk：本机账号私钥；device：本机名称（写进载荷，agent 看得到）
+    /// 回复一条 agent 消息 → reply_id。seq：被回复消息载荷里的 seq（写进 re_seq）；sk：本机账号私钥；device：本机名称（写进载荷，agent 看得到）
     @discardableResult
-    static func reply(_ api: E2E.API, msgID: Int64, sessionID: String, verified: Verified, sk: String, text: String, device: String,
+    static func reply(_ api: E2E.API, msgID: Int64, seq: Int64, sessionID: String, verified: Verified, sk: String, text: String, device: String,
                       now: Date = Date()) async throws -> Int64 {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { throw E2E.Failure(.server, "回复不能为空") }
         guard t.utf8.count <= maxReplyBytes else { throw E2E.Failure(.server, T.tooLong) }
+        guard verified.current, seq > 0 else { throw E2E.Failure(.server, T.unverified) }
         var n = [UInt8](repeating: 0, count: 16)
         var g = SystemRandomNumberGenerator()
         for i in n.indices { n[i] = g.next() }
-        let payload: [String: Any] = ["v": 1, "text": t, "n": b64url(Data(n)), "sent_at": Int64(now.timeIntervalSince1970), "device": device]
+        let payload: [String: Any] = ["v": 1, "re_seq": seq, "text": t, "n": b64url(Data(n)), "sent_at": Int64(now.timeIntervalSince1970), "device": device]
         let json = String(decoding: try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]), as: UTF8.self)
+        // 转义后可能变长（引号、控制字符）：信封上限 32 KB，载荷超过 20 KB 就不发
+        guard json.utf8.count <= 20 << 10 else { throw E2E.Failure(.server, T.tooLong) }
         let sealed = try E2E.coreCall { try Core.agentReplySeal(sk: sk, sessionPub: verified.pub, sessionID: sessionID, msgID: msgID, payload: json) }
         do {
             let d = try await api.call("POST", "/v1/agent/replies", body: ["msg_id": msgID, "e2e": sealed.envelope, "copy": sealed.copy])

@@ -712,7 +712,8 @@ struct DetailView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         MessageHeader(message: focus)
                         MessageBody(message: focus, scrollTo: { anchor in withAnimation { proxy.scrollTo(anchor, anchor: .top) } })
-                        if focus.isAgent { AgentReplyPanel(message: focus).padding(.top, 22) }
+                        // 每条消息一个新面板：草稿、回复列表不会跟到下一条消息（审查 中4）
+                        if focus.isAgent { AgentReplyPanel(message: focus).id(focus.id).padding(.top, 22) }
                         if !focus.attachments.isEmpty && !focus.e2eUnreadable {
                             SectionTitle(title: "附件", trailing: "\(focus.attachments.count) 个 · \(humanSize(focus.attachments.reduce(0) { $0 + $1.size }))")
                                 .padding(.top, 26).padding(.bottom, 12)

@@ -1810,6 +1810,8 @@ enum E2E {
         var agentName: String? = nil
         var ask = false
         var choices: [String] = []
+        /// agent 消息载荷里的 seq：回复时写进 re_seq（服务器挪不了回复对应的问题）
+        var agentSeq: Int64 = 0
     }
 
     enum OpenResult: Equatable {

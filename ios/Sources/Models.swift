@@ -62,6 +62,8 @@ struct Message: Codable, Hashable, Identifiable {
     /// 本机解开 agent 消息后得到的：会话证明里的名称、快捷回复（只在本机产生，见 dropLocalFields）
     var agentName: String?
     var choices: [String] = []
+    /// 本机解开的载荷里的 seq（回复时写进 re_seq）
+    var agentSeq: Int64 = 0
     /// 本机解密结果：ok 已解开 / locked 本机没有私钥 / wrong_key 别的钥匙加密的 / format 已损坏；nil = 还没处理（或明文消息）
     var e2eStatus: String?
     /// 0.8.0 起：服务器代加密的消息为 "server"（发送端没加密，服务器收到后立即加密保存，docs/e2ee-client.md §11.5）；发送端加密的没有
@@ -91,6 +93,9 @@ struct Message: Codable, Hashable, Identifiable {
         type = o.type
         agentName = o.agentName
         choices = o.choices
+        agentSeq = o.agentSeq
+        // 「等你回复」用载荷里的（服务器给的 ask 只用来在解开前显示占位）
+        if agentSession != nil { ask = o.ask }
         doc = o.doc.flatMap { try? JSONDecoder().decode(MDDoc.self, from: $0) }
         preview = o.preview
         attachments = attachments.map { a in
@@ -110,6 +115,7 @@ struct Message: Codable, Hashable, Identifiable {
         e2eStatus = nil
         agentName = nil
         choices = []
+        agentSeq = 0
         if attachments.contains(where: { $0.key != nil }) {
             attachments = attachments.map { var a = $0; a.key = nil; return a }
         }
@@ -133,6 +139,7 @@ struct Message: Codable, Hashable, Identifiable {
         case ask
         case agentName = "agent_name"
         case choices
+        case agentSeq = "agent_seq"
     }
 
     /// 可选字段用 try? decodeIfPresent：缺字段直接 nil、不构造错误；类型不对仍按没有处理（和 try? decode 结果一样）
@@ -165,6 +172,7 @@ struct Message: Codable, Hashable, Identifiable {
         ask = (try? c.decodeIfPresent(Bool.self, forKey: .ask)) ?? false
         agentName = try? c.decodeIfPresent(String.self, forKey: .agentName)
         choices = (try? c.decodeIfPresent([String].self, forKey: .choices)) ?? []
+        agentSeq = (try? c.decodeIfPresent(Int64.self, forKey: .agentSeq)) ?? 0
     }
 
     /// agent 发来的消息（可以回复，见 AgentReplySection）

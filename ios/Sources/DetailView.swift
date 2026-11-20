@@ -86,7 +86,7 @@ struct DetailView: View {
                     MarkdownView(source: m.desp, plain: m.type == "text")
                 }
                 // agent 消息：回复区（快捷回复、回复框、送达状态）
-                if m.isAgent { AgentReplySection(message: m) }
+                if m.isAgent { AgentReplySection(message: m).id(m.id) }
                 // 还没解开的加密消息：附件是密文，没有钥匙，不显示也不下载
                 if !m.attachments.isEmpty && !m.e2eUnreadable {
                     Text("附件 \(m.attachments.count) 个").font(.footnote.weight(.medium)).foregroundStyle(Theme.text2)

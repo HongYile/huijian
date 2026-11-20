@@ -146,8 +146,8 @@ enum Core {
 
     // MARK: agent 双向（docs/agent-mcp.md §11）
 
-    static func agentCommit(pub: String, account: String, nonce: String) throws -> String {
-        try str(try call("agent_commit", ["pub": pub, "account": account, "nonce": nonce]), "commit")
+    static func agentCommit(pub: String, account: String, nonce: String, name: String) throws -> String {
+        try str(try call("agent_commit", ["pub": pub, "account": account, "nonce": nonce, "name": name]), "commit")
     }
 
     static func agentSAS(pub: String, account: String, na: String, nb: String) throws -> String {

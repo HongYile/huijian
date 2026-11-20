@@ -13,10 +13,14 @@ extension AppModel {
         repeat {
             agentRefreshAgain = false
             let gen = session
-            guard let list = try? await Agent.sessions(api), session == gen else { return }
+            guard let list = try? await Agent.sessions(api), session == gen else {
+                if agentRefreshAgain, session == gen { continue }   // 这次失败了，但期间又有人要求刷新：再试一次
+                return
+            }
             if list != agentSessions { agentSessions = list }
             let keys = e2eKeys
-            let v = (try? await E2E.background { Agent.verify(list, keys: keys) }) ?? [:]
+            let current = e2eAccountKey
+            let v = (try? await E2E.background { Agent.verify(list, keys: keys, current: current) }) ?? [:]
             guard session == gen else { return }
             let changed = v != agentVerified
             if changed { agentVerified = v }
@@ -85,7 +89,9 @@ extension AppModel {
     func agentBeginApproval(_ s: Agent.Session) async throws {
         guard let api = e2eAPI else { return }
         guard let sk = e2eAccountKey else { throw E2E.Failure(.locked, "本机还没有解锁加密，不能批准") }
+        let gen = session
         let a = try await Agent.Approval.begin(api, session: s, sk: sk)
+        guard session == gen else { a.stop(); return }   // 等待期间换了账号：结果不写进新账号的状态
         agentApprovals[s.id] = a
         agentPhases[s.id] = a.phase
         await refreshAgent()
@@ -121,14 +127,14 @@ extension AppModel {
 
     /// 能不能回复这条消息：agent 发来、来源核实过、会话还在
     func agentCanReply(_ m: Message) -> Bool {
-        guard let sid = m.agentSession, m.e2eStatus == "ok", agentVerified[sid] != nil else { return false }
+        guard let sid = m.agentSession, m.e2eStatus == "ok", m.agentSeq > 0, agentVerified[sid]?.current == true else { return false }
         return agentSessions.first { $0.id == sid }?.active ?? false
     }
 
     func agentReply(_ m: Message, text: String) async throws {
         guard let api = e2eAPI, let sid = m.agentSession, let v = agentVerified[sid] else { throw E2E.Failure(.server, Agent.T.unverified) }
         guard let sk = e2eAccountKey else { throw E2E.Failure(.locked, "本机还没有解锁加密，不能回复") }
-        try await Agent.reply(api, msgID: m.id, sessionID: sid, verified: v, sk: sk, text: text, device: settings.deviceName)
+        try await Agent.reply(api, msgID: m.id, seq: m.agentSeq, sessionID: sid, verified: v, sk: sk, text: text, device: settings.deviceName)
     }
 
     func agentReplies(_ m: Message) async throws -> [Agent.ReplyView] {
