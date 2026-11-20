@@ -93,7 +93,6 @@ fun SettingsScreen(back: () -> Unit, requestNotify: () -> Unit, open: (Screen) -
     val e2eStatus by E2EHub.status.collectAsStateWithLifecycle()
     val e2eState by E2EHub.state.collectAsStateWithLifecycle()
     val agentSessions by AgentHub.sessions.collectAsStateWithLifecycle()
-    val agentUnsupported by AgentHub.unsupported.collectAsStateWithLifecycle()
 
     fun applyMode(m: ReceiveMode, min: Int) {
         mode = m; interval = min
@@ -153,7 +152,10 @@ fun SettingsScreen(back: () -> Unit, requestNotify: () -> Unit, open: (Screen) -
             }
 
             Card("管理", "pushkey、设备、频道、加密和 agent 设置属于账号，在这里改和在 Mac 上改效果一样。") {
-                NavRow("Pushkey", "新建、改名、换 key、吊销，发送示例", Modifier.testTag("openKeys")) { open(Screen.Keys) }
+                NavRow("Pushkey", when {
+                    agentSessions.any { it.pending } -> "有 agent 请求登录，点这里核对批准"
+                    else -> "新建、改名、换 key、吊销，发送示例；Agent key"
+                }, Modifier.testTag("openKeys")) { open(Screen.Keys) }
                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                 NavRow("账户与设备", "用户名和密码、配对码、我的设备", Modifier.testTag("openAccount")) { open(Screen.Account) }
                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
@@ -167,13 +169,6 @@ fun SettingsScreen(back: () -> Unit, requestNotify: () -> Unit, open: (Screen) -
                     E2EStatus.UNSUPPORTED -> "更新服务端后可用"
                     E2EStatus.UNKNOWN -> "开启加密、解锁、批准其他设备"
                 }, Modifier.testTag("openE2E")) { open(Screen.E2E) }
-                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-                NavRow("Agent", when {
-                    agentUnsupported -> "更新服务端后可用"
-                    agentSessions.any { it.pending } -> "有 agent 请求登录，点这里核对批准"
-                    agentSessions.any { it.active } -> "已登录 ${agentSessions.count { it.active }} 个 agent"
-                    else -> "让 Claude Code 等 agent 给你发消息、等你回复"
-                }, Modifier.testTag("openAgent")) { open(Screen.Agent) }
             }
 
             Card("账号", null) {

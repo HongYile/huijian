@@ -83,7 +83,6 @@ struct RootView: View {
                         case .account: AccountManageView()
                         case .channels: ChannelsView()
                         case .e2e: E2EView()
-                        case .agent: AgentView()
                         }
                     }
             }

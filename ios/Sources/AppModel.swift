@@ -43,8 +43,6 @@ enum Route: Hashable {
     case channels
     /// 设置 → 账户 →「端到端加密」
     case e2e
-    /// 设置 → 账户 →「Agent」
-    case agent
 }
 
 enum AttState: Equatable {
@@ -1790,10 +1788,10 @@ final class AppModel: ObservableObject {
         path = [.settings, .account, .e2e]
     }
 
-    /// agent 请求登录的通知：打开「Agent」页核对后批准
+    /// agent 请求登录的通知：打开 Pushkey 页（最上方是请求）核对后批准
     func openAgent() {
         guard loggedIn else { return }
-        path = [.settings, .account, .agent]
+        path = [.settings, .keys]
     }
 
     // MARK: 测试推送

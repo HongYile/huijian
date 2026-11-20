@@ -245,9 +245,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         let e2e = info["e2e"] as? Bool == true
         let agent = info["agent"] as? Bool == true
         Task { @MainActor in
-            // 设备请求解锁加密消息（T50）：打开设置的「加密」页核对后批准；agent 请求登录：打开「Agent」页
+            // 设备请求解锁加密消息（T50）：打开设置的「加密」页核对后批准；agent 请求登录：打开「Pushkey」页（最上方是请求）
             if e2e { AppDelegate.shared?.showSettings(tab: .e2e) }
-            else if agent { AppDelegate.shared?.showSettings(tab: .agent) }
+            else if agent { AppDelegate.shared?.showSettings(tab: .keys) }
             else { AppDelegate.shared?.showMainWindow(select: id) }
             completionHandler()
         }

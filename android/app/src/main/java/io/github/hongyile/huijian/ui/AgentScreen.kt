@@ -46,34 +46,34 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * 设置 → Agent（docs/agent-mcp.md §8）：批准 agent 登录（核对码，和设备批准同一套界面）、Agent key（新建 / 只显示一次 / 复制 / 吊销）、
- * 已登录的 agent 会话（在线状态、结束）、用法。和 Mac 的 AgentSettings.swift 一致
+ * Pushkey 页里的 agent 部分（docs/agent-mcp.md §8）：Agent key 和 pushkey 一样是交给程序的钥匙，放在一起。和 Mac 的 AgentSettings.swift 一致。
+ * AgentRequestsPart：页面最上方的「请求登录的 agent」（有请求时才显示，点 agent 登录通知打开 Pushkey 页时第一眼看到）；
+ * AgentMainPart：页面底部的 Agent key（新建 / 只显示一次 / 复制 / 吊销）、已登录的 agent（在线状态、结束）、用法
  */
 @Composable
-fun AgentScreen(back: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    val snackbar = remember { SnackbarHostState() }
+fun AgentRequestsPart(say: (String) -> Unit) {
+    val unsupported by AgentHub.unsupported.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { runCatching { AgentHub.reload() } }
+    if (!unsupported) Requests(say)
+}
+
+@Composable
+fun AgentMainPart(say: (String) -> Unit) {
     val unsupported by AgentHub.unsupported.collectAsStateWithLifecycle()
     var loadError by remember { mutableStateOf<String?>(null) }
-
-    fun say(s: String) { scope.launch { snackbar.showSnackbar(s) } }
     LaunchedEffect(Unit) {
         val e1 = runCatching { AgentHub.reload() }.exceptionOrNull()
         val e2 = if (AgentHub.unsupported.value) null else runCatching { AgentHub.loadKeys() }.exceptionOrNull()
         loadError = (e1 ?: e2)?.let(::describe)
     }
-
-    ManageScaffold("Agent", back, snackbar) {
-        if (unsupported) {
-            SectionCard(null) { Text(AgentText.UNSUPPORTED, color = WARNING, fontSize = 14.sp) }
-            return@ManageScaffold
-        }
-        loadError?.let { SectionCard(null) { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 14.sp) } }
-        Requests(::say)
-        KeyCard(::say)
-        SessionsCard(::say)
-        UsageCard()
+    if (unsupported) {
+        SectionCard("Agent") { Text(AgentText.UNSUPPORTED, color = WARNING, fontSize = 14.sp) }
+        return
     }
+    loadError?.let { SectionCard(null) { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 14.sp) } }
+    KeyCard(say)
+    SessionsCard(say)
+    UsageCard()
 }
 
 // ---------- 登录请求 ----------

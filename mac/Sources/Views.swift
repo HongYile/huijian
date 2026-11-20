@@ -1505,9 +1505,9 @@ struct PairView: View {
 
 enum SettingsTab: String, CaseIterable {
     // 账户第一、Pushkey 第二：最常用的放最前面
-    case account, keys, e2e, agent, general, notify, server, network
-    var title: String { ["account": "账户", "general": "通用", "notify": "通知", "keys": "Pushkey", "e2e": "加密", "agent": "Agent", "server": "服务器", "network": "网络"][rawValue]! }
-    var icon: String { ["account": "person.crop.circle", "general": "gearshape", "notify": "bell.badge", "keys": "key", "e2e": "lock.shield", "agent": "terminal", "server": "server.rack", "network": "network"][rawValue]! }
+    case account, keys, e2e, general, notify, server, network
+    var title: String { ["account": "账户", "general": "通用", "notify": "通知", "keys": "Pushkey", "e2e": "加密", "server": "服务器", "network": "网络"][rawValue]! }
+    var icon: String { ["account": "person.crop.circle", "general": "gearshape", "notify": "bell.badge", "keys": "key", "e2e": "lock.shield", "server": "server.rack", "network": "network"][rawValue]! }
 }
 
 /// 统一的「账户与设置」窗口：左侧边栏（账户在上），右侧内容。点主窗口左下角的头像直接打开「账户」页。
@@ -1536,7 +1536,6 @@ struct SettingsView: View {
                         case .network: NetworkSettings()
                         case .keys: KeysSettings()
                         case .e2e: E2ESettings()
-                        case .agent: AgentSettings()
                         case .server: ServerSettings()
                         }
                     }

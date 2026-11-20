@@ -119,6 +119,8 @@ fun KeysScreen(back: () -> Unit) {
         IconButton({ reload() }, enabled = !loading) { Icon(Icons.Default.Refresh, "刷新") }
         IconButton({ edit = KeyEdit.Create }, enabled = keys != null) { Icon(Icons.Default.Add, "新建") }
     }) {
+        // agent 请求登录：放在最上面（点通知打开这一页时第一眼看到）
+        AgentRequestsPart(::say)
         val list = keys
         SectionCard(
             Hub.store.username.takeIf { it.isNotBlank() }?.let { "账号「$it」的 Pushkey" } ?: "Pushkey",
@@ -165,6 +167,8 @@ fun KeysScreen(back: () -> Unit) {
                 }
             }
         }
+        // agent 双向：Agent key、已登录的 agent、用法（服务端 0.10.0 起）
+        AgentMainPart(::say)
     }
 
     edit?.let { e ->

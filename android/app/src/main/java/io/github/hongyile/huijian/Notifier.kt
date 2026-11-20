@@ -40,7 +40,7 @@ object Notifier {
     const val EXTRA_MESSAGE_ID = "message_id"
     /** 点「设备请求解锁」的通知：打开加密页 */
     const val EXTRA_OPEN_E2E = "open_e2e"
-    /** 点「agent 请求登录」的通知：打开 Agent 页 */
+    /** 点「agent 请求登录」的通知：打开 Pushkey 页（最上方是请求） */
     const val EXTRA_OPEN_AGENT = "open_agent"
 
     fun setup(ctx: Context) {
@@ -240,7 +240,7 @@ object Notifier {
         runCatching { for (n in nm.activeNotifications) if (n.id == ID_E2E) nm.cancel(n.tag, n.id) }
     }
 
-    /** agent 请求登录（docs/agent-mcp.md §8）：同一个请求只通知一次（AgentHub 记着），点开进 Agent 页核对后批准 */
+    /** agent 请求登录（docs/agent-mcp.md §8）：同一个请求只通知一次（AgentHub 记着），点开进 Pushkey 页（最上方）核对后批准 */
     fun postAgentRequest(ctx: Context, s: AgentSession) {
         if (!canPost(ctx)) return
         val i = Intent(ctx, MainActivity::class.java).apply {

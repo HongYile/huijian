@@ -199,7 +199,7 @@ with huijian.run("exp42", topic="train"):   # 自动发：开始（P4）/ 完成
 
 ### 准备（每台机器一次，需要用户在场）
 
-需要环境变量 `HUIJIAN_URL` 和 `HUIJIAN_AGENT_KEY`（`AK_` 开头，用户在回笺「设置 → Agent」里新建）。没有就**问用户要**，不要翻找。然后登录：
+需要环境变量 `HUIJIAN_URL` 和 `HUIJIAN_AGENT_KEY`（`AK_` 开头，用户在回笺「设置 → Pushkey」页的 Agent 部分里新建）。没有就**问用户要**，不要翻找。然后登录：
 
 ```bash
 huijian agent login -name "家里 Claude Code"

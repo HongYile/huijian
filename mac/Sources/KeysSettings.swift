@@ -32,6 +32,8 @@ struct KeysSettings: View {
 
     var editor: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // agent 请求登录：放在最上面（点通知打开这一页时第一眼看到）
+            AgentSettings(part: .requests)
             SettingsCard(title: model.accountName.isEmpty ? "Pushkey" : "账号「\(model.accountName)」的 Pushkey",
                          footer: "pushkey 属于账号：这个账号的所有设备看到的是同一组，换设备登录后照样在。发送方用 pushkey 把消息发给你。建议每台机器、每个项目各用一把，泄露时只吊销那一把。自定义 key 需 16–64 位字母、数字、下划线或短横线；新建时留空则自动生成。"
                          + (modes == nil ? "" : "\n「本机」决定这把 key 发来的消息在这台 Mac 上提醒、静默（只进列表）还是不接收；每台设备分别设置，例如告警只让手机响。")) {
@@ -76,7 +78,10 @@ struct KeysSettings: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 12)
                 }
+                .padding(.bottom, 18)
             }
+            // agent 双向：Agent key、已登录的 agent、用法
+            AgentSettings(part: .main)
         }
         .onAppear {
             guard !loaded else { return }

@@ -1998,7 +1998,7 @@ enum Notifier {
         UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
     }
 
-    /// agent 请求登录：点开进入设置的「Agent」页核对后批准
+    /// agent 请求登录：点开进入设置的「Pushkey」页（最上方）核对后批准
     static func postAgentRequest(_ s: Agent.Session) {
         if DemoMode.requested { return }
         let c = UNMutableNotificationContent()

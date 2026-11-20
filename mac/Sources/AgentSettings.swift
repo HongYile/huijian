@@ -1,8 +1,11 @@
 import AppKit
 import SwiftUI
 
-/// 设置 → Agent（docs/agent-mcp.md §8）：Agent key、批准 agent 登录、会话列表
+/// Pushkey 页里的 agent 部分（docs/agent-mcp.md §8）。part = .requests：页面最上方的「请求登录的 agent」（有请求时才显示，
+/// 点 agent 登录通知打开 Pushkey 页时第一眼看到）；part = .main：页面底部的 Agent key、已登录的会话、用法
 struct AgentSettings: View {
+    enum Part { case requests, main }
+    var part: Part = .main
     @EnvironmentObject var model: AppModel
     @State private var newKey: Agent.NewKey?
     @State private var keyMsg: String?
@@ -14,21 +17,21 @@ struct AgentSettings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if model.token == nil {
-                SettingsCard {
-                    SettingsRow(label: "还没有登录", divider: false) {
-                        Button("打开回笺登录") { AppDelegate.shared?.showMainWindow(select: nil) }.buttonStyle(SoftButtonStyle())
-                    }
-                }
+                EmptyView()
+            } else if part == .requests {
+                if model.agentSupported { requests }
             } else if model.support("agent") == .needsServerUpdate {
-                ServerTooOld(feature: "agent 双向", since: "0.10.0", alternative: nil)
+                SettingsCard(title: "Agent", footer: "让 Claude Code 等 agent 给你发加密消息、向你提问，你直接回复。需要回笺服务端 0.10.0 以上。") {
+                    SettingsRow(label: "服务端版本太旧，暂不能使用", divider: false) { EmptyView() }
+                }
             } else {
-                requests
                 keyCard
                 sessionsCard
                 usageCard
             }
         }
         .task {
+            guard part == .main else { return }
             try? await model.refreshAgentKeys()
             await model.refreshAgent()
         }
@@ -137,7 +140,7 @@ struct AgentSettings: View {
     // MARK: Agent key
 
     var keyCard: some View {
-        SettingsCard(title: "Agent key", footer: keyMsg ?? "agent 用它发起登录，每次登录都要在已解锁的设备上核对批准。key 只显示一次，请放进 agent 所在机器的环境变量 HUIJIAN_AGENT_KEY。") {
+        SettingsCard(title: "Agent key（给 agent 用）", footer: keyMsg ?? "agent 用它发起登录，每次登录都要在已解锁的设备上核对批准。key 只显示一次，请放进 agent 所在机器的环境变量 HUIJIAN_AGENT_KEY。") {
             if let k = newKey {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(k.key).font(.system(size: 13.5, design: .monospaced)).foregroundStyle(Theme.text).textSelection(.enabled)

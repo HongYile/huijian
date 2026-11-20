@@ -107,6 +107,8 @@ struct KeysView: View {
             } else if let old = model.tooOld("keys", since: "0.4.2") {
                 TooOldSection(text: old, alternative: "现在可以先在服务器管理后台的「Pushkey」页管理。")
             } else {
+                // agent 请求登录：放在最上面（点通知打开这一页时第一眼看到）
+                if model.supports("agent") == true { AgentSections(part: .requests) }
                 NoticeSection(notice: notice)
                 Section {
                     if active.isEmpty {
@@ -163,7 +165,20 @@ struct KeysView: View {
                         Text(canDelete ? "已吊销的 key 不能再发送。左滑可以彻底删除，历史消息保留。" : "已吊销的 key 不能再发送。删除需要服务端 0.5.2 以上。")
                     }
                 }
+                // agent 双向：Agent key、已登录的 agent、用法（服务端 0.10.0 起）
+                if model.supports("agent") == true {
+                    AgentSections(part: .main)
+                } else if model.supports("agent") == false {
+                    Section {
+                        Text("让 Claude Code 等 agent 给你发加密消息、向你提问，你直接回复。需要回笺服务端 0.10.0 以上。").font(.footnote).foregroundStyle(Theme.text2)
+                    } header: { Text("Agent") }
+                }
             }
+        }
+        .task {
+            guard model.supports("agent") == true else { return }
+            try? await model.refreshAgentKeys()
+            await model.refreshAgent()
         }
         .scrollContentBackground(.hidden)
         .background(Theme.bg)
@@ -592,7 +607,6 @@ struct AccountManageView: View {
                 NoticeSection(notice: notice)
                 accountSection
                 if model.loggedIn { E2EEntrySection() }
-                if model.loggedIn, model.supports("agent") == true { AgentEntrySection() }
                 PairCodeSection(onUsed: { Task { await load() } })
                 devicesSection
             }

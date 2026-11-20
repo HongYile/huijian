@@ -239,7 +239,7 @@ func agentUsage() {
   huijian agent status                               查看当前会话
   huijian agent logout                               结束会话
 通用选项：-s 槽位（默认 HUIJIAN_AGENT_SESSION 或 default，多个 agent 同时用时区分）
-登录需要 -u 地址（或 HUIJIAN_URL）和 -k Agent key（或 HUIJIAN_AGENT_KEY，在回笺「设置 → Agent」里新建）。
+登录需要 -u 地址（或 HUIJIAN_URL）和 -k Agent key（或 HUIJIAN_AGENT_KEY，在回笺「设置 → Pushkey」页的 Agent 部分里新建）。
 退出码：0 成功，1 失败，3 等回复超时。
 `)
 }
@@ -262,7 +262,7 @@ func agentLoginCmd(args []string) error {
 		return errors.New("缺少服务器地址：用 -u 或环境变量 HUIJIAN_URL")
 	}
 	if !strings.HasPrefix(*key, "AK_") {
-		return errors.New("缺少 Agent key：用 -k 或环境变量 HUIJIAN_AGENT_KEY（在回笺「设置 → Agent」里新建）")
+		return errors.New("缺少 Agent key：用 -k 或环境变量 HUIJIAN_AGENT_KEY（在回笺「设置 → Pushkey」页的 Agent 部分里新建）")
 	}
 	if strings.TrimSpace(*name) == "" || len(*name) > 64 {
 		return errors.New("名字 1–64 字节")
@@ -302,7 +302,7 @@ func agentLoginCmd(args []string) error {
 		return err
 	}
 	sid, _ := out["session_id"].(string)
-	fmt.Fprintf(os.Stderr, "已发起登录「%s」：在回笺（设置 → Agent）里会看到这个请求。\n", *name)
+	fmt.Fprintf(os.Stderr, "已发起登录「%s」：在回笺（设置 → Pushkey 页最上方）里会看到这个请求。\n", *name)
 	deadline := time.Now().Add(*wait)
 	revealed := ""
 	for time.Now().Before(deadline) {

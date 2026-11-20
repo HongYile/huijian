@@ -12,29 +12,11 @@ private func agentTime(_ s: String?) -> String {
     return f.string(from: d)
 }
 
-/// 「账户与设备」页里的入口
-struct AgentEntrySection: View {
-    @EnvironmentObject private var model: AppModel
-
-    var body: some View {
-        let pending = model.agentSessions.filter(\.pending).count
-        let active = model.agentSessions.filter(\.active).count
-        Section {
-            NavigationLink(value: Route.agent) {
-                LabeledContent {
-                    Text(pending > 0 ? "\(pending) 个请求" : (active > 0 ? "\(active) 个已登录" : ""))
-                        .foregroundStyle(pending > 0 ? Theme.accent : Theme.text3)
-                } label: {
-                    Label("Agent", systemImage: "terminal")
-                }
-            }
-        } footer: {
-            Text("让 Claude Code 等 agent 给你发加密消息、向你提问，你在这里直接回复。")
-        }
-    }
-}
-
-struct AgentView: View {
+/// Pushkey 页里的 agent 部分（docs/agent-mcp.md §8）：Agent key 和 pushkey 一样是交给程序的钥匙，放在一起。
+/// part = .requests：页面最上方的「请求登录的 agent」（有请求时才显示）；part = .main：页面底部的 Agent key、已登录的 agent、用法
+struct AgentSections: View {
+    enum Part { case requests, main }
+    let part: Part
     @EnvironmentObject private var model: AppModel
     @Environment(\.scenePhase) private var scenePhase
     @State private var newKey: Agent.NewKey?
@@ -45,10 +27,23 @@ struct AgentView: View {
     @State private var confirmEnd: Agent.Session?
 
     var body: some View {
-        List {
+        if part == .requests {
             requests
+        } else {
             keySection
+                .confirmationDialog("吊销这把 Agent key？", isPresented: Binding(get: { confirmRevoke != nil }, set: { if !$0 { confirmRevoke = nil } }),
+                                    titleVisibility: .visible) {
+                    Button("吊销", role: .destructive) { if let k = confirmRevoke { act("key") { try await model.revokeAgentKey(k.id) } } }
+                } message: {
+                    Text("用它登录的 agent 会话全部结束，之后要用新的 key 重新登录。")
+                }
             sessionsSection
+                .confirmationDialog("结束这个 agent 会话？", isPresented: Binding(get: { confirmEnd != nil }, set: { if !$0 { confirmEnd = nil } }),
+                                    titleVisibility: .visible) {
+                    Button("结束", role: .destructive) { if let s = confirmEnd { act(s.id) { try await model.endAgentSession(s.id) } } }
+                } message: {
+                    Text("「\(confirmEnd.map(name) ?? "")」不能再发消息、收回复；还没取走的回复一起删除。")
+                }
             Section {
                 Text("""
                 export HUIJIAN_URL=\(model.settings.server)
@@ -58,32 +53,10 @@ struct AgentView: View {
                 """)
                 .font(.caption.monospaced()).foregroundStyle(Theme.text2).textSelection(.enabled)
             } header: {
-                Text("用法")
+                Text("Agent 用法")
             } footer: {
                 Text("MCP 工具：notify（发消息）、ask（提问并等回复）、check_replies（取之后才到的回复）。")
             }
-        }
-        .navigationTitle("Agent")
-        .navigationBarTitleDisplayMode(.inline)
-        .refreshable {
-            try? await model.refreshAgentKeys()
-            await model.refreshAgent()
-        }
-        .task {
-            try? await model.refreshAgentKeys()
-            await model.refreshAgent()
-        }
-        .confirmationDialog("吊销这把 Agent key？", isPresented: Binding(get: { confirmRevoke != nil }, set: { if !$0 { confirmRevoke = nil } }),
-                            titleVisibility: .visible) {
-            Button("吊销", role: .destructive) { if let k = confirmRevoke { act("key") { try await model.revokeAgentKey(k.id) } } }
-        } message: {
-            Text("用它登录的 agent 会话全部结束，之后要用新的 key 重新登录。")
-        }
-        .confirmationDialog("结束这个 agent 会话？", isPresented: Binding(get: { confirmEnd != nil }, set: { if !$0 { confirmEnd = nil } }),
-                            titleVisibility: .visible) {
-            Button("结束", role: .destructive) { if let s = confirmEnd { act(s.id) { try await model.endAgentSession(s.id) } } }
-        } message: {
-            Text("「\(confirmEnd.map(name) ?? "")」不能再发消息、收回复；还没取走的回复一起删除。")
         }
     }
 
@@ -201,7 +174,7 @@ struct AgentView: View {
                 }
             }
         } header: {
-            Text("Agent key")
+            Text("Agent key（给 agent 用）")
         } footer: {
             Text(keyMsg ?? "agent 用它发起登录，每次登录都要在已解锁的设备上核对批准。key 只显示一次，请放进 agent 所在机器的环境变量 HUIJIAN_AGENT_KEY。")
         }

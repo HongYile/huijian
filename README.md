@@ -124,7 +124,7 @@ with huijian.run("exp42"):   # 自动发送：开始 / 完成（含用时）/ �
     train()
 ```
 
-**agent 提问、等你回复**（服务端 0.10.0 起）：在客户端「设置 → Agent」新建 Agent key，agent 登录时在设备上核对 6 位核对码批准。
+**agent 提问、等你回复**（服务端 0.10.0 起）：在客户端「设置 → Pushkey」页的 Agent 部分新建 Agent key，agent 登录时在设备上核对 6 位核对码批准。
 
 ```bash
 export HUIJIAN_AGENT_KEY=AK_xxx
