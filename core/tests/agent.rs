@@ -87,4 +87,10 @@ fn api_ops() {
     assert_eq!(ok(json!({"op": "open_message", "keys": [acct_sk], "envelope": r["copy"]}))["payload"]["text"], "保留");
     err(json!({"op": "agent_reply_seal", "sk": acct_sk, "session_pub": sess_pub, "session_id": sid, "msg_id": 0, "payload": payload}), "bad_request");
     err(json!({"op": "agent_reply_seal", "sk": acct_sk, "session_pub": sess_pub, "session_id": "a.b", "msg_id": 7, "payload": payload}), "format");
+
+    // agent 一侧：发消息、解开回复
+    let e = ok(json!({"op": "agent_seal", "account": acct_pub, "sk": v["session_sk"], "session_id": sid, "payload": r#"{"v":1,"kind":"receipt","reply_id":3,"n":"x","received_at":1}"#}))["envelope"].clone();
+    assert_eq!(ok(json!({"op": "agent_open", "keys": [acct_sk], "session_pub": sess_pub, "session_id": sid, "envelope": e}))["payload"]["kind"], "receipt");
+    assert_eq!(ok(json!({"op": "agent_reply_open", "sk": v["session_sk"], "account": acct_pub, "envelope": env, "msg_id": 7}))["payload"]["text"], "保留");
+    err(json!({"op": "agent_reply_open", "sk": v["session_sk"], "account": acct_pub, "envelope": env, "msg_id": 8}), "format");
 }

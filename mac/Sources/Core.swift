@@ -144,6 +144,52 @@ enum Core {
         return (n, m.utf8.map { $0 == UInt8(ascii: "1") })
     }
 
+    // MARK: agent 双向（docs/agent-mcp.md §11）
+
+    static func agentCommit(pub: String, account: String, nonce: String) throws -> String {
+        try str(try call("agent_commit", ["pub": pub, "account": account, "nonce": nonce]), "commit")
+    }
+
+    static func agentSAS(pub: String, account: String, na: String, nb: String) throws -> String {
+        try str(try call("agent_sas", ["pub": pub, "account": account, "na": na, "nb": nb]), "code")
+    }
+
+    static func agentAttestSeal(sk: String, sessionID: String, pub: String, name: String, approvedAt: Int64) throws -> String {
+        try str(try call("agent_attest_seal", ["sk": sk, "session_id": sessionID, "pub": pub, "name": name, "approved_at": approvedAt]), "attest")
+    }
+
+    /// 核对会话证明 → 证明里写的名称（会话 id、公钥对不上时抛 format）
+    static func agentAttestOpen(sk: String, attest: String, sessionID: String, pub: String) throws -> String {
+        try str(try call("agent_attest_open", ["sk": sk, "attest": attest, "session_id": sessionID, "pub": pub]), "name")
+    }
+
+    /// 解开 agent 消息或回执（hje2）→ 载荷
+    static func agentOpen(keys: [String], sessionPub: String, sessionID: String, envelope: String) throws -> [String: Any] {
+        guard let p = try call("agent_open", ["keys": keys, "session_pub": sessionPub, "session_id": sessionID, "envelope": envelope])["payload"] as? [String: Any] else {
+            throw Failure(code: "format", message: "解开的内容格式不对")
+        }
+        return p
+    }
+
+    /// agent 一侧（自检用）：会话私钥把载荷加密给账号公钥 → hje2
+    static func agentSeal(account: String, sk: String, sessionID: String, payload: String) throws -> String {
+        try str(try call("agent_seal", ["account": account, "sk": sk, "session_id": sessionID, "payload": payload]), "envelope")
+    }
+
+    /// agent 一侧（自检用）：会话私钥解开回复
+    static func agentReplyOpen(sk: String, account: String, envelope: String, msgID: Int64) throws -> [String: Any] {
+        guard let p = try call("agent_reply_open", ["sk": sk, "account": account, "envelope": envelope, "msg_id": msgID])["payload"] as? [String: Any] else {
+            throw Failure(code: "format", message: "解开的内容格式不对")
+        }
+        return p
+    }
+
+    /// 回复 agent → (给会话的 hjq1, 给账号自己的 hje1 副本)
+    static func agentReplySeal(sk: String, sessionPub: String, sessionID: String, msgID: Int64, payload: String) throws -> (envelope: String, copy: String) {
+        let r = try call("agent_reply_seal", ["sk": sk, "session_pub": sessionPub, "session_id": sessionID, "msg_id": msgID, "payload": payload])
+        return (try str(r, "envelope"), try str(r, "copy"))
+    }
+
     // MARK: 消息与附件
 
     /// 用账号的私钥（可以多把）解开信封 → 载荷 {v, text, desp, type, atts:[{name, mime, size, key}]}

@@ -222,6 +222,16 @@ final class AppModel: ObservableObject {
     /// 正在批准的其他设备（§5），按 device_id
     @Published var e2eApprovals: [String: E2E.Approval] = [:]
     @Published var e2eApprovalPhases: [String: E2E.Approval.Phase] = [:]
+    /// agent 双向（AgentModel.swift）：会话列表、核实过的会话、Agent key、正在批准的登录请求
+    @Published var agentSessions: [Agent.Session] = []
+    @Published var agentVerified: [String: Agent.Verified] = [:]
+    @Published var agentKeys: [Agent.KeyInfo] = []
+    @Published var agentApprovals: [String: Agent.Approval] = [:]
+    @Published var agentPhases: [String: Agent.Phase] = [:]
+    /// 收到 kind "agent" 变更（回复、回执、会话变化）时加一：打开着的消息详情重新拉回复状态
+    @Published var agentRevision = 0
+    var agentRefreshing = false
+    var agentRefreshAgain = false
     /// 加密钥匙的安全存储：正常运行用钥匙串；自检、演示用内存（不碰钥匙串）
     let e2eSecrets: E2ESecrets
     var e2eRefreshing = false
@@ -653,6 +663,7 @@ final class AppModel: ObservableObject {
         e2eRequestPhase = nil
         e2eApprovals = [:]
         e2eApprovalPhases = [:]
+        resetAgent()
         defaults.removeObject(forKey: Self.key("e2eEnabled"))
         e2ePlainKept = []
         e2eSealedRetry = [:]
@@ -734,6 +745,7 @@ final class AppModel: ObservableObject {
                     await infoTask?.value      // 先知道服务端支不支持消息管理，第一次长轮询就带上变更游标
                     if support("channels") == .yes { await refreshChannels() }
                     if support("e2e") == .yes { Task { await refreshE2E() } }   // 功能清单到了才知道服务端有没有端到端加密
+                    if support("agent") == .yes { Task { await refreshAgent() } }
                     startPresence()
                     if updater.autoCheck, !isDemo { Task { await updater.check() } }
                     if isDemo { await demoAfterSync() }
@@ -842,6 +854,7 @@ final class AppModel: ObservableObject {
         "sync.settings": "设置实时同步（pushkey、设备、账户）",
         "poll.long": "省电的实时接收（按网络自适应等待时长）",
         "e2e": "端到端加密",
+        "agent": "agent 双向（回复 agent 的提问、批准 agent 登录）",
         "e2e.auto": "默认自动加密（服务器代加密、重置加密）",
         "register.invite": "注册邀请码", "register.e2e": "注册即开启加密",
         // 下面三项 Mac 客户端不需要做什么（iPhone 的 Bark 转发和软件源、服务端在管理后台自更新），认识即可，不提示「更新客户端」
@@ -1099,7 +1112,7 @@ final class AppModel: ObservableObject {
     /// 不认识的 kind 忽略
     func applyChanges(_ changes: [APIClient.MsgChange]) {
         guard !changes.isEmpty else { return }
-        var del: [Int64] = [], purge: [Int64] = [], sealed: [Int64] = [], arch: [Int64: Int] = [:], channelsChanged = false, keys = false, account = false, e2e = false
+        var del: [Int64] = [], purge: [Int64] = [], sealed: [Int64] = [], arch: [Int64: Int] = [:], channelsChanged = false, keys = false, account = false, e2e = false, agent = false
         for c in changes {
             switch c.kind {
             case "delete": del.append(c.id); arch[c.id] = nil
@@ -1112,10 +1125,12 @@ final class AppModel: ObservableObject {
             case "keys": keys = true
             case "devices", "account": account = true
             case "e2e": e2e = true       // 开启加密、设备请求批准 / 已批准、只接受加密消息（0.7.0 起）
+            case "agent": agent = true   // agent 登录请求、会话变化、回复、回执（0.10.0 起）
             default: break
             }
         }
         if e2e { Task { await refreshE2E() } }
+        if agent { Task { await refreshAgent() } }
         if !sealed.isEmpty { Task { await refetchSealed(sealed) } }
         if channelsChanged { Task { await refreshChannels() } }
         if keys || account { noteSettingsChanged(keys: keys, account: account) }
@@ -1980,6 +1995,18 @@ enum Notifier {
         c.sound = .default
         c.userInfo = ["e2e": true]
         let req = UNNotificationRequest(identifier: "e2e-\(r.notifyKey)", content: c, trigger: nil)
+        UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
+    }
+
+    /// agent 请求登录：点开进入设置的「Agent」页核对后批准
+    static func postAgentRequest(_ s: Agent.Session) {
+        if DemoMode.requested { return }
+        let c = UNMutableNotificationContent()
+        c.title = "agent 请求登录"
+        c.body = "「\(s.name)」想用你的账号收发消息。打开回笺核对 6 位核对码后批准。"
+        c.sound = .default
+        c.userInfo = ["agent": true]
+        let req = UNNotificationRequest(identifier: "agent-\(s.id)", content: c, trigger: nil)
         UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
     }
 

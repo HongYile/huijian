@@ -40,6 +40,12 @@ struct Message: Codable, Hashable, Identifiable {
     var e2e: String?
     /// 0.8.0 起：服务器代加密的消息为 "server"（发送端用普通 pushkey 发的明文，服务器收到后立即加密保存）；发送端加密的为 nil
     var sealed: String?
+    /// 0.10.0 起：agent 发来的消息（docs/agent-mcp.md）：会话 id、是否在等回复（服务器给的，只用来路由和排序）
+    var agentSession: String?
+    var ask = false
+    /// 本机解开 agent 消息后得到的：会话证明里的名称、快捷回复（只在本机产生，见 stripLocalFields）
+    var agentName: String?
+    var choices: [String] = []
     /// 本机解密结果：ok 已解开 / locked 本机没有私钥 / wrong_key 别的钥匙加密的 / format 已损坏；nil = 还没处理（或明文消息）
     var e2eStatus: String?
 
@@ -47,6 +53,8 @@ struct Message: Codable, Hashable, Identifiable {
     /// 否则被攻破的服务器可以写一条「已解密」的 🔒 消息
     mutating func stripLocalFields() {
         e2eStatus = nil
+        agentName = nil
+        choices = []
         for i in attachments.indices { attachments[i].key = nil }
     }
 
@@ -71,6 +79,8 @@ struct Message: Codable, Hashable, Identifiable {
         text = o.text
         desp = o.desp
         type = o.type
+        agentName = o.agentName
+        choices = o.choices
         doc = o.doc.flatMap { try? JSONDecoder().decode(MDDoc.self, from: $0) }
         preview = o.preview
         attachments = attachments.map { a in
@@ -95,6 +105,10 @@ struct Message: Codable, Hashable, Identifiable {
         case createdAt = "created_at"
         case e2eStatus = "e2e_status"
         case pushkeyID = "pushkey_id"
+        case agentSession = "agent_session"
+        case ask
+        case agentName = "agent_name"
+        case choices
     }
 
     /// 可选字段用 try? decodeIfPresent：缺字段直接 nil、不构造错误；类型不对仍按没有处理（和 try? decode 结果一样）
@@ -120,7 +134,15 @@ struct Message: Codable, Hashable, Identifiable {
         sealed = try? c.decodeIfPresent(String.self, forKey: .sealed)
         if sealed?.isEmpty == true { sealed = nil }
         e2eStatus = try? c.decodeIfPresent(String.self, forKey: .e2eStatus)
+        agentSession = try? c.decodeIfPresent(String.self, forKey: .agentSession)
+        if agentSession?.isEmpty == true { agentSession = nil }
+        ask = (try? c.decodeIfPresent(Bool.self, forKey: .ask)) ?? false
+        agentName = try? c.decodeIfPresent(String.self, forKey: .agentName)
+        choices = (try? c.decodeIfPresent([String].self, forKey: .choices)) ?? []
     }
+
+    /// agent 发来、已核实来源的消息（可以回复）
+    var isAgent: Bool { agentSession != nil }
 }
 
 enum JSONCoding {

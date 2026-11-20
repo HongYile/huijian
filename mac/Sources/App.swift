@@ -243,9 +243,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         let info = response.notification.request.content.userInfo
         let id = (info["id"] as? NSNumber)?.int64Value
         let e2e = info["e2e"] as? Bool == true
+        let agent = info["agent"] as? Bool == true
         Task { @MainActor in
-            // 设备请求解锁加密消息（T50）：打开设置的「加密」页核对后批准
-            if e2e { AppDelegate.shared?.showSettings(tab: .e2e) } else { AppDelegate.shared?.showMainWindow(select: id) }
+            // 设备请求解锁加密消息（T50）：打开设置的「加密」页核对后批准；agent 请求登录：打开「Agent」页
+            if e2e { AppDelegate.shared?.showSettings(tab: .e2e) }
+            else if agent { AppDelegate.shared?.showSettings(tab: .agent) }
+            else { AppDelegate.shared?.showMainWindow(select: id) }
             completionHandler()
         }
     }

@@ -268,6 +268,18 @@ fn dispatch(m: &Map<String, Value>) -> R {
             Ok(json!({"envelope": env, "copy": copy}))
         }
 
+        // agent 一侧（测试、自检用；命令行在 Go 里实现）
+        "agent_seal" => {
+            let env = agent::seal(&key32(m, "account")?, &key32(m, "sk")?, s(m, "session_id")?, s(m, "payload")?.as_bytes(), None).map_err(from_crypto)?;
+            Ok(json!({"envelope": env}))
+        }
+        "agent_reply_open" => {
+            let msg_id = m.get("msg_id").and_then(Value::as_i64).ok_or_else(|| bad("缺少参数 msg_id"))?;
+            let pt = agent::reply_open(&key32(m, "sk")?, &key32(m, "account")?, s(m, "envelope")?, msg_id).map_err(from_crypto)?;
+            let payload: Value = serde_json::from_slice(&pt).map_err(|_| Fail("format", "解开的内容不是 JSON".into()))?;
+            Ok(json!({"payload": payload}))
+        }
+
         // ---------- 消息与附件 ----------
         "open_message" => {
             let env = s(m, "envelope")?;

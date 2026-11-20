@@ -1806,6 +1806,10 @@ enum E2E {
         /// 本地解析的 doc（JSON，各端按自己的 MDDoc 解码）；不需要时 nil
         let doc: Data?
         let preview: String
+        /// agent 消息（hje2）：会话证明里的名称、是否在等回复、快捷回复（docs/agent-mcp.md §8）
+        var agentName: String? = nil
+        var ask = false
+        var choices: [String] = []
     }
 
     enum OpenResult: Equatable {
@@ -1813,6 +1817,7 @@ enum E2E {
         case locked         // 本机没有私钥
         case wrongKey       // 不是本机任何一把钥匙加密的
         case broken         // 信封格式不对或被篡改
+        case unverified     // agent 消息：会话没有本账号写的证明（来源无法核实）
 
         /// 保存在消息里的状态
         var code: String {
@@ -1821,6 +1826,7 @@ enum E2E {
             case .locked: return "locked"
             case .wrongKey: return "wrong_key"
             case .broken: return "format"
+            case .unverified: return "unverified"
             }
         }
     }
@@ -1830,6 +1836,7 @@ enum E2E {
         switch code {
         case "wrong_key": return T.t61
         case "format": return T.t62
+        case "unverified": return Agent.T.unverified
         default: return T.t60
         }
     }

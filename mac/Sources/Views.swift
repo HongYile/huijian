@@ -712,6 +712,7 @@ struct DetailView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         MessageHeader(message: focus)
                         MessageBody(message: focus, scrollTo: { anchor in withAnimation { proxy.scrollTo(anchor, anchor: .top) } })
+                        if focus.isAgent { AgentReplyPanel(message: focus).padding(.top, 22) }
                         if !focus.attachments.isEmpty && !focus.e2eUnreadable {
                             SectionTitle(title: "附件", trailing: "\(focus.attachments.count) 个 · \(humanSize(focus.attachments.reduce(0) { $0 + $1.size }))")
                                 .padding(.top, 26).padding(.bottom, 12)
@@ -826,7 +827,12 @@ struct MessageHeader: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 14)
             HStack(spacing: 6) {
-                if !message.source.isEmpty {
+                if message.isAgent {
+                    // agent 消息：名称取自会话证明（服务器给的 source 不用）
+                    Image(systemName: "terminal").font(.system(size: 10))
+                    Text(message.agentName ?? "agent")
+                    Text("·")
+                } else if !message.source.isEmpty {
                     Image(systemName: "paperplane").font(.system(size: 10))
                     Text(message.source)
                     Text("·")
@@ -1498,9 +1504,9 @@ struct PairView: View {
 
 enum SettingsTab: String, CaseIterable {
     // 账户第一、Pushkey 第二：最常用的放最前面
-    case account, keys, e2e, general, notify, server, network
-    var title: String { ["account": "账户", "general": "通用", "notify": "通知", "keys": "Pushkey", "e2e": "加密", "server": "服务器", "network": "网络"][rawValue]! }
-    var icon: String { ["account": "person.crop.circle", "general": "gearshape", "notify": "bell.badge", "keys": "key", "e2e": "lock.shield", "server": "server.rack", "network": "network"][rawValue]! }
+    case account, keys, e2e, agent, general, notify, server, network
+    var title: String { ["account": "账户", "general": "通用", "notify": "通知", "keys": "Pushkey", "e2e": "加密", "agent": "Agent", "server": "服务器", "network": "网络"][rawValue]! }
+    var icon: String { ["account": "person.crop.circle", "general": "gearshape", "notify": "bell.badge", "keys": "key", "e2e": "lock.shield", "agent": "terminal", "server": "server.rack", "network": "network"][rawValue]! }
 }
 
 /// 统一的「账户与设置」窗口：左侧边栏（账户在上），右侧内容。点主窗口左下角的头像直接打开「账户」页。
@@ -1529,6 +1535,7 @@ struct SettingsView: View {
                         case .network: NetworkSettings()
                         case .keys: KeysSettings()
                         case .e2e: E2ESettings()
+                        case .agent: AgentSettings()
                         case .server: ServerSettings()
                         }
                     }
