@@ -80,7 +80,9 @@ fn format_and_parse() {
     assert_eq!(p["code"], "654321");
     assert!(p.get("secret").is_none());
     // 错误
-    for bad in ["12345", "abcdef", "123456-XYZ", "huijian://pair", "huijian://pair?server=ftp%3A%2F%2Fx&code=123456", "huijian://pair?code=12%ZZ"] {
+    for bad in ["12345", "abcdef", "123456-XYZ", "huijian://pair", "huijian://pair?server=ftp%3A%2F%2Fx&code=123456", "huijian://pair?code=12%ZZ",
+        "huijian://pair?server=https%3A%2F%2Fgood.com%40evil.com&code=123456", "huijian://pair?server=https%3A%2F%2Fgo%E2%80%8Bod.com&code=123456",
+        "huijian://pair?server=https%3A%2F%2F%E4%BE%8B.com&code=123456"] {
         err(json!({"op": "pair_parse", "input": bad}), "format");
     }
     err(json!({"op": "pair_format", "server": "push.example.com", "code": "123456", "secret": secret}), "bad_request");

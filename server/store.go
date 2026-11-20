@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -267,7 +268,7 @@ func (s *Store) CreatePairCode(userID int64, ttl time.Duration, createdBy, keyWr
 	if createdBy != "" {
 		s.db.Exec(`UPDATE pair_codes SET expires_at=? WHERE user_id=? AND created_by=? AND used=0 AND expires_at>=?`, now()-1, userID, createdBy, now())
 	}
-	s.db.Exec(`UPDATE pair_codes SET key_wrap='' WHERE key_wrap!='' AND (used!=0 OR expires_at<?)`, now())
+	s.clearStalePairKeys()
 	for i := 0; i < 5; i++ {
 		code := randDigits(6)
 		_, err := s.db.Exec(`INSERT INTO pair_codes(code,user_id,expires_at,created_by,key_wrap) VALUES(?,?,?,?,?)`, code, userID, time.Now().Add(ttl).Unix(), createdBy, keyWrap)
@@ -286,6 +287,7 @@ func (s *Store) Pair(code string, p pairReq) (*Device, string, bool, error) {
 
 // PairWithKey 同 Pair，另外返回配对码带的 key_wrap（没有时为空），并把它从数据库清空
 func (s *Store) PairWithKey(code string, p pairReq) (d *Device, token string, reused bool, keyWrap string, err error) {
+	s.clearStalePairKeys()
 	d, token, reused, keyWrap, err = s.pair(code, p)
 	if err != nil {
 		keyWrap = ""
@@ -330,6 +332,7 @@ func (s *Store) pair(code string, p pairReq) (*Device, string, bool, string, err
 
 // PairCodeStatus 配对码状态（只查本账号的）：waiting 等待使用 / used 已使用 / expired 已过期或已作废
 func (s *Store) PairCodeStatus(userID int64, code string) (state string, expiresIn int64, usedBy string, usedAt int64, err error) {
+	s.clearStalePairKeys()
 	var exp, used int64
 	err = s.db.QueryRow(`SELECT expires_at, used, used_by, used_at FROM pair_codes WHERE code=? AND user_id=?`, code, userID).Scan(&exp, &used, &usedBy, &usedAt)
 	if err != nil {
@@ -387,10 +390,25 @@ func (s *Store) RevokeDevice(userID int64, id string) error {
 	if err == nil {
 		if n, _ := res.RowsAffected(); n > 0 {
 			s.dropDeviceWrap(userID, id) // 转交给它的私钥副本一并删除
+			s.expireDevicePairCodes(userID, id)
 			s.settingsChanged(userID, changeDevices)
 		}
 	}
 	return err
+}
+
+// expireDevicePairCodes：设备退出登录或被移除时，它生成、还没用掉的配对码一起作废（带钥匙的码不能比生成它的设备活得久）
+func (s *Store) expireDevicePairCodes(userID int64, deviceID string) {
+	if _, err := s.db.Exec(`UPDATE pair_codes SET expires_at=0, key_wrap='' WHERE user_id=? AND created_by=? AND used=0`, userID, deviceID); err != nil {
+		log.Printf("作废设备的配对码失败：%v", err)
+	}
+}
+
+// clearStalePairKeys：用掉、过期的配对码立即清空 key_wrap（不等一小时后整行删除，也不等有人再生成配对码）
+func (s *Store) clearStalePairKeys() {
+	if _, err := s.db.Exec(`UPDATE pair_codes SET key_wrap='' WHERE key_wrap!='' AND (used!=0 OR expires_at<?)`, now()); err != nil {
+		log.Printf("清空过期配对码的钥匙失败：%v", err)
+	}
 }
 
 // ---------- 消息 ----------

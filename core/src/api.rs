@@ -290,7 +290,9 @@ fn pair_parse(input: &str) -> R {
             }
         }
         if let Some(sv) = &server {
-            if !(sv.starts_with("http://") || sv.starts_with("https://")) || sv.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            // 不接受带用户信息（https://good.com@evil.com 这种伪装）、空白、控制字符和不可见字符的地址
+            let invisible = |c: char| c.is_whitespace() || c.is_control() || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}');
+            if !(sv.starts_with("http://") || sv.starts_with("https://")) || sv.contains('@') || sv.chars().any(invisible) || !sv.is_ascii() {
                 return Err(bad_fmt());
             }
         }

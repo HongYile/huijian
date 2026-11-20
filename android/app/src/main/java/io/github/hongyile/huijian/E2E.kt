@@ -569,11 +569,16 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
 
     // ---------- 配对码带钥匙（§12） ----------
 
-    /** 生成配对码时要锁进去的私钥：本机有账号 active 钥匙的私钥才带（§12.2）；没有（没解锁、钥匙已更换）返回 null */
-    fun activeSecretKey(local: List<String>, st: E2EState?): String? {
+    /**
+     * 生成配对码时要锁进去的私钥：本机有账号 active 钥匙的私钥才带（§12.2）；没有（没解锁、钥匙已更换）返回 null。
+     * pinned：本机钉住的账号公钥。有时 active 钥匙必须就是它（服务器说的 active 和钉住的不同 = T46，不带钥匙）
+     */
+    fun activeSecretKey(local: List<String>, st: E2EState?, pinned: String? = null): String? {
         val active = st?.takeIf { it.enabled }?.keys?.firstOrNull { it.active } ?: return null
+        if (pinned != null && pinned != active.pub) return null
         return local.firstOrNull { runCatching { c.publicKey(it).first }.getOrNull() == active.pub }
     }
+
 
     /** 生成配对码（§12.2）：sk 不为空且服务端支持 pair.key 时带钥匙 → (配对码, 有效秒数, 一次性钥匙或 null) */
     fun createPairCode(net: E2ENet, sk: String?, supportsKey: Boolean): Triple<String, Int, String?> {
@@ -990,6 +995,18 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
         const val ARGON_MEMORY_KIB = 65536
         const val ARGON_LANES = 1
         private const val HEX = "0123456789abcdefABCDEF"
+
+        /**
+         * 配对链接里的服务器地址能不能直接填进登录页（§12.5）：地址栏是空的、是默认服务器、或者本来就是它时可以；
+         * 否则要用户确认（防止被骗配对进别人的服务器）
+         */
+        fun pairServerAutoFill(current: String, link: String, defaultServer: String): Boolean {
+            val cur = canonicalServer(current)
+            return cur.isEmpty() || cur == canonicalServer(link) || cur == canonicalServer(defaultServer)
+        }
+
+        /** 地址里的主机名（显示给用户确认用） */
+        fun hostOf(server: String): String = runCatching { java.net.URI(canonicalServer(server)).host }.getOrNull() ?: server
     }
 }
 

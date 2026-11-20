@@ -17,6 +17,8 @@ struct LoginView: View {
     @State private var code = ""
     @State private var name = UIDevice.current.name
     @State private var scanning = false
+    /// 配对链接里的服务器地址和地址栏不同、又不能直接替换时：等用户确认（§12.5）
+    @State private var linkServer: String?
     @State private var busy = false
     @State private var error: String?
     @FocusState private var focus: Field?
@@ -85,13 +87,23 @@ struct LoginView: View {
                             .font(code.count <= 8 ? .title3.monospacedDigit() : .body.monospaced())
                             .focused($focus, equals: .code)
                             .onChange(of: code) { _, _ in
-                                // 配对链接里带服务器地址：填进服务器地址栏（用户看得到、可以改）
-                                if let sv = parsedCode?.server, API.normalize(sv) != API.normalize(server) { server = sv }
+                                // 配对链接里带服务器地址：地址栏空着 / 是默认的时直接填；不同时要用户确认（防钓鱼）
+                                linkServer = nil
+                                guard let sv = parsedCode?.server, API.normalize(sv) != API.normalize(server) else { return }
+                                if E2E.pairServerAutoFill(current: server, link: sv, defaultServer: AppInfo.defaultServer) { server = sv } else { linkServer = sv }
                             }
+                        if let sv = linkServer {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Label("这个配对码来自另一台服务器：\(E2E.hostOf(sv))", systemImage: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(Theme.warning)
+                                Text("不是你自己生成的配对码不要用。确认是你自己的服务器后再切换。").font(.footnote).foregroundStyle(Theme.text2)
+                                Button("改用 \(E2E.hostOf(sv))") { server = sv; linkServer = nil }
+                            }
+                        }
                     } footer: {
                         VStack(alignment: .leading, spacing: 4) {
                             if let p = parsedCode, p.secret != nil {
-                                Label("带钥匙的配对码：登录后直接解锁加密消息", systemImage: "key.fill").foregroundStyle(Theme.success)
+                                Label("带钥匙的配对码（服务器 \(E2E.hostOf(parsedCode?.server ?? server))）：登录后直接解锁加密消息", systemImage: "key.fill").foregroundStyle(Theme.success)
                             } else if parsedCode == nil && code.trimmingCharacters(in: .whitespaces).count > 6 {
                                 Text("配对码格式不对").foregroundStyle(Theme.danger)
                             }
@@ -279,6 +291,7 @@ struct LoginView: View {
         if url.isEmpty { error = "请填写服务器地址"; return }
         let pc = parsedCode
         if usePair && pc == nil { error = "配对码格式不对：应为 6 位数字，或扫码 / 复制得到的长配对码"; return }
+        if usePair && linkServer != nil { error = "请先确认服务器地址"; return }
         if !usePair && (username.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty) { error = "请填写用户名和密码"; return }
         if mode == .register {
             if let p = ManageRules.usernameProblem(username) ?? registerProblem { error = p; return }

@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.hongyile.huijian.Api
 import io.github.hongyile.huijian.BuildConfig
+import io.github.hongyile.huijian.E2ELogic
 import io.github.hongyile.huijian.ConnState
 import io.github.hongyile.huijian.E2EError
 import io.github.hongyile.huijian.E2EHub
@@ -90,8 +91,14 @@ fun LoginScreen(onSignedIn: () -> Unit) {
         Hub.pendingPairLink.value = null
         usePair = true; error = null; code = l
     }
-    // 链接里带服务器地址：填进服务器地址栏（用户看得到、可以改）
-    LaunchedEffect(parsed?.server) { parsed?.server?.let { if (Api.normalize(it) != Api.normalize(server)) server = it } }
+    // 链接里带服务器地址：地址栏空着 / 是默认的时直接填；不同时要用户确认（防钓鱼，§12.5）
+    var linkServer by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(parsed?.server) {
+        linkServer = null
+        val sv = parsed?.server ?: return@LaunchedEffect
+        if (Api.normalize(sv) == Api.normalize(server)) return@LaunchedEffect
+        if (E2ELogic.pairServerAutoFill(server, sv, BuildConfig.DEFAULT_SERVER)) server = sv else linkServer = sv
+    }
     val scanner = rememberLauncherForActivityResult(ScanContract()) { r ->
         val s = r.contents ?: return@rememberLauncherForActivityResult
         usePair = true; code = s
@@ -141,6 +148,7 @@ fun LoginScreen(onSignedIn: () -> Unit) {
                 return
             }
             usePair && parsed == null -> { error = "配对码格式不对：应为 6 位数字，或扫码 / 复制得到的长配对码"; return }
+            usePair && linkServer != null -> { error = "请先确认服务器地址"; return }
             !usePair && (username.isBlank() || password.isEmpty()) -> { error = "请填写用户名和密码"; return }
             registering -> (Manage.usernameProblem(username) ?: Manage.passwordProblem(password, password2, required = true)
                 ?: Manage.inviteProblem(reg.mode, invite))?.let { error = it; return }
@@ -219,7 +227,7 @@ fun LoginScreen(onSignedIn: () -> Unit) {
                 isError = parsed == null && code.trim().length > 6,
                 supportingText = {
                     Text(when {
-                        parsed?.secret != null -> "✓ 带钥匙的配对码：登录后直接解锁加密消息"
+                        parsed?.secret != null -> "✓ 带钥匙的配对码（服务器 ${E2ELogic.hostOf(parsed.server ?: server)}）：登录后直接解锁加密消息"
                         parsed == null && code.trim().length > 6 -> "配对码格式不对"
                         else -> "在已登录的设备上生成：手机「设置 → 账户与设备」，或 Mac「设置 → 账户」。扫二维码或输入长配对码，登录后直接解锁加密消息；只输 6 位时要再输一次密码解锁。3 分钟内有效，只能用一次"
                     })
@@ -227,6 +235,11 @@ fun LoginScreen(onSignedIn: () -> Unit) {
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { submit() }),
             )
+            linkServer?.let { sv ->
+                Text("⚠️ 这个配对码来自另一台服务器：${E2ELogic.hostOf(sv)}。不是你自己生成的配对码不要用，确认是你自己的服务器后再切换。",
+                    color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+                OutlinedButton({ server = sv; linkServer = null }, Modifier.testTag("useLinkServer")) { Text("改用 ${E2ELogic.hostOf(sv)}") }
+            }
         } else {
             OutlinedTextField(
                 username, { username = it }, Modifier.fillMaxWidth().testTag("username"),

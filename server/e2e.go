@@ -84,7 +84,9 @@ const (
 )
 
 // hpkeContext：base 模式，返回 AES-256-GCM 和 base_nonce（每个密钥只加密一条，序号固定为 0）
-func hpkeContext(shared, info []byte) (cipher.AEAD, []byte) { return hpkeContextMode(hpkeModeBase, shared, info) }
+func hpkeContext(shared, info []byte) (cipher.AEAD, []byte) {
+	return hpkeContextMode(hpkeModeBase, shared, info)
+}
 
 func hpkeContextMode(mode byte, shared, info []byte) (cipher.AEAD, []byte) {
 	pskIDHash := labeledExtract(hpkeSuite, nil, "psk_id_hash", nil)

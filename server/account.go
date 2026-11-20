@@ -1042,6 +1042,7 @@ func (h *Hub) handleRevokeOwnDevice(w http.ResponseWriter, r *http.Request, d *D
 		return
 	}
 	h.st.dropDeviceWrap(d.UserID, id) // 转交给它的私钥副本一并删除
+	h.st.expireDevicePairCodes(d.UserID, id)
 	h.st.settingsChanged(d.UserID, changeDevices)
 	writeJSON(w, 200, map[string]any{"ok": true})
 }

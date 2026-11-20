@@ -1453,11 +1453,18 @@ enum E2ESelfTest {
                     return (r, E2E.KeyRing(secrets: sec, scope: E2E.scope(server: sid, accountID: aidA), defaults: m.defaults))
                 }
                 let stK = try await apiA.state()
-                let active = E2E.activeSecretKey(keysA, state: stK)
+                let active = E2E.activeSecretKey(keysA, state: stK, pinned: ringA.pinned)
                 check("配对码带钥匙：本机找到账号 active 钥匙的私钥", active == skA, "")
                 let strayKey = try Core.keypair().sk
-                check("配对码带钥匙：本机没解锁（没有私钥）时不带钥匙", E2E.activeSecretKey([], state: stK) == nil
-                      && E2E.activeSecretKey([strayKey], state: stK) == nil, "")
+                let strayPub = try Core.publicKey(strayKey).pub
+                check("配对码带钥匙：本机没解锁（没有私钥）、钉住的公钥和服务器说的 active 不同（T46）时不带钥匙",
+                      E2E.activeSecretKey([], state: stK, pinned: nil) == nil && E2E.activeSecretKey([strayKey], state: stK, pinned: nil) == nil
+                      && E2E.activeSecretKey(keysA, state: stK, pinned: strayPub) == nil, "")
+                check("配对链接的服务器地址：空的、默认的、相同的直接填，不同的要确认",
+                      E2E.pairServerAutoFill(current: "", link: "https://a.example", defaultServer: "https://d.example")
+                      && E2E.pairServerAutoFill(current: "https://d.example/", link: "https://a.example", defaultServer: "https://d.example")
+                      && E2E.pairServerAutoFill(current: "https://A.example:443", link: "https://a.example", defaultServer: "")
+                      && !E2E.pairServerAutoFill(current: "https://mine.example", link: "https://evil.example", defaultServer: "https://d.example"), "")
                 let pc = try await retry { try await E2E.createPairCode(apiA, sk: active, supportsKey: true) }
                 guard let secret = pc.secret else { check("带钥匙的配对码：返回一次性钥匙", false, ""); throw E2E.Failure(.server, "没有一次性钥匙") }
                 let f = try Core.pairFormat(server: sid, code: pc.code, secret: secret)

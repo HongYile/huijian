@@ -1000,6 +1000,7 @@ final class AppModel: ObservableObject {
                     return true
                 }
                 defaults.set(cur, forKey: k)
+                if e2ePendingLoginKey != nil { loadE2EKeys() }      // 登录时暂存的私钥：账号确认了，现在保存
             }
             deviceName = me.name
             defaults.set(me.name, forKey: Self.key("deviceName"))

@@ -323,6 +323,15 @@ class E2ETest {
         assertNull(logic.activeSecretKey(emptyList(), st))
         assertNull(logic.activeSecretKey(listOf("skX"), st))
         assertNull(logic.activeSecretKey(listOf(key.sk), null))
+        // 钉住的公钥和服务器说的 active 不同（T46）：不带钥匙
+        assertEquals(key.sk, logic.activeSecretKey(listOf(key.sk), st, key.pub))
+        assertNull(logic.activeSecretKey(listOf(key.sk), st, "pubOther"))
+        // 配对链接的服务器地址：空的、默认的、相同的直接填，不同的要确认
+        assertTrue(E2ELogic.pairServerAutoFill("", "https://a.example", "https://d.example"))
+        assertTrue(E2ELogic.pairServerAutoFill("https://d.example/", "https://a.example", "https://d.example"))
+        assertTrue(E2ELogic.pairServerAutoFill("https://A.example:443", "https://a.example", ""))
+        assertFalse(E2ELogic.pairServerAutoFill("https://mine.example", "https://evil.example", "https://d.example"))
+        assertEquals("evil.example", E2ELogic.hostOf("https://evil.example:8443/x"))
 
         val (code, ttl, secret) = logic.createPairCode(s.net("d_mac"), key.sk, supportsKey = true)
         assertEquals(180, ttl); assertNotNull(secret)

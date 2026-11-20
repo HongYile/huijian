@@ -1243,6 +1243,8 @@ struct PairView: View {
     @State private var uncertainRegister: String?
     /// 这个服务器的注册方式（/v1/info）："closed" / "invite" / "open"；没取到时 nil，照旧显示注册
     @State private var registerMode: String?
+    /// 配对链接里的服务器地址和地址栏不同、又不能直接替换时：等用户确认（§12.5）
+    @State private var linkServer: String?
 
     var subtitle: String {
         switch mode {
@@ -1264,7 +1266,7 @@ struct PairView: View {
 
     var canSubmit: Bool {
         switch mode {
-        case .code: return parsedCode != nil
+        case .code: return parsedCode != nil && linkServer == nil
         case .login: return !username.trimmingCharacters(in: .whitespaces).isEmpty && !password.isEmpty
         case .register: return !registerClosed && AppModel.normalizeUsername(username).count >= 2 && AppModel.usernameProblem(username) == nil
             && password.count >= 8 && password == password2 && registerProblem == nil
@@ -1323,12 +1325,23 @@ struct PairView: View {
                             VStack(alignment: .leading, spacing: 5) {
                                 WarmField(placeholder: "6 位数字，或粘贴长配对码 / 配对链接", text: $code, large: code.count <= 8)
                                     .onChange(of: code) { _, _ in
-                                        // 配对链接里带服务器地址：填进上面的服务器地址栏（用户看得到、可以改）
-                                        if let sv = parsedCode?.server, AppModel.normalizeServer(sv) != AppModel.normalizeServer(server) { server = sv }
+                                        // 配对链接里带服务器地址：地址栏空着 / 是默认的时直接填；不同时要用户确认（防钓鱼）
+                                        linkServer = nil
+                                        guard let sv = parsedCode?.server, AppModel.normalizeServer(sv) != AppModel.normalizeServer(server) else { return }
+                                        if E2E.pairServerAutoFill(current: server, link: sv, defaultServer: AppModel.defaultServer) { server = sv } else { linkServer = sv }
                                     }
+                                if let sv = linkServer {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Label("这个配对码来自另一台服务器：\(E2E.hostOf(sv))", systemImage: "exclamationmark.triangle.fill")
+                                            .font(.system(size: 11.5)).foregroundStyle(Theme.warning)
+                                        Text("不是你自己生成的配对码不要用。确认是你自己的服务器后再切换。")
+                                            .font(.system(size: 11.5)).foregroundStyle(Theme.text3)
+                                        Button("改用 \(E2E.hostOf(sv))") { server = sv; linkServer = nil }.buttonStyle(SoftButtonStyle())
+                                    }
+                                }
                                 if let p = parsedCode {
                                     if p.secret != nil {
-                                        Label("带钥匙的配对码：登录后直接解锁加密消息", systemImage: "key.fill")
+                                        Label("带钥匙的配对码（服务器 \(E2E.hostOf(p.server ?? server))）：登录后直接解锁加密消息", systemImage: "key.fill")
                                             .font(.system(size: 11.5)).foregroundStyle(Theme.success)
                                     } else {
                                         Text("只输 6 位时，登录后需要输入密码解锁加密消息").font(.system(size: 11.5)).foregroundStyle(Theme.text3)

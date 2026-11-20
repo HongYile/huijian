@@ -260,6 +260,8 @@ struct AccountView: View {
     /// 带钥匙的配对码（§12.2）：长配对码和配对链接（二维码内容）。一次性钥匙只在这里（内存），用掉、过期、重新生成、离开页面都清掉
     @State private var codeText: String?
     @State private var codeLink: String?
+    /// 这次生成的配对码带没带钥匙（底部说明按它选，不按一次性钥匙是否还在内存里）
+    @State private var codeHadKey = false
 
     private static var demoCodeMade = false
 
@@ -459,7 +461,7 @@ struct AccountView: View {
     }
 
     var addDeviceFooter: String {
-        if code != nil { return codeLink != nil ? E2E.T.t80 : (model.e2eState?.enabled == true ? E2E.T.t81 : "新设备在登录页选「配对码」输入这 6 位数字，直接进入这个账号。") }
+        if code != nil { return codeHadKey ? E2E.T.t80 : (model.e2eState?.enabled == true ? E2E.T.t81 : "新设备在登录页选「配对码」输入这 6 位数字，直接进入这个账号。") }
         return "新设备在登录页选「配对码」输入，直接进入这个账号；也可以用用户名密码登录。本机已解锁时生成的二维码 / 长配对码，新设备登录后直接解锁加密消息。重新生成后，之前的配对码立即作废。"
     }
 
@@ -487,10 +489,17 @@ struct AccountView: View {
         }
     }
 
+    /// 复制长配对码 / 链接：标成敏感内容（剪贴板管理工具不记录），3 分钟后如果剪贴板没被别的内容覆盖就清空
     func copyPair(_ s: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(s, forType: .string)
-        codeMsg = "已复制。只粘贴到自己的设备上，3 分钟内有效。"
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(s, forType: .string)
+        pb.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+        let mark = pb.changeCount
+        DispatchQueue.main.asyncAfter(deadline: .now() + 180) {
+            if pb.changeCount == mark { pb.clearContents() }
+        }
+        codeMsg = "已复制（3 分钟后自动清除）。只粘贴到自己的设备上。"
     }
 
     func makeCode() async {
@@ -500,7 +509,7 @@ struct AccountView: View {
         codeText = nil; codeLink = nil
         do {
             // 本机已解锁、服务端支持时带钥匙（§12.2）：新设备扫码 / 输入长配对码后直接解锁
-            let sk = E2E.activeSecretKey(model.e2eKeys, state: model.e2eState)
+            let sk = E2E.activeSecretKey(model.e2eKeys, state: model.e2eState, pinned: model.e2eRing?.pinned)
             let r = try await E2E.createPairCode(api, sk: sk, supportsKey: model.support("pair.key") == .yes)
             if let secret = r.secret {
                 let f = try E2E.coreCall { try Core.pairFormat(server: model.server, code: r.code, secret: secret) }
@@ -508,6 +517,7 @@ struct AccountView: View {
                 codeLink = f.link
             }
             code = r.code
+            codeHadKey = r.secret != nil
             codeExpires = Date().addingTimeInterval(TimeInterval(r.expiresIn))
             codeUsedBy = nil
             codeDead = false

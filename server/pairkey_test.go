@@ -115,6 +115,26 @@ func TestPairKeyFlow(t *testing.T) {
 		t.Fatalf("重置后带钥匙的配对码应显示已作废：%s", s)
 	}
 	e.must(200, "POST", "/v1/pair", "", map[string]any{"code": plain, "name": "z", "platform": "ios", "fingerprint": "fp-pk-000005"})
+
+	// 生成配对码的设备退出登录 / 被移除：它带钥匙、没用掉的码一起作废（审查 3）
+	pre := map[string]any{"key_wrap": wrap}
+	_, tokD, _, _ := e.h.st.LoginDevice(pairReq{UserID: u.ID, Name: "mac2", Platform: "macos", Fingerprint: "fp-pk-000006"})
+	k1 := e.must(200, "POST", "/v1/pair-codes", tokD, pre)["code"].(string)
+	e.must(200, "POST", "/v1/logout", tokD, nil)
+	e.must(403, "POST", "/v1/pair", "", map[string]any{"code": k1, "name": "w", "platform": "ios"})
+	dE, tokE, _, _ := e.h.st.LoginDevice(pairReq{UserID: u.ID, Name: "mac3", Platform: "macos", Fingerprint: "fp-pk-000007"})
+	k2 := e.must(200, "POST", "/v1/pair-codes", tokE, pre)["code"].(string)
+	_, tokF, _, _ := e.h.st.LoginDevice(pairReq{UserID: u.ID, Name: "pc2", Platform: "windows", Fingerprint: "fp-pk-000008"})
+	e.must(200, "POST", "/v1/devices/"+dE.ID+"/revoke", tokF, nil)
+	e.must(403, "POST", "/v1/pair", "", map[string]any{"code": k2, "name": "w", "platform": "ios"})
+	// 过期的码：查状态时就清空 key_wrap，不等有人再生成（审查 5）
+	k3 := e.must(200, "POST", "/v1/pair-codes", tokF, pre)["code"].(string)
+	e.h.st.db.Exec(`UPDATE pair_codes SET expires_at=? WHERE code=?`, now()-1, k3)
+	e.must(200, "GET", "/v1/pair-codes/"+k3, tokF, nil)
+	e.h.st.db.QueryRow(`SELECT key_wrap FROM pair_codes WHERE code=?`, k3).Scan(&stored)
+	if stored != "" {
+		t.Fatal("查过期配对码的状态时应清空 key_wrap")
+	}
 }
 
 func hasFeature(id string) bool {

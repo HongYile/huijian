@@ -56,9 +56,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.AnnotatedString
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -242,9 +240,20 @@ private fun PairCodeCard(onUsed: () -> Unit, say: (String) -> Unit) {
     // 带钥匙的配对码（§12.2）：长配对码和配对链接（二维码内容）。一次性钥匙只在内存里，用掉、过期、重新生成、离开页面都清掉
     var keyText by remember { mutableStateOf<String?>(null) }
     var keyLink by remember { mutableStateOf<String?>(null) }
-    val clipboard = LocalClipboardManager.current
+    val ctx = LocalContext.current
     val e2eEnabled = E2EHub.state.collectAsStateWithLifecycle().value?.enabled == true
+    /** 这次生成的配对码带没带钥匙（底部说明按它选） */
+    var hadKey by remember { mutableStateOf(false) }
     DisposableEffect(Unit) { onDispose { keyText = null; keyLink = null } }
+    // 显示二维码 / 长配对码期间窗口加 FLAG_SECURE：不能截图，最近任务的缩略图里也看不到（和恢复码页一样）
+    val showingKey = keyLink != null
+    DisposableEffect(showingKey) {
+        var c: android.content.Context? = ctx
+        while (c is android.content.ContextWrapper && c !is android.app.Activity) c = c.baseContext
+        val w = (c as? android.app.Activity)?.window
+        if (showingKey) w?.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        onDispose { if (showingKey) w?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE) }
+    }
 
     LaunchedEffect(code) { while (code != null) { now = System.currentTimeMillis(); delay(1000) } }
     LaunchedEffect(code) {
@@ -267,7 +276,7 @@ private fun PairCodeCard(onUsed: () -> Unit, say: (String) -> Unit) {
 
     val footer = when {
         code == null -> "新设备在登录页选「配对码」，扫码或输入后直接进入这个账号。本机已解锁时生成的二维码 / 长配对码，新设备登录后直接解锁加密消息。重新生成后，之前的配对码立即作废。"
-        keyLink != null -> E2EText.T80
+        hadKey -> E2EText.T80
         e2eEnabled -> E2EText.T81
         else -> "新设备在登录页选「配对码」输入这 6 位数字，直接进入这个账号。"
     }
@@ -279,7 +288,7 @@ private fun PairCodeCard(onUsed: () -> Unit, say: (String) -> Unit) {
             Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 QrCode(link, Modifier.size(220.dp).testTag("pairQr"))
                 SelectionContainer { Text(text, fontFamily = FontFamily.Monospace, fontSize = 13.sp, modifier = Modifier.testTag("pairLongCode")) }
-                OutlinedButton({ clipboard.setText(AnnotatedString(text)); say("已复制。只粘贴到自己的设备上，3 分钟内有效。") }) { Text("复制长配对码") }
+                OutlinedButton({ copyText(ctx, "回笺配对码", text, sensitive = true) }) { Text("复制长配对码") }
             }
         }
         if (c != null) {
@@ -310,12 +319,13 @@ private fun PairCodeCard(onUsed: () -> Unit, say: (String) -> Unit) {
                 try {
                     keyText = null; keyLink = null
                     // 本机已解锁、服务端支持时带钥匙（§12.2）：新设备扫码 / 输入长配对码后直接解锁
-                    val sk = E2EHub.logic.activeSecretKey(E2EHub.secretKeys(), E2EHub.state.value)
+                    val sk = E2EHub.logic.activeSecretKey(E2EHub.secretKeys(), E2EHub.state.value, E2EHub.pinned())
                     val (pc, expiresIn, secret) = api { a ->
                         val supports = sk != null && runCatching { Manage.hasFeature(a.info(), "pair.key") }.getOrDefault(false)
                         E2EHub.logic.createPairCode(a, sk, supports)
                     }
                     if (secret != null) Core.pairFormat(Hub.store.server, pc, secret).let { (t, l) -> keyText = t; keyLink = l }
+                    hadKey = secret != null
                     code = pc; expiresAt = System.currentTimeMillis() + expiresIn * 1000L
                     usedBy = null; dead = false; now = System.currentTimeMillis()
                 } catch (e: Exception) { say("生成失败：${describe(e)}") } finally { busy = false }

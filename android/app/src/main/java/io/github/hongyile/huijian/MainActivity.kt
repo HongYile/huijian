@@ -158,6 +158,8 @@ class MainActivity : ComponentActivity() {
         if (i?.action == Intent.ACTION_VIEW && data?.scheme == "huijian" && data.host == "pair") {
             if (Hub.loggedIn) android.widget.Toast.makeText(this, E2EText.T84, android.widget.Toast.LENGTH_LONG).show()
             else Hub.pendingPairLink.value = data.toString()
+            // 链接里有一次性钥匙：处理完就从 Activity 里去掉（不留在 getIntent()，从最近任务重新打开时也不会再填一次）
+            setIntent(Intent(this, MainActivity::class.java))
             return
         }
         val id = i?.getLongExtra(Notifier.EXTRA_MESSAGE_ID, -1L) ?: -1L

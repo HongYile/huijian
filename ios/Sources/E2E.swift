@@ -921,11 +921,22 @@ enum E2E {
 
     // MARK: - 配对码带钥匙（§12）
 
-    /// 生成配对码时要锁进去的私钥：本机有账号 active 钥匙的私钥才带（§12.2）；没有（没解锁、钥匙已更换）返回 nil
-    static func activeSecretKey(_ keys: [String], state: State?) -> String? {
-        guard let st = state, st.enabled, let active = st.activeKey else { return nil }
+    /// 生成配对码时要锁进去的私钥：本机有账号 active 钥匙的私钥才带（§12.2）；没有（没解锁、钥匙已更换）返回 nil。
+    /// pinned：本机钉住的账号公钥。有时 active 钥匙必须就是它（服务器说的 active 和钉住的不同 = T46，不带钥匙）
+    static func activeSecretKey(_ keys: [String], state: State?, pinned: String?) -> String? {
+        guard let st = state, st.enabled, let active = st.activeKey, pinned == nil || pinned == active.pub else { return nil }
         return keys.first { (try? Core.publicKey($0).pub) == active.pub }
     }
+
+    /// 配对链接里的服务器地址能不能直接填进登录页（§12.5）：地址栏是空的、是默认服务器、或者本来就是它时可以；
+    /// 否则要用户确认（防止被骗配对进别人的服务器）
+    static func pairServerAutoFill(current: String, link: String, defaultServer: String) -> Bool {
+        let cur = normalizeServer(current)
+        return cur.isEmpty || cur == normalizeServer(link) || cur == normalizeServer(defaultServer)
+    }
+
+    /// 地址里的主机名（显示给用户确认用）
+    static func hostOf(_ server: String) -> String { URL(string: normalizeServer(server))?.host ?? server }
 
     /// 生成配对码（§12.2）：sk 不为 nil 且服务端支持 pair.key 时带钥匙。返回 6 位配对码、有效秒数、一次性钥匙（不带钥匙时 nil）
     static func createPairCode(_ api: API, sk: String?, supportsKey: Bool) async throws -> (code: String, expiresIn: Int, secret: String?) {

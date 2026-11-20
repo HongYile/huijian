@@ -952,16 +952,21 @@ private struct PairCodeSection: View {
     @State private var keyText: String?
     @State private var keyLink: String?
     @State private var copied = false
+    /// 这次生成的配对码带没带钥匙（底部说明按它选）
+    @State private var hadKey = false
+    /// App 不在前台时遮住二维码和长配对码（系统的多任务快照会存到磁盘上）
+    @Environment(\.scenePhase) private var phase
 
     var body: some View {
         Section {
-            if let link = keyLink, let text = keyText, usedBy == nil, !dead {
+            if let link = keyLink, let text = keyText, usedBy == nil, !dead, phase == .active {
                 VStack(spacing: 10) {
                     QRCodeView(text: link).frame(width: 220, height: 220)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                     Text(text).font(.footnote.monospaced()).multilineTextAlignment(.center).textSelection(.enabled)
-                    Button(copied ? "已复制" : "复制长配对码") {
-                        UIPasteboard.general.string = text
+                    Button(copied ? "已复制（3 分钟后自动清除）" : "复制长配对码") {
+                        // 3 分钟后过期；不加 localOnly：要能用通用剪贴板粘贴到 Mac（§12.3）
+                        UIPasteboard.general.setItems([[UTType.plainText.identifier: text]], options: [.expirationDate: Date().addingTimeInterval(180)])
                         copied = true
                     }
                     .buttonStyle(.bordered)
@@ -1010,7 +1015,6 @@ private struct PairCodeSection: View {
             Text(footer)
         }
         .task(id: code) { await watch() }
-        .onDisappear { keyText = nil; keyLink = nil }
         .task {
             // 截图用：自动生成一个配对码
             if code == nil, UserDefaults.standard.bool(forKey: "demoPairCode") { await make() }
@@ -1018,7 +1022,7 @@ private struct PairCodeSection: View {
     }
 
     private var footer: String {
-        if code != nil { return keyLink != nil ? E2E.T.t80 : (model.e2eState?.enabled == true ? E2E.T.t81 : "新设备在登录页选「配对码」输入这 6 位数字，直接进入这个账号。") }
+        if code != nil { return hadKey ? E2E.T.t80 : (model.e2eState?.enabled == true ? E2E.T.t81 : "新设备在登录页选「配对码」输入这 6 位数字，直接进入这个账号。") }
         return "新设备在登录页选「配对码」，扫码或输入后直接进入这个账号。本机已解锁时生成的二维码 / 长配对码，新设备登录后直接解锁加密消息。重新生成后，之前的配对码立即作废。"
     }
 
@@ -1030,7 +1034,7 @@ private struct PairCodeSection: View {
         do {
             guard let api = model.e2eAPI else { throw APIError.invalid("尚未登录") }
             // 本机已解锁、服务端支持时带钥匙（§12.2）：新设备扫码 / 输入长配对码后直接解锁
-            let sk = E2E.activeSecretKey(model.e2eKeys, state: model.e2eState)
+            let sk = E2E.activeSecretKey(model.e2eKeys, state: model.e2eState, pinned: model.e2eRing?.pinned)
             let r = try await E2E.createPairCode(api, sk: sk, supportsKey: model.supports("pair.key") == true)
             if let secret = r.secret {
                 let f = try E2E.coreCall { try Core.pairFormat(server: model.settings.server, code: r.code, secret: secret) }
@@ -1038,6 +1042,7 @@ private struct PairCodeSection: View {
                 keyLink = f.link
             }
             code = r.code
+            hadKey = r.secret != nil
             expires = Date().addingTimeInterval(TimeInterval(r.expiresIn))
             usedBy = nil
             dead = false

@@ -7,6 +7,8 @@ struct QRScannerSheet: View {
     let onCode: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var problem: String?
+    /// 拿到相机权限后才创建相机界面（第一次授权时如果先建好、用户点「允许」后会黑屏）
+    @State private var authorized = AVCaptureDevice.authorizationStatus(for: .video) == .authorized
 
     var body: some View {
         NavigationStack {
@@ -22,6 +24,8 @@ struct QRScannerSheet: View {
                         }
                     }
                     .foregroundStyle(.white).padding(32)
+                } else if !authorized {
+                    ProgressView().tint(.white)
                 } else {
                     QRCameraView(onCode: { code in
                         onCode(code)
@@ -47,9 +51,9 @@ struct QRScannerSheet: View {
         }
         .task {
             switch AVCaptureDevice.authorizationStatus(for: .video) {
-            case .authorized: break
+            case .authorized: authorized = true
             case .notDetermined:
-                if !(await AVCaptureDevice.requestAccess(for: .video)) { problem = Self.denied }
+                if await AVCaptureDevice.requestAccess(for: .video) { authorized = true } else { problem = Self.denied }
             default: problem = Self.denied
             }
         }

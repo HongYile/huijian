@@ -64,7 +64,8 @@ extension AppModel {
     /// 登录时解开、但当时取不到账号 id 的私钥（只在内存里），这时核对后保存
     func loadE2EKeys() {
         guard let ring = e2eRing else { e2eKeys = []; return }
-        if let p = e2ePendingLoginKey {
+        // 登录时暂存的私钥：等 /v1/me 确认了这次登录的账号再存（account 还是上次记下的账号时不能存，审查 6）
+        if let p = e2ePendingLoginKey, account != nil {
             do {
                 try E2E.acceptOwnKey(p.sk, keys: p.keys, ring: ring)      // 来自密码（§11.4）
                 e2ePendingLoginKey = nil
