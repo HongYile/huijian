@@ -165,3 +165,58 @@ Mac、iPhone、安卓同步做：
 2. 做快捷回复按钮。
 3. 做送达回执：agent 收到后回复的人能看到提示（5.1）。
 4. 所有账号都加密，没有不加密的账号。
+
+## 11. 格式与接口细节（2026-11-20 定稿，实现以此为准）
+
+### 11.1 钥匙和令牌
+
+| 名称 | 格式 | 说明 |
+|---|---|---|
+| Agent key | `AK_` + 32 位小写十六进制 | 在设备上新建（`POST /v1/agent/keys`），明文只返回这一次，服务器只存 SHA-256。吊销后它登录的所有会话一起结束 |
+| 会话令牌 | `ST_` + 32 位小写十六进制 | 批准后由服务器生成，agent 取走一次后服务器只留哈希 |
+| 会话钥匙对 | X25519 | agent 本机生成，私钥只在 `~/.huijian/agent/<会话名>/`（权限 600） |
+
+### 11.2 密码学格式（都在共用核心 / Go 里实现，各端不自己拼）
+
+| 用途 | 格式 | 算法 |
+|---|---|---|
+| 登录承诺 | `commit = SHA-256("huijian agent v1 commit" ‖ 会话公钥 ‖ 账号公钥 ‖ nb)` | 同设备批准，只换前缀 |
+| 核对码 | `SHA-256("huijian agent v1 sas" ‖ 会话公钥 ‖ 账号公钥 ‖ na ‖ nb)` 前 4 字节（大端）mod 1000000，6 位 | 同上 |
+| 会话证明 `hja1` | `hja1.<base64url(nonce‖密文)>`，AES-256-GCM，附加数据 `hja1`，钥匙 `HKDF-SHA256(salt="huijian agent v1 attest", ikm=账号私钥)`，明文 `{"session_id","pub","name","approved_at"}` | 只有持有账号私钥的设备能写、能验 |
+| agent → 账号 `hje2` | `hje2.<kid>.<session_id>.<base64url(enc‖ct)>`；HPKE auth（发送方 = 会话私钥，接收方 = 账号公钥），info `huijian agent v1 message`，附加数据 `hje2.<kid>.<session_id>` | 消息和回执都用它 |
+| 消息载荷 | `{"v":1,"kind":"message","text","desp","ask":bool,"choices":[…],"seq":n,"sent_at":秒}` | `choices` 最多 4 个、每个最长 20 字 |
+| 回执载荷 | `{"v":1,"kind":"receipt","reply_id":n,"n":"<回复里的随机数>","received_at":秒}` | |
+| 设备 → agent `hjq1` | `hjq1.<session_id>.<base64url(enc‖ct)>`；HPKE auth（发送方 = 账号私钥，接收方 = 会话公钥，取自会话证明），info `huijian agent v1 reply`，附加数据 `hjq1.<session_id>.<msg_id>` | |
+| 回复载荷 | `{"v":1,"text","n":"<16 字节随机数 base64url>","sent_at":秒,"device":"<设备名>"}` | 文字最长 16 KB；agent 记下处理过的 `n`（保留 3 天），重放的丢弃 |
+| 回复副本 | 普通 `hje1` 信封（加密给账号公钥），载荷同上 | 同账号其他设备靠它显示回复内容（`hjq1` 只有 agent 解得开） |
+
+设备收到 `hje2` 消息：先用会话证明拿到会话公钥（证明解不开、`session_id` 对不上 → 显示「来源无法核实」，不显示回复按钮），再用 auth 模式解开；发送方核对失败同样当作「来源无法核实」。
+
+### 11.3 接口
+
+认证：`AK` = `Authorization: Bearer AK_…`；`ST` = `Authorization: Bearer ST_…`；`设备` = 现有设备 token。
+
+| 请求 | 认证 | 说明 |
+|---|---|---|
+| `POST /v1/agent/keys` | 设备 | 新建 Agent key → `{"id","key","prefix","created_at"}`；内测每账号 1 把，已有时 409 |
+| `GET /v1/agent/keys` | 设备 | `{"keys":[{"id","prefix","created_at","last_used"}]}` |
+| `DELETE /v1/agent/keys/{id}` | 设备 | 吊销，它登录的会话全部结束 |
+| `GET /v1/agent/info` | AK | `{"account_pub","kid","limits":{…}}`；账号还没有钥匙时 409 |
+| `POST /v1/agent/sessions` | AK | `{name, pub, commit}` → `{"session_id"}`；等待批准的请求每账号最多 3 个，10 分钟没批准自动作废 |
+| `GET /v1/agent/sessions/{id}` | AK | `{"state","challenge"}`；`state`：`pending` / `approved` / `denied` / `expired` / `ended`。批准后第一次查询带 `token`（只给一次） |
+| `POST /v1/agent/sessions/{id}/reveal` | AK | `{nonce: nb}` |
+| `GET /v1/agent/sessions` | 设备 | `{"sessions":[{"id","name","pub","state","commit","challenge","reveal","attest","created_at","approved_at","last_seen","online"}]}`（不含已作废超过 3 天的） |
+| `POST /v1/agent/sessions/{id}/challenge` | 设备 | `{nonce: na}`；已被别的设备接手时 409 |
+| `POST /v1/agent/sessions/{id}/approve` | 设备 | `{attest: hja1…}`；必须已揭晓 |
+| `POST /v1/agent/sessions/{id}/deny` | 设备 | 拒绝 |
+| `DELETE /v1/agent/sessions/{id}` | 设备 | 结束会话：令牌作废，未取走的回复删除 |
+| `POST /v1/agent/push` | ST | `{e2e: hje2…, priority, topic, thread, ask, idem}` → `{"id"}`；`topic` 默认 `agent` |
+| `GET /v1/agent/replies?wait=<秒>` | ST | 长轮询（最长 60 秒）→ `{"replies":[{"reply_id","msg_id","e2e","created_at"}]}`；同时算作在线 |
+| `POST /v1/agent/replies/ack` | ST | `{receipts:[{reply_id, e2e: hje2 回执}]}`：服务器删掉回复密文、保存回执，通知设备 |
+| `DELETE /v1/agent/session` | ST | agent 自己退出（等于结束会话） |
+| `POST /v1/agent/replies` | 设备 | `{msg_id, e2e: hjq1…, copy: hje1…}` → `{"reply_id"}`；会话已结束时 409 |
+| `GET /v1/agent/replies/status?msg_id=` | 设备 | `{"replies":[{"reply_id","state","created_at","received_at","copy","receipt","device"}]}`；`state`：`sent` / `received` / `expired` |
+
+`GET /v1/messages` 里 agent 发来的消息多两个字段：`agent_session`（会话 id）、`ask`（布尔）。新的批准请求、回执、会话状态变化都记一条 `kind: "agent"` 的变更（`msg_id` 为 0），客户端收到后重新拉 `GET /v1/agent/sessions` 和正在看的消息的回复状态。
+
+第一版 agent 消息只有文字（不带附件）；要发图表请照旧用 `huijian push`（不能回复）。
