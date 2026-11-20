@@ -948,9 +948,27 @@ private struct PairCodeSection: View {
     @State private var dead = false
     @State private var busy = false
     @State private var error: String?
+    /// 带钥匙的配对码（§12.2）：长配对码和配对链接（二维码内容）。一次性钥匙只在内存里，用掉、过期、重新生成、离开页面都清掉
+    @State private var keyText: String?
+    @State private var keyLink: String?
+    @State private var copied = false
 
     var body: some View {
         Section {
+            if let link = keyLink, let text = keyText, usedBy == nil, !dead {
+                VStack(spacing: 10) {
+                    QRCodeView(text: link).frame(width: 220, height: 220)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    Text(text).font(.footnote.monospaced()).multilineTextAlignment(.center).textSelection(.enabled)
+                    Button(copied ? "已复制" : "复制长配对码") {
+                        UIPasteboard.general.string = text
+                        copied = true
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+            }
             if let code {
                 TimelineView(.periodic(from: .now, by: 1)) { ctx in
                     let left = max(0, Int((expires ?? ctx.date).timeIntervalSince(ctx.date).rounded()))
@@ -989,23 +1007,38 @@ private struct PairCodeSection: View {
         } header: {
             Text("添加设备到这个账号")
         } footer: {
-            Text("新设备在登录页选「配对码」输入这 6 位数字，直接进入这个账号（3 分钟内有效，只能用一次）。重新生成后，之前的配对码立即作废。")
+            Text(footer)
         }
         .task(id: code) { await watch() }
+        .onDisappear { keyText = nil; keyLink = nil }
         .task {
             // 截图用：自动生成一个配对码
             if code == nil, UserDefaults.standard.bool(forKey: "demoPairCode") { await make() }
         }
     }
 
+    private var footer: String {
+        if code != nil { return keyLink != nil ? E2E.T.t80 : (model.e2eState?.enabled == true ? E2E.T.t81 : "新设备在登录页选「配对码」输入这 6 位数字，直接进入这个账号。") }
+        return "新设备在登录页选「配对码」，扫码或输入后直接进入这个账号。本机已解锁时生成的二维码 / 长配对码，新设备登录后直接解锁加密消息。重新生成后，之前的配对码立即作废。"
+    }
+
     private func make() async {
         guard !busy else { return }
         busy = true
         defer { busy = false }
+        keyText = nil; keyLink = nil; copied = false
         do {
-            let r = try await model.requireAPI().createPairCode()
+            guard let api = model.e2eAPI else { throw APIError.invalid("尚未登录") }
+            // 本机已解锁、服务端支持时带钥匙（§12.2）：新设备扫码 / 输入长配对码后直接解锁
+            let sk = E2E.activeSecretKey(model.e2eKeys, state: model.e2eState)
+            let r = try await E2E.createPairCode(api, sk: sk, supportsKey: model.supports("pair.key") == true)
+            if let secret = r.secret {
+                let f = try E2E.coreCall { try Core.pairFormat(server: model.settings.server, code: r.code, secret: secret) }
+                keyText = f.text
+                keyLink = f.link
+            }
             code = r.code
-            expires = Date().addingTimeInterval(TimeInterval(r.expires_in ?? 180))
+            expires = Date().addingTimeInterval(TimeInterval(r.expiresIn))
             usedBy = nil
             dead = false
             error = nil
@@ -1021,18 +1054,20 @@ private struct PairCodeSection: View {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             guard !Task.isCancelled, code == c else { return }
             // 过期 30 秒后还查不到结果（例如一直断网）：按失效处理，不再轮询
-            if let e = expires, Date().timeIntervalSince(e) > 30 { dead = true; return }
+            if let e = expires, Date().timeIntervalSince(e) > 30 { dead = true; keyText = nil; keyLink = nil; return }
             let s: PairCodeStatus
             do { s = try await api.pairCodeStatus(c) }
             catch APIError.unsupported { return }
-            catch APIError.http(404, _) { dead = true; return }   // 已用或过期的码保留一小时后被清理
+            catch APIError.http(404, _) { dead = true; keyText = nil; keyLink = nil; return }   // 已用或过期的码保留一小时后被清理
             catch { continue }
             switch s.state {
             case "used":
                 usedBy = s.used_by ?? "新设备"
+                keyText = nil; keyLink = nil
                 onUsed()
             case "expired":
                 dead = true
+                keyText = nil; keyLink = nil
             default:
                 if let left = s.expires_in { expires = Date().addingTimeInterval(TimeInterval(left)) }
             }

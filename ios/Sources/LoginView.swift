@@ -16,6 +16,7 @@ struct LoginView: View {
     @State private var password = ""
     @State private var code = ""
     @State private var name = UIDevice.current.name
+    @State private var scanning = false
     @State private var busy = false
     @State private var error: String?
     @FocusState private var focus: Field?
@@ -24,6 +25,11 @@ struct LoginView: View {
     private var needsInvite: Bool { registerMode == "invite" }
     private enum Mode: Hashable { case password, pair, register }
     private var usePair: Bool { mode == .pair }
+
+    /// 配对码输入框的解析结果：6 位、长配对码、配对链接（docs/e2ee-client.md §12.3）；格式不对时 nil
+    private var parsedCode: (code: String, secret: String?, server: String?)? {
+        code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : try? Core.pairParse(code)
+    }
 
     /// 注册时的密码强度：服务器拿不到密码，只能在本机检查（docs/e2ee-client.md §2.2）
     private var registerProblem: String? {
@@ -67,17 +73,30 @@ struct LoginView: View {
 
                 if usePair {
                     Section {
-                        TextField("6 位配对码", text: $code)
-                            .keyboardType(.numberPad)
-                            .textContentType(.oneTimeCode)
-                            .font(.title3.monospacedDigit())
+                        Button {
+                            focus = nil
+                            scanning = true
+                        } label: {
+                            Label("扫码登录", systemImage: "qrcode.viewfinder").font(.headline)
+                        }
+                        TextField("6 位配对码，或粘贴长配对码", text: $code, axis: .vertical)
+                            .textInputAutocapitalization(.characters)
+                            .autocorrectionDisabled()
+                            .font(code.count <= 8 ? .title3.monospacedDigit() : .body.monospaced())
                             .focused($focus, equals: .code)
-                            .onChange(of: code) { _, v in
-                                let d = String(v.filter(\.isNumber).prefix(6))
-                                if d != v { code = d }
+                            .onChange(of: code) { _, _ in
+                                // 配对链接里带服务器地址：填进服务器地址栏（用户看得到、可以改）
+                                if let sv = parsedCode?.server, API.normalize(sv) != API.normalize(server) { server = sv }
                             }
                     } footer: {
-                        Text("在已登录的设备上生成：iPhone「设置 → 账户与设备」、Mac「账户」→「生成配对码」。3 分钟内有效，只能用一次。")
+                        VStack(alignment: .leading, spacing: 4) {
+                            if let p = parsedCode, p.secret != nil {
+                                Label("带钥匙的配对码：登录后直接解锁加密消息", systemImage: "key.fill").foregroundStyle(Theme.success)
+                            } else if parsedCode == nil && code.trimmingCharacters(in: .whitespaces).count > 6 {
+                                Text("配对码格式不对").foregroundStyle(Theme.danger)
+                            }
+                            Text("在已登录的设备上生成：iPhone「设置 → 账户与设备」、Mac「设置 → 账户」。扫二维码或输入长配对码，登录后直接解锁加密消息；只输 6 位时要再输一次密码解锁。3 分钟内有效，只能用一次。")
+                        }
                     }
                 } else if mode == .register {
                     Section {
@@ -190,6 +209,16 @@ struct LoginView: View {
             let d = UserDefaults.standard
             if let s = d.string(forKey: "demoLoginServer") { server = s }
             if d.string(forKey: "demoLoginMode") == "register" { pendingRegister = true }
+            takePairLink()
+        }
+        .onChange(of: model.pendingPairLink) { _, _ in takePairLink() }
+        .sheet(isPresented: $scanning) {
+            QRScannerSheet { scanned in
+                mode = .pair
+                error = nil
+                code = scanned
+                if (try? Core.pairParse(scanned)) == nil { error = "扫到的不是回笺配对码" }
+            }
         }
         // 「上次注册结果不确定」只在换了服务器或用户名、或者注册 / 登录成功时清掉；中间的 429、本地校验错误（密码太短、两次不一致）都保留
         .onChange(of: registerKey) { _, k in
@@ -234,12 +263,22 @@ struct LoginView: View {
         return m
     }
 
+    /// 系统打开的 huijian://pair 链接（系统相机扫码、点链接）：切到「配对码」并填好，等用户确认后再点登录
+    private func takePairLink() {
+        guard let link = model.pendingPairLink else { return }
+        model.pendingPairLink = nil
+        mode = .pair
+        error = nil
+        code = link
+    }
+
     private var registerKey: String { API.normalize(server) + "|" + ManageRules.normalizeUsername(username).lowercased() }
 
     private func submit() {
         let url = API.normalize(server)
         if url.isEmpty { error = "请填写服务器地址"; return }
-        if usePair && code.count != 6 { error = "配对码是 6 位数字"; return }
+        let pc = parsedCode
+        if usePair && pc == nil { error = "配对码格式不对：应为 6 位数字，或扫码 / 复制得到的长配对码"; return }
         if !usePair && (username.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty) { error = "请填写用户名和密码"; return }
         if mode == .register {
             if let p = ManageRules.usernameProblem(username) ?? registerProblem { error = p; return }
@@ -263,7 +302,7 @@ struct LoginView: View {
                                              inviteCode: m == "invite" ? invite : nil)
                 } else {
                     try await model.login(server: server, username: username.trimmingCharacters(in: .whitespaces),
-                                          password: password, code: code, usePair: usePair, name: String(deviceName.prefix(40)))
+                                          password: password, code: pc?.code ?? "", secret: pc?.secret, usePair: usePair, name: String(deviceName.prefix(40)))
                 }
                 password = ""
                 password2 = ""

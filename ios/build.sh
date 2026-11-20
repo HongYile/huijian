@@ -108,6 +108,7 @@ cat > "$APP/Info.plist" <<PLIST
  <key>NSAppTransportSecurity</key><dict>
    <key>NSAllowsArbitraryLoads</key><true/>
  </dict>
+ <key>NSCameraUsageDescription</key><string>扫描配对码二维码：登录后直接解锁加密消息</string>
  <key>NSLocalNetworkUsageDescription</key><string>连接局域网里的回笺服务器（例如 http://192.168.1.10:8790）</string>
  <key>CFBundleURLTypes</key><array><dict>
    <key>CFBundleURLName</key><string>${BUNDLE_ID}</string>

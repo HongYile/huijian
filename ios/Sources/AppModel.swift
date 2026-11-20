@@ -119,6 +119,10 @@ final class AppModel: ObservableObject {
     @Published var e2eStorageError: String?
     /// 登录时关于加密的一句提示（例如私钥对不上 T43），加密页显示
     @Published var e2eLoginNote: String?
+    /// 系统打开的 huijian://pair 链接（§12.3）：没登录时交给登录页填好
+    @Published var pendingPairLink: String?
+    /// 已登录时打开了配对链接：提示 T84
+    @Published var pairLinkNotice: String?
     /// 本机正在请求其他设备批准（§4.3）
     @Published var e2eRequest: E2E.ApprovalRequest?
     @Published var e2eRequestPhase: E2E.ApprovalRequest.Phase?
@@ -1050,6 +1054,11 @@ final class AppModel: ObservableObject {
     }
 
     func open(url: URL) {
+        // huijian://pair?server=…&code=…（配对码二维码，§12.3）：没登录 → 登录页填好，用户确认后再配对；已登录 → T84，不做任何事
+        if url.scheme?.lowercased() == "huijian", url.host?.lowercased() == "pair" {
+            if loggedIn { pairLinkNotice = E2E.T.t84 } else { pendingPairLink = url.absoluteString }
+            return
+        }
         if let id = Self.messageID(from: url) { openMessage(id) }
     }
 
@@ -1357,12 +1366,22 @@ final class AppModel: ObservableObject {
 
     // MARK: 登录 / 退出
 
-    func login(server raw: String, username: String, password: String, code: String, usePair: Bool, name: String) async throws {
+    /// secret：长配对码 / 配对链接里的一次性钥匙（§12.3，只输 6 位时 nil）：带钥匙时登录后直接解锁
+    func login(server raw: String, username: String, password: String, code: String, secret: String? = nil, usePair: Bool, name: String) async throws {
         let s = API.normalize(raw)
         guard let url = URL(string: s), let host = url.host, !host.isEmpty else { throw APIError.invalid("服务器地址格式不对") }
         if usePair {
-            let r = try await API(server: url, token: nil).pair(code: code, name: name, fingerprint: DeviceFingerprint.value)
-            signedIn(server: s, r, username: "")
+            let r = try await E2E.pair(server: API(server: url, token: nil), authed: { API(server: url, token: $0) as E2ETransport },
+                                       serverID: s, code: code, secret: secret,
+                                       device: .init(name: name, platform: "ios", fingerprint: DeviceFingerprint.value),
+                                       marks: e2eMarks, secrets: e2eSecrets, alive: e2eAlive)
+            let lr: LoginResult
+            do { lr = try JSONCoding.decoder.decode(LoginResult.self, from: r.response) } catch {
+                throw APIError.invalid("服务器返回的数据格式不对")
+            }
+            e2ePendingLoginKey = r.pendingKey
+            signedIn(server: s, lr, username: "", accountID: r.accountID)
+            e2eLoginNote = r.note
         } else {
             try await passwordSignIn(server: s, url: url, username: username, password: password, name: name, register: false)
         }

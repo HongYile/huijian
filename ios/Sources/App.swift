@@ -54,6 +54,9 @@ struct HuijianApp: App {
             .environmentObject(model)
             .tint(Theme.accent)
             .onOpenURL { model.open(url: $0) }
+            .alert(model.pairLinkNotice ?? "", isPresented: Binding(get: { model.pairLinkNotice != nil }, set: { if !$0 { model.pairLinkNotice = nil } })) {
+                Button("好") { model.pairLinkNotice = nil }
+            }
             .task { await Demo.runIfNeeded(model) }
         }
         .onChange(of: phase) { _, p in
