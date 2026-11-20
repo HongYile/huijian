@@ -113,6 +113,9 @@ CREATE INDEX IF NOT EXISTS idx_att_sha ON attachments(sha256);` + releaseSchema)
 	if err := st.migrateRetired(); err != nil {
 		return nil, err
 	}
+	if err := st.migrateAgent(); err != nil {
+		return nil, err
+	}
 	if err := st.migrateInvites(); err != nil {
 		return nil, fmt.Errorf("迁移邀请码: %w", err)
 	}
@@ -427,7 +430,10 @@ type Message struct {
 	E2E string `json:"e2e,omitempty"`
 	// 0.8.0 起：服务器代加密的消息为 "server"（发送端用明文发来，服务器收到后立即加密保存）；发送端加密的没有这个字段
 	Sealed string `json:"sealed,omitempty"`
-	userID int64
+	// 0.10.0 起：agent 会话发来的消息（e2e 是 hje2 信封，可以回复，docs/agent-mcp.md）；ask = agent 在等回复
+	AgentSession string `json:"agent_session,omitempty"`
+	Ask          bool   `json:"ask,omitempty"`
+	userID       int64
 }
 
 // Owner 消息所属账号（管理后台表单用）
@@ -449,6 +455,9 @@ type NewMessage struct {
 	Sealed    string       // "server"：服务器代加密
 	SealKID   string       // 代加密用的钥匙：写库的事务里核对它仍然启用，否则返回 errKeyChanged
 	Files     []Attachment // blob/name/mime/size/sha256 已填好
+	// 0.10.0：agent 会话发来的消息（hje2 信封），可以回复；ask = agent 在等回复
+	AgentSession string
+	Ask          bool
 }
 
 // InsertMessage 写入消息；若 idem 已存在则返回原消息 id 且 dup=true。
@@ -480,8 +489,9 @@ func (s *Store) InsertMessage(m NewMessage) (id int64, dup bool, err error) {
 			return 0, false, errKeyChanged
 		}
 	}
-	res, err := tx.Exec(`INSERT INTO messages(user_id,pushkey_id,topic,thread,priority,type,text,desp,source,src_ip,created_at,idem,e2e,sealed)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, m.UserID, m.PushkeyID, m.Topic, m.Thread, m.Priority, m.Type, m.Text, m.Desp, m.Source, m.SrcIP, now(), m.Idem, m.E2E, m.Sealed)
+	res, err := tx.Exec(`INSERT INTO messages(user_id,pushkey_id,topic,thread,priority,type,text,desp,source,src_ip,created_at,idem,e2e,sealed,agent_session,ask)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, m.UserID, m.PushkeyID, m.Topic, m.Thread, m.Priority, m.Type, m.Text, m.Desp, m.Source, m.SrcIP, now(), m.Idem, m.E2E, m.Sealed,
+		m.AgentSession, m.Ask)
 	if err != nil {
 		return 0, false, err
 	}
@@ -512,7 +522,7 @@ func (s *Store) MessageIDByIdem(userID int64, idem string) int64 {
 func (s *Store) Messages(userID int64, deviceID string, since int64, limit int) ([]Message, error) {
 	var rows *sql.Rows
 	var err error
-	cols := `id,user_id,topic,thread,priority,type,text,desp,source,created_at,COALESCE(pushkey_id,0),archive,e2e,sealed`
+	cols := `id,user_id,topic,thread,priority,type,text,desp,source,created_at,COALESCE(pushkey_id,0),archive,e2e,sealed,agent_session,ask`
 	where := `user_id=? AND NOT EXISTS (SELECT 1 FROM device_keys dk WHERE dk.device_id=? AND dk.pushkey_id=messages.pushkey_id AND dk.mode='off')`
 	if since < 0 {
 		rows, err = s.db.Query(`SELECT * FROM (SELECT `+cols+` FROM messages WHERE `+where+` ORDER BY id DESC LIMIT ?) ORDER BY id`, userID, deviceID, limit)
@@ -527,7 +537,7 @@ func (s *Store) Messages(userID int64, deviceID string, since int64, limit int) 
 	for rows.Next() {
 		var m Message
 		var ts int64
-		if err := rows.Scan(&m.ID, &m.userID, &m.Topic, &m.Thread, &m.Priority, &m.Type, &m.Text, &m.Desp, &m.Source, &ts, &m.PushkeyID, &m.Archive, &m.E2E, &m.Sealed); err != nil {
+		if err := rows.Scan(&m.ID, &m.userID, &m.Topic, &m.Thread, &m.Priority, &m.Type, &m.Text, &m.Desp, &m.Source, &ts, &m.PushkeyID, &m.Archive, &m.E2E, &m.Sealed, &m.AgentSession, &m.Ask); err != nil {
 			rows.Close()
 			return nil, err
 		}

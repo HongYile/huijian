@@ -37,7 +37,8 @@ type Hub struct {
 	maxUpload    int64
 	trustedProxy ipSet
 	adminDeny    ipSet
-	userID       int64 // 接收系统通知的账号；0 = 第一个账号（noticeUser）
+	userID       int64        // 接收系统通知的账号；0 = 第一个账号（noticeUser）
+	agentWait    agentWaiters // agent 会话等回复的长轮询（docs/agent-mcp.md）
 	st           *Store
 	br           *Broker
 	pushLimit    *Limiter
@@ -284,6 +285,7 @@ func (h *Hub) publicMux() http.Handler {
 	m.HandleFunc("GET /v1/update/{id}", h.deviceAuth(h.handleUpdateDownload))
 	m.HandleFunc("GET /v1/info", h.handleInfo)
 	h.registerE2ERoutes(m)
+	h.registerAgentRoutes(m)
 	m.HandleFunc("PUT /v1/bark", h.deviceAuth(h.handleBarkSet))
 	m.HandleFunc("POST /v1/bark/test", h.deviceAuth(h.handleBarkTest))
 	m.HandleFunc("GET /ios/gbox.appsrc", h.handleGBoxSource)

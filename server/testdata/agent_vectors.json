@@ -1,0 +1,18 @@
+{
+  "account_pub": "w2dowSFPxrveIO54_HLZMNxOI8fkQ4vhE_8LMP4ilhs",
+  "account_sk": "3yF6rjFlaageMiSi2Nh200Z-Wlkj15TA2NuhcZ0l9fE",
+  "attest": "hja1.DAwMDAwMDAwMDAwMLUkqs2bVqwxgXNp421_bRwZaWVxd0KqtOV2PlF7qa90-wwkgSOiQIK0XMi-Yv0eh5xQ6z0RLjItHcxYBtdqYmg8DMc2DOMf8zCVwyZg10S5acJvkM92cWDJsBBN_2UE1qz8puzgPrPqOfY2XdRlm8jEdTjmHOJG2D5IC1HcQ7t6ToF7QoIXJ-LRLIfOwBeL-XdKqk4DVrGwt3ftE",
+  "attest_plain": "{\"session_id\":\"as0123456789abcdef\",\"pub\":\"nAIeO6xrRphtc6VSnG8PKwibjoT7DghcURHSoyOPsAw\",\"name\":\"家里 Claude Code\",\"approved_at\":1763600000}",
+  "commit": "HixbT0diYPsF3L2Rabda1ENL0bZ8rtSbZaA2RPdNeIM",
+  "message": "{\"v\":1,\"kind\":\"message\",\"text\":\"要不要删掉 3 个异常样本？\",\"ask\":true,\"choices\":[\"删\",\"保留\"],\"seq\":1,\"sent_at\":1763600000}",
+  "message_envelope": "hje2.216a804d4ed4b272.as0123456789abcdef.ayONaGyV7L-4cs2ioWv_rryHMJChCS2hh050xJbxWVkettRto76wkgZDAZ2DQ19HuZAJECs_dvdfLkc6o7bMqFFaA6494-oTJ5B3EU-OnZ-UlynR65uDLfF-8toxMBJQkznkHM6Y8OXkpj-LUrBNzIWg-9ZtNqGPmE9OA6ZqWu1Ec95S0d1-5_Y-UD-LNejiCKAcYGfRVOB6-oSBBWzugGxx15Lbdn9K1IJOF2wSHxQzYTQAQigjy6k",
+  "msg_id": 42,
+  "na": "oaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaE",
+  "nb": "srKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrI",
+  "reply": "{\"v\":1,\"text\":\"删\",\"n\":\"AAECAwQFBgcICQoLDA0ODw\",\"sent_at\":1763600100,\"device\":\"mac\"}",
+  "reply_envelope": "hjq1.as0123456789abcdef.c__pP0UWTM3-jDVSgPWbRaE81n2x3ltRaGf4xwh48R-jUUMcxikkn7DGroWebIPuX7Se4yfnM588-TnIIN5YW29FrKOVHCGSlJ3iy8XsUxPqPNggjuVcr6HXDkwHYGPWm_6PxziL9iY3x1aS0GCpP9iVEbATJsG7nyU7IHjsZrYjkXlBjQ",
+  "sas": "680662",
+  "session_id": "as0123456789abcdef",
+  "session_pub": "nAIeO6xrRphtc6VSnG8PKwibjoT7DghcURHSoyOPsAw",
+  "session_sk": "v6vigf4f_-tNoIl8d-p0c1xw4LdR4XGmyhZUbPXXggU"
+}
