@@ -438,7 +438,7 @@ private fun Requests(reqs: List<E2ERequest>, say: (String) -> Unit) {
 }
 
 @Composable
-private fun Done(text: String, color: androidx.compose.ui.graphics.Color, onClose: () -> Unit) {
+internal fun Done(text: String, color: androidx.compose.ui.graphics.Color, onClose: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(text, Modifier.weight(1f), color = color, fontSize = 14.sp)
         TextButton(onClose) { Text("关闭") }
@@ -447,7 +447,7 @@ private fun Done(text: String, color: androidx.compose.ui.graphics.Color, onClos
 
 /** 核对码大字等宽显示，按 3+3 位 */
 @Composable
-private fun SasCode(code: String) {
+internal fun SasCode(code: String) {
     SelectionContainer {
         Text(E2EText.sasText(code), fontSize = 34.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace,
             color = MaterialTheme.colorScheme.primary, modifier = Modifier.testTag("sasCode"))
@@ -571,7 +571,7 @@ private fun CodePage(code: String, ctx: android.content.Context, onDone: () -> U
     }
 }
 
-private fun android.content.Context.findActivity(): android.app.Activity? {
+internal fun android.content.Context.findActivity(): android.app.Activity? {
     var c: android.content.Context? = this
     while (c is android.content.ContextWrapper) {
         if (c is android.app.Activity) return c

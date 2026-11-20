@@ -30,6 +30,8 @@ enum class SettingKind {
     CHANNELS, KEYS, ACCOUNT,
     /** 端到端加密（开启、设备请求批准 / 已批准、换钥匙）：重新 GET /v1/e2e */
     E2E,
+    /** agent 双向（0.10.0 起：登录请求、会话变化、回复、回执）：重新 GET /v1/agent/sessions，打开着的消息重新拉回复状态 */
+    AGENT,
 }
 
 /**
@@ -101,6 +103,7 @@ object Changes {
             "keys" -> refresh += SettingKind.KEYS
             "devices", "account" -> refresh += SettingKind.ACCOUNT
             "e2e" -> refresh += SettingKind.E2E
+            "agent" -> refresh += SettingKind.AGENT
             else -> {}
         }
         return Plan(del, arch, refresh, purged, sealed)

@@ -36,7 +36,7 @@ data class MessagePage(val messages: List<Message>, val nextSince: Long?, val la
  * 回笺设备接口（docs/api.md）。长轮询的读超时 = wait + 20 秒；
  * 手机睡眠时 OkHttp 的超时计时会暂停，所以连接是否卡死由 SyncService 的看门狗闹钟兜底。
  */
-class Api(val server: String, private val token: String?) : E2ENet {
+class Api(val server: String, private val token: String?) : E2ENet, AgentNet {
 
     /** 最近一次响应头 X-Huijian-Server 里的服务端版本：变了说明服务端升级 / 降级过，同步服务据此重新读取 /v1/info */
     @Volatile var serverVersion: String? = null
@@ -182,6 +182,27 @@ class Api(val server: String, private val token: String?) : E2ENet {
         return server.toHttpUrl().newBuilder().addPathSegments(prefix).addPathSegment(param)
             .apply { if (suffix.isNotEmpty()) addPathSegments(suffix) }.build()
     }
+
+    // ---------- agent 双向（服务端 0.10.0 起，docs/agent-mcp.md §11.3；逻辑在 Agent.kt） ----------
+
+    override fun agentKeys(): JSONObject = json(req("/v1/agent/keys").build())
+    override fun agentCreateKey(): JSONObject = json(post("/v1/agent/keys", JSONObject()))
+    override fun agentRevokeKey(id: Long) { exec(req("/v1/agent/keys/$id").delete().build()).close() }
+    override fun agentSessions(): JSONObject = json(req("/v1/agent/sessions").build())
+    override fun agentEnd(id: String) { exec(req(pathUrl("v1/agent/sessions", id)).delete().build()).close() }
+    override fun agentChallenge(id: String, nonce: String) {
+        json(req(pathUrl("v1/agent/sessions", id, "challenge")).post(JSONObject().put("nonce", nonce).toString().toRequestBody(JSON)).build())
+    }
+    override fun agentApprove(id: String, attest: String) {
+        json(req(pathUrl("v1/agent/sessions", id, "approve")).post(JSONObject().put("attest", attest).toString().toRequestBody(JSON)).build())
+    }
+    override fun agentDeny(id: String) {
+        json(req(pathUrl("v1/agent/sessions", id, "deny")).post(JSONObject().toString().toRequestBody(JSON)).build())
+    }
+    override fun agentReply(msgId: Long, envelope: String, copy: String): JSONObject =
+        json(post("/v1/agent/replies", JSONObject().put("msg_id", msgId).put("e2e", envelope).put("copy", copy)))
+    override fun agentReplyStatus(msgId: Long): JSONObject =
+        json(req(server.toHttpUrl().newBuilder().addPathSegments("v1/agent/replies/status").addQueryParameter("msg_id", msgId.toString()).build()).build())
 
     /** 给本机改名，返回服务端保存后的名称 */
     fun renameMe(name: String): String =

@@ -156,6 +156,7 @@ object Hub {
         app = ctx.applicationContext
         store = Store(app)
         E2EHub.init(app)
+        AgentHub.init(app)
         val s = store.load()
         _messages.value = s.messages.sortedBy { it.id }
         _read.value = s.read
@@ -275,7 +276,7 @@ object Hub {
             val u = updated[m.id]
             if (u == null || !m.sealed || m.e2e != u.e2e) m
             else m.copy(text = u.text, desp = u.desp, type = u.type, attachments = u.attachments, doc = u.doc,
-                preview = u.preview, e2eStatus = u.e2eStatus).takeIf { it != m }?.also { changed = true } ?: m
+                preview = u.preview, e2eStatus = u.e2eStatus, agentName = u.agentName, choices = u.choices).takeIf { it != m }?.also { changed = true } ?: m
         }
         if (!changed) return
         _messages.value = next
@@ -368,6 +369,7 @@ object Hub {
 
     private fun resetLocal(keepE2EKeys: Boolean = false) {
         E2EHub.wipe(keepVault = keepE2EKeys)       // 本机为上一个账号保存的私钥、设备钥匙对（「已升级」标记保留）
+        AgentHub.wipe()                            // agent 会话、核实结果、进行中的批准
         saveJob?.cancel()
         writer.clear { store.clearMessages() }     // 等正在进行的写盘结束再删，避免删完又被写回来
         AttDownloads.reset()

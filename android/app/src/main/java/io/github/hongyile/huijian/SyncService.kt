@@ -196,6 +196,7 @@ class SyncService : Service() {
                     caughtUp = true
                     busy { refreshChannels(a, session) }
                     busy { refreshE2E(a, session) }
+                    busy { refreshAgent(a, session) }
                 }
                 if (store.mode == ReceiveMode.INTERVAL) {
                     busy { poll(a, wait = 0, session = session) }
@@ -456,6 +457,7 @@ class SyncService : Service() {
         if (SettingKind.CHANNELS in kinds) refreshChannels(a, session)
         if (SettingKind.KEYS in kinds) Hub.keysChanged()
         if (SettingKind.E2E in kinds) refreshE2E(a, session)
+        if (SettingKind.AGENT in kinds) refreshAgent(a, session)
         if (SettingKind.ACCOUNT in kinds) {
             val d = try { a.account() } catch (e: UnauthorizedException) { throw e } catch (e: Exception) { null } ?: return
             Hub.setAccount(d, session)
@@ -495,6 +497,8 @@ class SyncService : Service() {
         val incoming = if (plan.deleted.isEmpty()) page.messages else page.messages.filter { it.id !in plan.deleted }
         val fresh = if (incoming.isEmpty()) emptyList() else {
             wakeLock.acquire(WAKE_MS)
+            // 新会话的第一条 agent 消息：先拉一次会话列表核实证明再解开，通知里不会先显示「来源无法核实」
+            if (incoming.any { m -> m.agentSession?.let { it !in AgentHub.verified.value } == true }) refreshAgent(a, session)
             // 加密消息在合并前解开（已锁定时标题是 T60，解锁后重新解密）：通知用解密后的标题和预览
             Hub.merge(E2EHub.decrypt(incoming), session).also { E2EHub.healLocked() }
         }
@@ -577,6 +581,12 @@ class SyncService : Service() {
     private fun refreshE2E(a: Api, session: Long) {
         if (Hub.session != session) return
         try { E2EHub.refresh(a) } catch (e: UnauthorizedException) { throw e } catch (e: Exception) { if (a.wasCancelled) throw e }
+    }
+
+    /** 重新读取 agent 会话（登录后、App 启动、变更流 kind "agent"）；服务端没有 agent 功能、失败都不影响收消息 */
+    private fun refreshAgent(a: Api, session: Long) {
+        if (Hub.session != session) return
+        try { AgentHub.refresh(a) } catch (e: UnauthorizedException) { throw e } catch (e: Exception) { if (a.wasCancelled) throw e }
     }
 
     private fun refreshChannels(a: Api, session: Long) {

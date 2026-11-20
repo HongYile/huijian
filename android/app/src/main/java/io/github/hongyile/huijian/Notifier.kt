@@ -23,6 +23,7 @@ import androidx.core.content.ContextCompat
 object Notifier {
     const val CH_SERVICE = "service"
     const val CH_E2E = "e2e"
+    const val CH_AGENT = "agent"
     const val CH_P5 = "p5"
     const val CH_P4 = "p4"
     const val CH_P3 = "p3"
@@ -30,6 +31,8 @@ object Notifier {
     private const val ID_SUMMARY = 2
     private const val ID_E2E = 3
     private const val TAG_E2E = "e2e:"
+    private const val ID_AGENT = 4
+    private const val TAG_AGENT = "agent:"
     private const val ID_MESSAGE_BASE = 1000
     private const val TAG_URGENT = "p5"
     /** 单独显示的普通消息通知最多几条（小米系统每个 App 大约十几条就开始挤掉旧的） */
@@ -37,6 +40,8 @@ object Notifier {
     const val EXTRA_MESSAGE_ID = "message_id"
     /** 点「设备请求解锁」的通知：打开加密页 */
     const val EXTRA_OPEN_E2E = "open_e2e"
+    /** 点「agent 请求登录」的通知：打开 Agent 页 */
+    const val EXTRA_OPEN_AGENT = "open_agent"
 
     fun setup(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
@@ -59,6 +64,9 @@ object Notifier {
             },
             NotificationChannel(CH_E2E, "设备请求解锁", NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "账号的另一台设备请求解锁加密消息，需要在这里核对后批准"
+            },
+            NotificationChannel(CH_AGENT, "agent 请求登录", NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "agent（Claude Code 等）请求用你的账号收发消息，需要在这里核对后批准"
             },
             NotificationChannel(CH_SERVICE, "后台连接", NotificationManager.IMPORTANCE_MIN).apply {
                 description = "保持和回笺服务器的连接（系统要求常驻显示）"
@@ -198,7 +206,7 @@ object Notifier {
     @Synchronized
     fun cancelMessages(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
-        for (n in nm.activeNotifications) if (n.id != ID_SERVICE && n.id != ID_E2E) nm.cancel(n.tag, n.id)   // 设备请求解锁的通知留着
+        for (n in nm.activeNotifications) if (n.id != ID_SERVICE && n.id != ID_E2E && n.id != ID_AGENT) nm.cancel(n.tag, n.id)   // 设备请求解锁、agent 请求登录的通知留着
         summaryCount = 0
     }
 
@@ -230,6 +238,36 @@ object Notifier {
     fun cancelE2ERequests(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
         runCatching { for (n in nm.activeNotifications) if (n.id == ID_E2E) nm.cancel(n.tag, n.id) }
+    }
+
+    /** agent 请求登录（docs/agent-mcp.md §8）：同一个请求只通知一次（AgentHub 记着），点开进 Agent 页核对后批准 */
+    fun postAgentRequest(ctx: Context, s: AgentSession) {
+        if (!canPost(ctx)) return
+        val i = Intent(ctx, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(EXTRA_OPEN_AGENT, true)
+        }
+        val pi = PendingIntent.getActivity(ctx, 900_000_002, i, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val text = "「${s.name.ifBlank { "agent" }}」想用你的账号收发消息。打开回笺核对 6 位核对码后批准。"
+        val n = NotificationCompat.Builder(ctx, CH_AGENT)
+            .setSmallIcon(R.drawable.ic_stat_huijian)
+            .setContentTitle("agent 请求登录")
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setContentIntent(pi)
+            .build()
+        try { NotificationManagerCompat.from(ctx).notify(TAG_AGENT + s.id, ID_AGENT, n) } catch (_: SecurityException) {}
+        ensureService(ctx)
+    }
+
+    /** 请求已处理（批准、拒绝、过期）：撤掉它的通知 */
+    fun cancelAgentRequest(ctx: Context, id: String) = NotificationManagerCompat.from(ctx).cancel(TAG_AGENT + id, ID_AGENT)
+
+    fun cancelAgentRequests(ctx: Context) {
+        val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
+        runCatching { for (n in nm.activeNotifications) if (n.id == ID_AGENT) nm.cancel(n.tag, n.id) }
     }
 
     private fun notificationId(id: Long) = ID_MESSAGE_BASE + (id % 1_000_000).toInt()

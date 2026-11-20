@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -60,6 +61,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.hongyile.huijian.AgentHub
+import io.github.hongyile.huijian.AgentReplyView
+import io.github.hongyile.huijian.AgentText
+import io.github.hongyile.huijian.E2EStatus
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.testTag
 import io.github.hongyile.huijian.Attachment
 import io.github.hongyile.huijian.E2EHub
 import io.github.hongyile.huijian.E2EMessages
@@ -116,7 +126,7 @@ fun DetailScreen(id: Long, back: () -> Unit, openMessage: (Long) -> Unit = {}) {
         // 整页是一个 LazyColumn：正文每个顶层块是一项，长文档只组合屏幕上看得到的部分
         SelectionContainer {
             LazyColumn(
-                Modifier.padding(pad).fillMaxSize().linkGuard(env), state = listState,
+                Modifier.padding(pad).fillMaxSize().imePadding().linkGuard(env), state = listState,
                 contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 8.dp, bottom = 24.dp),
             ) {
                 // 以下 HEADER_ITEMS 个固定项（脚注跳转按它算位置）
@@ -136,7 +146,9 @@ fun DetailScreen(id: Long, back: () -> Unit, openMessage: (Long) -> Unit = {}) {
                         // 账号开了加密、这条是明文（本机保留的旧消息）时 T63（e2ee-client.md §6.3）
                         val mark = E2EMessages.detailMark(m, e2eState?.enabled == true)
                         Text(
-                            listOf(m.source, fullTime(m.createdAt), "#${m.id}", mark).filter { it.isNotBlank() }.joinToString(" · "),
+                            // agent 消息：名称取自会话证明（服务器给的 source 不用，docs/agent-mcp.md §8）
+                            listOf(if (m.isAgent) ">_ " + (m.agentName ?: "agent") else m.source, fullTime(m.createdAt), "#${m.id}", mark)
+                                .filter { it.isNotBlank() }.joinToString(" · "),
                             Modifier.padding(top = 10.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
@@ -147,6 +159,8 @@ fun DetailScreen(id: Long, back: () -> Unit, openMessage: (Long) -> Unit = {}) {
                     doc != null -> docItems(items, env)
                     else -> item { Box(Modifier.padding(top = 10.dp)) { MarkdownView(m.desp) } }
                 }
+                // agent 消息：已发出的回复和送达状态、快捷回复、回复框（§5.1、§8）
+                if (m.isAgent) item(key = "agentReply") { DisableSelection { AgentReplyPanel(m) } }
                 if (m.sealed && m.attachments.isNotEmpty()) item {
                     Text("附件 ${m.attachments.size} 个（解锁后查看）", Modifier.padding(top = 16.dp), fontSize = 13.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -275,4 +289,70 @@ internal fun openFile(ctx: Context, f: File, mime: String) {
     val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".files", f)
     val i = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     try { ctx.startActivity(Intent.createChooser(i, "打开 ${f.name}").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {}
+}
+
+/** agent 消息详情下方：已发出的回复及状态、快捷回复按钮、回复框；不能回复时显示原因（和 Mac 的 AgentReplyPanel 一致） */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun AgentReplyPanel(m: Message) {
+    val scope = rememberCoroutineScope()
+    val revision by AgentHub.revision.collectAsStateWithLifecycle()
+    val status by E2EHub.status.collectAsStateWithLifecycle()
+    val verified by AgentHub.verified.collectAsStateWithLifecycle()
+    val sessions by AgentHub.sessions.collectAsStateWithLifecycle()
+    val loaded by AgentHub.loaded.collectAsStateWithLifecycle()
+    val block = remember(m, status, verified, sessions, loaded) { AgentHub.replyBlock(m, status == E2EStatus.UNLOCKED) }
+    var replies by remember(m.id) { mutableStateOf<List<AgentReplyView>>(emptyList()) }
+    var text by rememberSaveable(m.id) { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    // 收到 kind "agent" 变更（回复、回执、会话变化）时 revision 加一：重新拉这条消息的回复状态
+    LaunchedEffect(m.id, m.e2eStatus, revision, verified) {
+        if (m.e2eStatus == E2EMessages.OK) runCatching { AgentHub.replies(m) }.getOrNull()?.let { if (it != replies) replies = it }
+    }
+    fun send(t: String) {
+        busy = true; error = null
+        scope.launch {
+            try {
+                AgentHub.reply(m, t)
+                if (t == text) text = ""
+                runCatching { AgentHub.replies(m) }.getOrNull()?.let { replies = it }
+            } catch (e: Exception) {
+                error = describe(e)
+            } finally { busy = false }
+        }
+    }
+    Column(Modifier.padding(top = 22.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("回复 agent", Modifier.weight(1f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (m.ask && replies.isEmpty()) Text(AgentText.WAITING_REPLY, fontSize = 12.sp, color = WARNING, fontWeight = FontWeight.Medium)
+        }
+        for (r in replies) {
+            Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    SelectionContainer { Text(r.text, fontSize = 15.sp) }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(r.label, fontSize = 12.sp,
+                            color = if (r.state == AgentReplyView.State.RECEIVED) SUCCESS else MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(listOfNotNull(r.device.ifBlank { null }, r.sentAt?.let { fullTime(java.time.Instant.ofEpochSecond(it)) })
+                            .joinToString(" · ") { "· $it" }, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+        if (block == null) {
+            if (m.choices.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (c in m.choices) OutlinedButton({ send(c) }, enabled = !busy, modifier = Modifier.testTag("agentChoice")) { Text(c) }
+            }
+            Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(text, { text = it }, Modifier.weight(1f).testTag("agentReplyText"), placeholder = { Text("回复…") }, maxLines = 8)
+                Button({ send(text) }, enabled = !busy && text.isNotBlank(), modifier = Modifier.testTag("agentReplySend")) {
+                    Text(if (busy) "发送中…" else "发送")
+                }
+            }
+        } else {
+            Text(block, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        error?.let { Text(it, fontSize = 13.sp, color = MaterialTheme.colorScheme.error) }
+    }
 }

@@ -122,6 +122,43 @@ object Core {
         return n to BooleanArray(m.length) { m[it] == '1' }
     }
 
+    // ---------- agent 双向（docs/agent-mcp.md §11） ----------
+
+    /** 登录承诺：pub 是 agent 的会话公钥，account 是本机用自己私钥算出的账号公钥 */
+    fun agentCommit(pub: String, account: String, nonce: String): String =
+        call("agent_commit", mapOf("pub" to pub, "account" to account, "nonce" to nonce)).str("commit")
+
+    /** 6 位核对码（字符串，保留前导 0） */
+    fun agentSas(pub: String, account: String, na: String, nb: String): String =
+        call("agent_sas", mapOf("pub" to pub, "account" to account, "na" to na, "nb" to nb)).str("code")
+
+    /** 会话证明 hja1（用账号私钥写） */
+    fun agentAttestSeal(sk: String, sessionId: String, pub: String, name: String, approvedAt: Long): String =
+        call("agent_attest_seal", mapOf("sk" to sk, "session_id" to sessionId, "pub" to pub, "name" to name, "approved_at" to approvedAt)).str("attest")
+
+    /** 核对会话证明 → 证明里写的名称（会话 id、公钥对不上时抛 format） */
+    fun agentAttestOpen(sk: String, attest: String, sessionId: String, pub: String): String =
+        call("agent_attest_open", mapOf("sk" to sk, "attest" to attest, "session_id" to sessionId, "pub" to pub)).str("name")
+
+    /** 解开 agent 消息或回执（hje2）→ 载荷；sessionPub 取自核对过的会话证明（auth 模式核对发送方） */
+    fun agentOpen(keys: List<String>, sessionPub: String, sessionId: String, envelope: String): JSONObject =
+        call("agent_open", mapOf("keys" to keys, "session_pub" to sessionPub, "session_id" to sessionId, "envelope" to envelope))
+            .optJSONObject("payload") ?: throw Failure("format", "解开的内容格式不对")
+
+    /** 回复 agent → (给会话的 hjq1, 给账号自己的 hje1 副本) */
+    fun agentReplySeal(sk: String, sessionPub: String, sessionId: String, msgId: Long, payload: String): Pair<String, String> =
+        call("agent_reply_seal", mapOf("sk" to sk, "session_pub" to sessionPub, "session_id" to sessionId, "msg_id" to msgId, "payload" to payload))
+            .let { it.str("envelope") to it.str("copy") }
+
+    /** agent 一侧（测试用）：会话私钥把载荷加密给账号公钥 → hje2 */
+    fun agentSeal(account: String, sk: String, sessionId: String, payload: String): String =
+        call("agent_seal", mapOf("account" to account, "sk" to sk, "session_id" to sessionId, "payload" to payload)).str("envelope")
+
+    /** agent 一侧（测试用）：会话私钥解开回复（核对发送方为账号公钥） */
+    fun agentReplyOpen(sk: String, account: String, envelope: String, msgId: Long): JSONObject =
+        call("agent_reply_open", mapOf("sk" to sk, "account" to account, "envelope" to envelope, "msg_id" to msgId))
+            .optJSONObject("payload") ?: throw Failure("format", "解开的内容格式不对")
+
     // ---------- 消息与附件 ----------
 
     /** 用账号的私钥（可以多把）解开信封 → 载荷 {v, text, desp, type, atts:[{name, mime, size, key}]} */

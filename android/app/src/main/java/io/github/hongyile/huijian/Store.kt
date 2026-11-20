@@ -240,6 +240,11 @@ class Store(private val ctx: Context) {
         get() = prefs.getStringSet("e2eNotified", null)?.toSet() ?: emptySet()
         set(v) = prefs.edit().putStringSet("e2eNotified", v).apply()
 
+    /** 已经发过系统通知的 agent 登录请求（会话 id，按时间先后，最多留 50 个），同一个请求只通知一次 */
+    var agentNotified: List<String>
+        get() = prefs.getString("agentNotified", null)?.split('\n')?.filter { it.isNotEmpty() } ?: emptyList()
+        set(v) = prefs.edit().putString("agentNotified", v.takeLast(50).joinToString("\n")).apply()
+
     /** 当前账号的 id（GET /v1/me 的 account.id）；0 = 还不知道。本机私钥、钉住的公钥按「服务器 + 账号 id」记 */
     var accountId: Long
         get() = prefs.getLong("accountId", 0)

@@ -16,6 +16,7 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.hongyile.huijian.ui.AccountScreen
+import io.github.hongyile.huijian.ui.AgentScreen
 import io.github.hongyile.huijian.ui.ChannelsScreen
 import io.github.hongyile.huijian.ui.DetailScreen
 import io.github.hongyile.huijian.ui.E2EScreen
@@ -36,9 +37,11 @@ sealed interface Screen {
     data object Channels : Screen
     /** 设置 → 端到端加密 */
     data object E2E : Screen
+    /** 设置 → Agent（docs/agent-mcp.md §8） */
+    data object Agent : Screen
 
     fun encode() = when (this) {
-        Home -> "home"; Settings -> "settings"; Keys -> "keys"; Account -> "account"; Channels -> "channels"; E2E -> "e2e"
+        Home -> "home"; Settings -> "settings"; Keys -> "keys"; Account -> "account"; Channels -> "channels"; E2E -> "e2e"; Agent -> "agent"
         is Detail -> "detail:$id" + (from?.let { ":$it" } ?: "")
     }
 
@@ -49,6 +52,7 @@ sealed interface Screen {
             s == "account" -> Account
             s == "channels" -> Channels
             s == "e2e" -> E2E
+            s == "agent" -> Agent
             s.startsWith("detail:") -> s.removePrefix("detail:").split(":").let { p ->
                 p[0].toLongOrNull()?.let { Detail(it, p.getOrNull(1)?.toLongOrNull()) } ?: Home
             }
@@ -120,6 +124,11 @@ class MainActivity : ComponentActivity() {
                             BackHandler(onBack = toSettings)        // 加密页里的子页面有自己的返回处理（后注册的优先）
                             E2EScreen(toSettings, openKeys = { screen = Screen.Keys })
                         }
+                        Screen.Agent -> {
+                            val toSettings = { screen = Screen.Settings }
+                            BackHandler(onBack = toSettings)
+                            AgentScreen(toSettings)
+                        }
                         Screen.Keys, Screen.Account, Screen.Channels -> {
                             val toSettings = { screen = Screen.Settings }
                             BackHandler(onBack = toSettings)
@@ -138,7 +147,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         // 回到前台：重新读取加密状态（§3）
-        if (Hub.loggedIn) E2EHub.refreshAsync()
+        if (Hub.loggedIn) { E2EHub.refreshAsync(); AgentHub.refreshAsync() }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -165,6 +174,7 @@ class MainActivity : ComponentActivity() {
         val id = i?.getLongExtra(Notifier.EXTRA_MESSAGE_ID, -1L) ?: -1L
         if (id > 0) screen = Screen.Detail(id)
         else if (i?.getBooleanExtra(Notifier.EXTRA_OPEN_E2E, false) == true) screen = Screen.E2E
+        else if (i?.getBooleanExtra(Notifier.EXTRA_OPEN_AGENT, false) == true) screen = Screen.Agent   // agent 请求登录：打开 Agent 页核对后批准
     }
 
     /**

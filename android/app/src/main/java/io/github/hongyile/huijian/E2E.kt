@@ -1238,11 +1238,13 @@ object E2EMessages {
     const val LOCKED = "locked"
     const val WRONG_KEY = "wrong_key"
     const val FORMAT = "format"
+    /** agent 消息：会话没有本账号写的证明（来源无法核实，docs/agent-mcp.md §11.2） */
+    const val UNVERIFIED = "unverified"
 
     /** 还没解开（或解不开）的加密消息：标题换成说明，正文清空，保留信封原文和服务端附件（解锁后重新解密要用） */
     fun sealed(m: Message, status: String): Message = m.copy(
-        text = when (status) { WRONG_KEY -> E2EText.T61; FORMAT -> E2EText.T62; else -> E2EText.T60 },
-        desp = "", doc = null, preview = "", e2eStatus = status,
+        text = when (status) { WRONG_KEY -> E2EText.T61; FORMAT -> E2EText.T62; UNVERIFIED -> AgentText.UNVERIFIED; else -> E2EText.T60 },
+        desp = "", doc = null, preview = "", e2eStatus = status, agentName = null, choices = emptyList(),
     )
 
     /** keys：本账号全部私钥；没有时（已锁定）返回 sealed。不是加密消息、或已经解开的原样返回 */

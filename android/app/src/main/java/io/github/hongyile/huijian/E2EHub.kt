@@ -284,6 +284,7 @@ object E2EHub {
     fun activeSk(): String? = if (_status.value == E2EStatus.UNLOCKED) accountKey()?.sk else null
 
     private fun recompute() {
+        AgentHub.keysMaybeChanged(vault().keys.map { it.kid })    // 钥匙变了（解锁、重置）：重新核实 agent 会话证明
         val pin = pinned()
         _status.value = if (unsupported) E2EStatus.UNSUPPORTED else logic.status(_state.value, vault().keys, pin)
         _keyChanged.value = !unsupported && logic.pinStale(_state.value, pin)
@@ -835,8 +836,13 @@ object E2EHub {
     fun decrypt(list: List<Message>): List<Message> {
         if (list.none { it.sealed }) return list
         val keys = secretKeys()
-        return list.map { if (it.sealed) E2EMessages.open(it, keys, CoreCrypto) else it }
+        val agents = AgentHub.verified.value
+        return list.map { if (it.sealed) openOne(it, keys, agents) else it }
     }
+
+    /** agent 消息（hje2）用核实过的会话公钥解开（docs/agent-mcp.md §11.2）；普通消息（hje1）照旧 */
+    private fun openOne(m: Message, keys: List<String>, agents: Map<String, AgentVerified>): Message =
+        if (m.agentSession != null) Agent.open(m, keys, agents, CoreAgentCrypto) else E2EMessages.open(m, keys, CoreCrypto)
 
     private val redecrypting = Mutex()
 
@@ -853,7 +859,8 @@ object E2EHub {
                 val pending = Hub.messages.value.filter { it.sealed }
                 if (pending.isEmpty()) return@withLock
                 // 解开的换成内容；仍解不开的也更新说明（例如从「解锁后查看」变成「用别的钥匙加密」）
-                val opened = pending.map { E2EMessages.open(it, keys, CoreCrypto) }
+                val agents = AgentHub.verified.value
+                val opened = pending.map { openOne(it, keys, agents) }
                 Hub.applyDecrypted(opened.associateBy { it.id }, session)
             }
         }
