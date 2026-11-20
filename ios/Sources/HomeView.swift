@@ -12,7 +12,7 @@ struct HomeView: View {
     var body: some View {
         // inbox 由模型缓存（消息 / 已读 / 频道变了才重算）；没有筛选时直接用，不再过一遍
         let inbox = model.inbox
-        // 账号开启了端到端加密：明文消息标「未加密」（docs/e2ee-client.md §6.3）
+        // 账号开启了端到端加密：本机保留的旧明文消息（开启加密以前收到的）标「未加密」（T63，docs/e2ee-client.md §6.3）
         let e2eOn = model.e2eAccountEnabled
         let shown = topic == nil && filter == .all ? inbox : inbox.filter { m in
             (topic == nil || m.topic == topic) && {
@@ -34,9 +34,11 @@ struct HomeView: View {
                            color: Theme.accent) { model.settingsAnchor = "about"; model.path = [.settings] }
                 }
                 // 账号已开启加密、这台设备还没有解锁（T10）：点开进入「端到端加密」页
-                // 账号还没开启加密、服务端支持自动开启（T67，不能关闭）；否则已开启、本机还没解锁时显示 T10
+                // 账号还没开启加密、服务端支持自动开启（T67，不能关闭）；否则已开启、本机还没解锁时显示 T10；
+                // 已解锁但没有恢复码（注册即开启加密时不生成）：不打断的「设置恢复码」建议（T23，可以「以后再说」）
                 if model.conn != .unauthorized {
                     if model.e2eNeedsEnable { E2EEnableBanner() } else if model.e2eLocked { E2ELockedBanner() }
+                    else if model.e2eSuggestRecovery { E2ERecoveryHintBanner() }
                 }
                 if shown.isEmpty && !model.loaded {
                     ProgressView("正在加载消息…")
@@ -177,7 +179,7 @@ struct MessageRow: View {
     let m: Message
     let unread: Bool
     let channel: String
-    /// 账号开启了端到端加密：明文消息显示「未加密」小徽章
+    /// 账号开启了端到端加密：本机保留的旧明文消息显示「未加密」小徽章（新消息一律加密，不会再出现）
     var e2eAccount = false
 
     var body: some View {
@@ -189,8 +191,8 @@ struct MessageRow: View {
                 .padding(.top, 7)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    if m.isE2E {
-                        // 加密消息：标题前一个小锁（只表示内容加密了，不表示来源可信）
+                    if m.isE2E && !m.isServerSealed {
+                        // 发送端加密的消息：标题前一个小锁（只表示内容加密了，不表示来源可信）
                         Image(systemName: "lock.fill").font(.caption2).foregroundStyle(Theme.text3)
                             .accessibilityLabel("端到端加密")
                     }
@@ -198,7 +200,14 @@ struct MessageRow: View {
                         .font(.body.weight(unread ? .semibold : .regular))
                         .foregroundStyle(m.priority >= 5 ? Theme.danger : Theme.text)
                         .lineLimit(1)
-                    if !m.isE2E && e2eAccount {
+                    if m.isServerSealed {
+                        // 普通 pushkey 发来的（服务器代加密）：告诉用户这是明文发送，服务器收到时能看到内容（§11.5，不显示 🔒）
+                        Text(E2E.T.plainSentTag).font(.caption2.weight(.medium)).foregroundStyle(Theme.text3)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(Theme.surface2))
+                            .fixedSize()
+                            .accessibilityLabel(E2E.T.t64)
+                    } else if !m.isE2E && e2eAccount {
                         Text("未加密").font(.caption2.weight(.medium)).foregroundStyle(Theme.text3)
                             .padding(.horizontal, 5).padding(.vertical, 1)
                             .background(Capsule().fill(Theme.surface2))

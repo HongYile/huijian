@@ -298,7 +298,7 @@ class SyncService : Service() {
             val page = a.messages(since = cur, limit = 200, changesSince = cs)
             Hub.touchContact()
             val next = maxOf(page.nextSince ?: cur, page.messages.maxOfOrNull { it.id } ?: cur)
-            val r = deliver(page, next, cs, session) ?: return
+            val r = deliver(page, next, cs, session, a) ?: return
             pending += r
             if (page.messages.size < 200 || next == cur) { refreshSettings(pending, a, session); return }
             cur = next
@@ -326,7 +326,7 @@ class SyncService : Service() {
         if (wait > 0) { longSince = 0L; alarms.cancel(alarmIntent(this, KIND_DEADLINE)) }
         Hub.touchContact()
         val next = maxOf(since, page.nextSince ?: since, page.messages.maxOfOrNull { it.id } ?: since)
-        val pending = HashSet(deliver(page, next, cs, session) ?: return PollResult(early = false, gotData = true, elapsedMs = elapsed))
+        val pending = HashSet(deliver(page, next, cs, session, a) ?: return PollResult(early = false, gotData = true, elapsedMs = elapsed))
         // 设置变更常常连着来几条（例如批量改 key）：短暂等一下，把紧接着的变更一起收下，每种设置只拉一次
         var drain = 0
         var last = pending.size
@@ -337,7 +337,7 @@ class SyncService : Service() {
             val cs2 = Hub.store.changesCursor ?: break
             val p2 = a.messages(since = s2, limit = 200, wait = 0, changesSince = cs2)
             val n2 = maxOf(s2, p2.nextSince ?: s2, p2.messages.maxOfOrNull { it.id } ?: s2)
-            pending += deliver(p2, n2, cs2, session) ?: return PollResult(early = false, gotData = true, elapsedMs = elapsed)
+            pending += deliver(p2, n2, cs2, session, a) ?: return PollResult(early = false, gotData = true, elapsedMs = elapsed)
             if (pending.size == last && p2.changes?.changes.isNullOrEmpty()) break
             last = pending.size
         }
@@ -437,7 +437,7 @@ class SyncService : Service() {
         // 「仅本机保留」的消息服务器上本来就没有，对账时跳过
         val del = if (del0.isEmpty()) del0 else del0 - store.keepLocal
         // §7.4：变更记录只保留 90 天，离线更久的设备收不到 purge。账号开了加密时，服务器上找不到的本地明文消息记为「仅本机保留」，
-        // 不删除（可能是「删除服务器上的明文消息」删掉的）；加密消息照常删除
+        // 不删除（可能是服务器删掉的明文）；加密消息照常删除
         val (keep, remove) = if (del.isNotEmpty() && e2eEnabledFor(a)) Changes.splitPlain(Hub.messages.value, del) else emptySet<Long>() to del
         Hub.keepLocally(keep, session)
         Hub.removeMessages(remove, session)
@@ -477,7 +477,7 @@ class SyncService : Service() {
      * 合并新消息 → 应用其他设备的删除 / 归档 → 写盘 → 提醒 → 推进两个游标（写盘失败抛错退避，下次重拉）。
      * 返回这批变更里要重新拉的设置；返回 null 表示期间已退出登录 / 换了账号，结果作废。
      */
-    private fun deliver(page: MessagePage, cursor: Long, cs: Long?, session: Long): Set<SettingKind>? {
+    private fun deliver(page: MessagePage, cursor: Long, cs: Long?, session: Long, a: Api): Set<SettingKind>? {
         if (Hub.session != session) return null
         val store = Hub.store
         var plan = Changes.plan(emptyList())
@@ -498,7 +498,7 @@ class SyncService : Service() {
             // 加密消息在合并前解开（已锁定时标题是 T60，解锁后重新解密）：通知用解密后的标题和预览
             Hub.merge(E2EHub.decrypt(incoming), session).also { E2EHub.healLocked() }
         }
-        // 「删除服务器上的明文消息」删掉的（purge）：本机副本保留；普通删除照常删（包括以前保留的）
+        // 服务器删掉的明文（purge（0.8 以前的「删除服务器上的明文消息」，0.9.0 起客户端没有这个入口；服务端可能还会发，保留兼容））：本机副本保留；普通删除照常删（包括以前保留的）
         Hub.keepLocally(plan.purged, session)
         Hub.removeMessages(plan.deleted, session)
         Hub.applyArchive(plan.archive, session)
@@ -511,9 +511,46 @@ class SyncService : Service() {
         if (!saved) throw IOException("保存消息失败（存储空间不足？）")
         val ok = Hub.inSession(session) {
             store.cursor = cursor
+            // 被服务器补加密的（kind sealed）：先记进重试集合（持久化），变更游标照常前进
+            if (plan.sealed.isNotEmpty()) store.sealedRetry = plan.sealed.associateWith { 0 } + store.sealedRetry     // 已在集合里的保留次数
             nextChanges?.let { store.changesCursor = it }
         }
-        return if (ok) plan.refresh else null
+        if (!ok) return null
+        // 写盘、提醒、推进游标之后再处理补加密：批量、并发上限 4，单条失败留在重试集合里，不影响这一页
+        resealPending(a, session, fresh = plan.sealed.isNotEmpty())
+        return plan.refresh
+    }
+
+    @Volatile private var resealAt = 0L
+
+    /**
+     * 处理重试集合里被补加密的消息（§11.5）。没有新的 sealed 变更时，失败的至少隔 60 秒再试。
+     * 每 RESEAL_CHUNK 条一批：每批开始时续一次唤醒锁（不计数的锁到时自动释放，一次 30 秒不够一大批用），每批处理完就记下进度；
+     * 结束（包括出错、被取消）时把唤醒锁恢复成平常的 WAKE_MS 超时，不直接释放：锁不计数，deliver 和外层循环还要用它
+     * （发通知、刷新设置、发起下一轮请求），提前放掉 CPU 可能睡下。连续失败 5 次、或 4xx（404 / 408 / 410 / 429 除外）的放弃（Changes.resealGiveUp、nextRetry）
+     */
+    private fun resealPending(a: Api, session: Long, fresh: Boolean) {
+        val pending = Hub.store.sealedRetry
+        if (pending.isEmpty()) return
+        val now = SystemClock.elapsedRealtime()
+        if (!fresh && now - resealAt < RESEAL_RETRY_MS) return
+        resealAt = now
+        try {
+            for (chunk in pending.keys.sorted().chunked(RESEAL_CHUNK)) {
+                if (a.wasCancelled || Hub.session != session) return
+                wakeLock.acquire(RESEAL_WAKE_MS)
+                val (_, r) = try {
+                    Hub.resealBatch(chunk, a, session)
+                } catch (e: UnauthorizedException) {
+                    throw e
+                } catch (e: Exception) {
+                    return
+                }
+                Hub.inSession(session) { Hub.store.sealedRetry = Changes.nextRetry(Hub.store.sealedRetry, r) }
+            }
+        } finally {
+            wakeLock.acquire(WAKE_MS)
+        }
     }
 
     /** 账号是否开启了加密（对账用）：还没读到时读一次；读不到（网络错误等）按开启处理，宁可留着不删 */
@@ -664,6 +701,11 @@ class SyncService : Service() {
         private const val WATCHDOG_MS = 10 * 60_000L
         private const val STUCK_MS = 5 * 60_000L
         private const val WAKE_MS = 30_000L
+        /** 补加密的消息没拉成时，至少隔多久再试 */
+        private const val RESEAL_RETRY_MS = 60_000L
+        /** 补加密的消息每批多少条（并发 4，每条读超时 20 秒：一批最慢约 5 × 20 秒） */
+        private const val RESEAL_CHUNK = 20
+        private const val RESEAL_WAKE_MS = 2 * 60_000L
         private const val STEADY_WAKE_MS = 5_000L
         const val ACTION_RESTART = "restart"
         private const val EXTRA_KIND = "kind"

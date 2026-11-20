@@ -57,6 +57,13 @@ class ChangesTest {
         assertEquals(mapOf(11L to 0, 12L to 2), p.archive)
         assertEquals(setOf(SettingKind.CHANNELS, SettingKind.KEYS, SettingKind.ACCOUNT), p.refresh)
         assertTrue(Changes.plan(emptyList()).isEmpty)
+        // 0.8.0：kind sealed（服务器补加密了）→ 重新拉这条消息；同一批里后来又删除的以删除为准
+        val sealed = Changes.plan(listOf(MsgChange(1, 5, "sealed", null), MsgChange(2, 6, "sealed", null), MsgChange(3, 6, "delete", null),
+            MsgChange(4, 0, "sealed", null)))
+        assertEquals(setOf(5L), sealed.sealed)
+        assertEquals(setOf(6L), sealed.deleted)
+        assertFalse(sealed.isEmpty)
+        assertFalse(Changes.plan(listOf(MsgChange(1, 5, "sealed", null))).isEmpty)
         assertEquals(setOf(SettingKind.ACCOUNT), Changes.plan(listOf(MsgChange(1, 0, "devices", null))).refresh)
     }
 

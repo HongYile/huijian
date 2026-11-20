@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /** 附件下载：同一附件只下一份（SingleFlight），临时文件改名失败时的兜底（Api.commit） */
 class DownloadsTest {
-    private fun flight() = SingleFlight<String>(CoroutineScope(SupervisorJob() + Dispatchers.Default))
+    private fun flight() = SingleFlight<String, Unit>(CoroutineScope(SupervisorJob() + Dispatchers.Default))
 
     @Test fun sameKeySharesOneRun() = runBlocking {
         val f = flight()

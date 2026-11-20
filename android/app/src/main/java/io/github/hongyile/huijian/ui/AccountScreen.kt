@@ -53,7 +53,8 @@ import kotlinx.coroutines.launch
 
 /**
  * 设置 → 账户与设备：用户名和密码、生成配对码（3 分钟倒计时、显示被哪台设备用掉）、
- * 设备列表（标出本机、可移除其他设备）、给本机改名、服务器管理权限。和 Mac 的「账户」页一致。
+ * 设备列表（标出本机、可移除其他设备）、给本机改名。和 Mac 的「账户」页一致。
+ * 客户端不提供任何服务器管理入口（服务端 0.9.0 起管理后台只能在服务器上进入，/v1/me 的 can_admin 恒为 false）
  */
 @Composable
 fun AccountScreen(back: () -> Unit) {
@@ -61,8 +62,6 @@ fun AccountScreen(back: () -> Unit) {
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     var detail by remember { mutableStateOf<AccountDetail?>(null) }
-    /** 本机是否「允许管理」：null = 还不知道 */
-    var canAdmin by remember { mutableStateOf<Boolean?>(null) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var editCred by remember { mutableStateOf(false) }
@@ -79,18 +78,26 @@ fun AccountScreen(back: () -> Unit) {
             } catch (e: Exception) {
                 error = describe(e)
             } finally { loading = false }
-            canAdmin = runCatching { api { it.me() } }.getOrNull()?.let { if (it.has("can_admin")) it.optBoolean("can_admin") else null } ?: canAdmin
         }
     }
     LaunchedEffect(Unit) { load(); E2EHub.refreshAsync() }
     // 服务端有 e2e（读到了加密状态）：改密码走新协议（e2ee-client.md §7.5），从不发送密码原文
     val e2eState by E2EHub.state.collectAsStateWithLifecycle()
-    // 其他设备改了账户或设备（变更流 devices / account）：同步服务已经拉好最新的，直接显示，再复核本机的管理权限
+    // 其他设备改了账户或设备（变更流 devices / account）：同步服务已经拉好最新的，直接显示
     val pushed by Hub.account.collectAsStateWithLifecycle()
     LaunchedEffect(pushed) {
         val p = pushed ?: return@LaunchedEffect
         detail = p; error = null
-        canAdmin = runCatching { api { it.me() } }.getOrNull()?.let { if (it.has("can_admin")) it.optBoolean("can_admin") else null } ?: canAdmin
+    }
+
+    // 首页提示条 T67 点进来、账号还没有密码：账户信息读到后直接弹出「设置用户名和密码」，成功后自动开启加密（§11.1 末尾）。
+    // 本账号任何设备都能设置初始密码（服务端 0.9.0），不再看本机有没有管理权限
+    val wantSetPassword by E2EHub.setPasswordRequested.collectAsStateWithLifecycle()
+    LaunchedEffect(wantSetPassword, detail) {
+        val a = detail?.account ?: return@LaunchedEffect
+        if (!wantSetPassword) return@LaunchedEffect
+        if (!a.hasPassword) editCred = true
+        E2EHub.requestSetPassword(false)
     }
 
     ManageScaffold("账户与设备", back, snackbar, actions = {
@@ -109,9 +116,7 @@ fun AccountScreen(back: () -> Unit) {
                 error != null && d == null -> Text(error!!, color = MaterialTheme.colorScheme.error)
                 a == null -> Text(if (loading) "正在加载…" else "", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 a.hasPassword -> OutlinedButton({ editCred = true }) { Text("修改用户名 / 密码") }
-                canAdmin != false -> Button({ editCred = true }) { Text("设置用户名和密码") }
-                else -> Text("这个账号还没有密码，需要在开启了「允许管理」的设备上或管理网页的「账号」页设置。设置后就能在其他设备上用账号登录。",
-                    color = WARNING, fontSize = 13.sp)
+                else -> Button({ editCred = true }) { Text("设置用户名和密码") }
             }
         }
 
@@ -133,20 +138,11 @@ fun AccountScreen(back: () -> Unit) {
         }
 
         ThisDeviceCard(detail?.devices?.firstOrNull { it.current && !it.revoked }?.name, say = ::say, onRenamed = { load() })
-
-        SectionCard("服务器管理权限", if (canAdmin == true) "可以在管理后台管理服务器（存储、备份、所有账号）。"
-            else "服务器级权限：管理后台、存储与备份。需要时在管理网页的「设备」页为本机打开「允许管理」。管理自己账号的 pushkey、设备和频道不需要这个权限。") {
-            Row {
-                Text("允许管理服务器", Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(when (canAdmin) { true -> "已开启"; false -> "未开启"; null -> "未知" },
-                    color = if (canAdmin == true) SUCCESS else MaterialTheme.colorScheme.onSurface)
-            }
-        }
     }
 
     if (editCred) detail?.account?.let { a ->
         val st = e2eState
-        CredentialsDialog(a.username, a.hasPassword, admin = canAdmin == true, newProtocol = st != null,
+        CredentialsDialog(a.username, a.hasPassword, newProtocol = st != null,
             onDismiss = { editCred = false }) { u, pw, cur, done ->
             scope.launch {
                 try {
@@ -156,9 +152,15 @@ fun AccountScreen(back: () -> Unit) {
                     // 加密状态还没读到（st == null）时由 changeCredentials 自己读，不按「没开启」处理
                     E2EHub.work {
                         val net = Hub.api() ?: throw java.io.IOException("未登录")
-                        if (!a.hasPassword) E2EHub.logic.setInitialPassword(net, server, u, pw)
-                        else E2EHub.logic.changeCredentials(net, server, a.username, u, cur, pw.ifEmpty { null },
-                            st?.enabled, E2EHub.activeSk())
+                        if (!a.hasPassword) {
+                            // 设置初始密码后账号有了密码：用这次的凭证在后台自动开启加密（§11.1）
+                            val pre = E2EHub.logic.setInitialPassword(net, server, u, pw)
+                            E2EHub.notePasswordKeys(u, pre, E2EHub.logic.weakPassword(pw, u))
+                        } else {
+                            E2EHub.logic.changeCredentials(net, server, a.username, u, cur, pw.ifEmpty { null },
+                                st?.enabled, E2EHub.activeSk())
+                            if (pw.isNotEmpty()) E2EHub.passwordChanged()     // 新密码通过了强度检查：去掉 T24
+                        }
                         if (u.isNotBlank()) { Hub.store.username = u; Hub.store.loginUsername = u }
                     }
                     say(if (pw.isEmpty()) "用户名已保存" else "已保存，新密码立即生效（已登录的设备不受影响）")
@@ -167,6 +169,7 @@ fun AccountScreen(back: () -> Unit) {
                     E2EHub.refreshAsync()
                 } catch (e: E2EError) {
                     say(e.message ?: "保存失败")
+                    if (e.kind == E2EError.Kind.STALE_KEY) E2EHub.refreshAsync()     // 本机钥匙已停用（T46）：刷新状态
                 } catch (e: Exception) {
                     say("保存失败：${describe(e)}")
                 } finally { done() }
@@ -295,7 +298,7 @@ private fun ThisDeviceCard(serverName: String?, say: (String) -> Unit, onRenamed
         if (name.trim() == saved) name = serverName
         saved = serverName
     }
-    SectionCard("本机", "名称可以随时修改、可以重名；设备 ID 是唯一的，在管理后台搜索或排查问题时用 ID。") {
+    SectionCard("本机", "名称可以随时修改、可以重名；设备 ID 是唯一的，排查问题时用 ID。") {
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(name, { name = it.take(40) }, Modifier.weight(1f), label = { Text("设备名称") }, singleLine = true)
             TextButton({
@@ -317,10 +320,10 @@ private fun ThisDeviceCard(serverName: String?, say: (String) -> Unit, onRenamed
     }
 }
 
-/** 设置 / 修改用户名和密码（规则和服务端一致：已有密码时要当前密码，「允许管理」的设备可以直接重设） */
+/** 设置 / 修改用户名和密码（规则和服务端一致：没有密码时本账号任何设备都能设置初始密码，已有密码时要当前密码） */
 @Composable
 private fun CredentialsDialog(
-    username0: String, hasPassword: Boolean, admin: Boolean, newProtocol: Boolean, onDismiss: () -> Unit,
+    username0: String, hasPassword: Boolean, newProtocol: Boolean, onDismiss: () -> Unit,
     onSave: (username: String, password: String, current: String, done: () -> Unit) -> Unit,
 ) {
     var username by remember { mutableStateOf(username0) }
@@ -329,7 +332,7 @@ private fun CredentialsDialog(
     var pw2 by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var tick by remember { mutableIntStateOf(0) }
-    // 账号有密码时一律核对当前密码（在本机算成凭证，不发原文），「允许管理」的设备也一样（e2ee-client.md §2.4）
+    // 账号有密码时一律核对当前密码（在本机算成凭证，不发原文，e2ee-client.md §2.4）
     val needCurrent = hasPassword
     val uErr = if (Manage.normalizeUsername(username).isEmpty()) "请填写用户名" else Manage.usernameProblem(username)
     val pErr = Manage.passwordProblem(pw, pw2, required = !hasPassword)

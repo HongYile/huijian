@@ -18,11 +18,13 @@ object E2EText {
     const val T3 = "密码不对"
     const val T10 = "🔒 加密消息已锁定：点这里解锁"
     const val T20_TITLE = "开启端到端加密"
-    const val T20 = "开启后，新消息的标题、正文和附件只有你登录过的设备能解开，服务器和备份里只有密文。发送端要换成「加密发送密钥」才会加密。旧消息保持原样。"
+    const val T20 = "开启后，新消息的标题、正文和附件只有你登录过的设备能解开，服务器和备份里只有密文。服务器上已有的旧消息也会被加密；用普通 pushkey 发来的消息由服务器收到后立即加密，想让服务器完全看不到内容，发送端请改用「加密发送密钥」。"
     const val T21_TITLE = "保存恢复码"
     const val T21 = "忘记密码、又没有其他设备可以批准时，只能用它解锁加密消息。恢复码只显示这一次，请抄下来或存进密码管理器。"
     const val T21_CHECK = "我已把恢复码保存好"
-    const val T22 = "已开启端到端加密。到「Pushkey」页复制「加密发送密钥」，换掉脚本里原来的 pushkey，新消息就会加密。"
+    const val T23 = "还没有设置恢复码。忘记密码、又没有其他设备时，只能靠恢复码找回加密消息。"
+    const val T24 = "你的密码比较弱，加密钥匙是用密码保护的，建议换一个更长的密码。"
+    const val T22 = "已开启端到端加密。用普通 pushkey 发来的消息由服务器收到后立即加密；想让服务器也看不到内容，到「Pushkey」页复制「加密发送密钥」，换掉脚本里原来的 pushkey。"
     const val T30_TITLE = "请另一台设备批准"
     const val T30 = "在另一台已解锁的设备上打开回笺，它会提示有设备请求解锁。"
     fun t31(code: String) = "核对码 ${sasText(code)}：确认和另一台设备上显示的一样，再在那台设备上点「一致，批准」。"
@@ -36,6 +38,8 @@ object E2EText {
     const val T42_CURRENT = "填管理员告诉你的临时密码，不要填你自己原来的密码。"
     const val T43 = "收到的钥匙和账号的钥匙对不上，已丢弃。可能有人冒充服务器。"
     const val T44 = "用密码解锁失败：管理员可能重设过你的密码。请用恢复码或另一台设备解锁，解锁后重新设置密码。"
+    const val T45 = "这会换一把新的加密钥匙：以前的加密消息只有还留着旧钥匙的设备能看，其他设备上会显示「用别的钥匙加密的消息」。发送端要换成新的加密发送密钥。确定继续吗？"
+    const val T46 = "账号的加密钥匙已经更换（可能在别的设备上重置过）。请用密码或恢复码解锁，确认新钥匙。"
     fun t50(name: String) = "「$name」请求解锁加密消息：打开回笺核对后批准。"
     const val T51 = "这个请求已经由另一台设备处理。"
     const val T52 = "核对失败，可能有人冒充这台设备，已拒绝。"
@@ -43,21 +47,50 @@ object E2EText {
     const val T60 = "🔒 加密消息（解锁后查看）"
     const val T61 = "🔒 用别的钥匙加密的消息，这台设备解不开"
     const val T62 = "🔒 加密消息已损坏，无法解开"
-    const val T63 = "未加密：发送端用的是普通 pushkey"
+    /** 只用于本机保留的旧消息（开启加密以前同步到的明文；服务器上已经没有明文） */
+    const val T63 = "未加密：开启加密以前收到、只留在本机的旧消息"
+    const val T64 = "明文发送：发送端用的是普通 pushkey，没有加密，服务器收到时能看到内容；之后加密保存，数据库和备份里没有明文。想让服务器也看不到，请改用加密发送密钥。"
+    /** 列表里服务器代加密的消息的小标签（§11.5，不显示 🔒） */
+    const val SENT_PLAIN = "明文发送"
+    /** 列表里本机保留的旧明文消息的小标签（§6.3） */
+    const val PLAIN_BADGE = "未加密"
+    const val T65 = "用普通 pushkey 发来的消息，服务器收到后立即用你的公钥加密再保存，数据库和备份里没有明文。服务器在收到的那一刻能看到内容；想让服务器完全看不到，请改用加密发送密钥。"
+    const val T67 = "输入一次密码，开启端到端加密：之后服务器上只保存密文。"
+    const val T66 = "普通 pushkey 适合 curl 等无法加密的发送端，消息由服务器收到后立即代为加密。"
     const val T70 = "发送端用它代替 pushkey，消息会在发送端加密，只有你的设备能解开。它只能加密、不能解密，泄露了也看不到你的消息。"
-    const val T71 = "打开后，服务器拒收没有加密的消息，防止有脚本忘了换成加密发送密钥。"
     const val T73 = "本机解锁一次后才显示（防止被冒充的服务器换掉公钥）。"
-    const val T72 = "删除服务器上本账号的全部明文消息？加密消息不受影响，本机已同步的消息保留。服务器以前做的备份里仍有这些消息。"
 
     /** 详情页元信息行里加密消息的标记 */
     const val ENCRYPTED = "🔒 端到端加密"
     const val WEAK_CURRENT = "当前密码不够安全，请换一个新密码"
     const val LOCKED_CHANGE = "本机处于锁定状态，请先解锁加密消息再改密码"
+    /** 注册时服务端太旧（没有新登录协议）：不发密码原文注册 */
+    const val REGISTER_OLD_SERVER = "服务器版本太旧，请先升级回笺服务端"
+    /** 注册请求发出后网络出错 / 超时：服务器可能已经建好了账号 */
+    const val REGISTER_UNSURE = "注册结果不确定：可能已经注册成功，请先用这个用户名和密码登录"
+    /** 上次注册结果不确定，这次又被拒（用户名已被使用、邀请码已用完等）：多半是上次已经成功了 */
+    const val REGISTER_MAYBE_DONE = "上次注册可能已经成功，请改用登录，用这个用户名和密码登录"
     const val NO_PRELOGIN = "服务器没有返回密码派生参数（prelogin 不存在），无法安全地核对密码，已停止。"
     const val SETUP_RETRY = "开启加密时网络出错，服务器上还没有开启，请重试。"
+    /** 网络出错后核对：服务器上暂时还没开启。新钥匙留着，之后至少再核对一次（间隔 30 秒以上）仍没生效才删（§4.1） */
+    const val SETUP_NOT_YET = "开启加密时网络出错，服务器上暂时还没有开启。新钥匙和恢复码已保存在本机，之后每次刷新都会核对；也可以稍后再点「开启端到端加密」（会先核对，不会重复开启），或者放弃这次开启。"
+    const val RESET_NOT_YET_CALL = "重置加密时网络出错，服务器上暂时还是旧钥匙。新钥匙已保存在本机，之后每次刷新都会核对，24 小时内没有生效就按失败处理；也可以稍后再点重置（会先核对上一次的结果），或者放弃这次重置。"
+    /** 手动开启留下的、结果还没确认的记录（加密页，配「放弃这次开启」） */
+    const val SETUP_PENDING = "上一次开启加密的结果还没确认（服务器上暂时还没有开启）。可以再点「开启端到端加密」（会先核对，不会重复开启），或者放弃这次开启。"
+    /** 自动开启 / T67：本机有手动开启或重置留下的、结果还没确认的记录 */
+    const val AUTO_PENDING = "上次开启加密的结果还没确认，请到「端到端加密」页查看；确认之后会自动处理。"
     const val SETUP_UNSURE = "开启加密时网络出错，暂时无法确认是否已经开启。请稍后点「开启端到端加密」重试（会先核对，不会重复开启）。"
     const val ROTATE_RETRY = "更换恢复码时网络出错，服务器上还没有更换，旧恢复码仍然有效。请重试。"
     const val ROTATE_UNSURE = "更换恢复码时网络出错，暂时无法确认是否已经更换。稍后刷新时会自动核对，更换成功会显示新恢复码。"
+    /** §11.1 自动开启进行中 / 失败后等待重试 */
+    const val AUTO_RUNNING = "正在开启加密…"
+    const val AUTO_FAILED = "自动开启加密暂时没有成功，下次刷新或用密码登录时会自动重试；也可以在下面手动开启。"
+    const val RESET_TITLE = "重置加密"
+    const val ROTATE_KEY_TITLE = "更换加密钥匙"
+    const val RESET_RETRY = "重置加密时网络出错，服务器上还没有重置，请重试。"
+    const val RESET_UNSURE = "重置加密时网络出错，暂时无法确认是否已经重置。新钥匙已保存在本机，稍后刷新时会自动核对：已经重置就直接生效。"
+    /** 进行中的重置：刷新时服务器上还是旧钥匙（§4.1 同样的规则：没确定失败就保留，再点重置时先核对这一次） */
+    const val RESET_NOT_YET = "上一次重置加密还没有生效（服务器上还是旧钥匙）。可以再点一次重置（会先核对上一次的结果），或者放弃这次重置；24 小时内没有生效会自动按失败处理。"
     const val GRANT_BAD = "转交来的钥匙解不开，请重新请求批准"
     const val WRAP_GONE = "用密码锁住的私钥已失效（管理员重设过密码）：请用另一台设备批准，或用恢复码解锁"
 
@@ -83,6 +116,8 @@ class E2EError(message: String, val kind: Kind = Kind.OTHER, val pending: SetupR
         MISMATCH,
         /** 开启加密时网络出错、又取不到状态：pending 里的钥匙和恢复码留在内存里，重试时先核对 */
         SETUP_UNSURE,
+        /** 账号的钥匙已经更换（别的设备重置过加密，§11.3）：本机拿的是旧私钥，引导用密码或恢复码解锁（T46） */
+        STALE_KEY,
     }
 }
 
@@ -141,15 +176,16 @@ interface E2ENet {
     fun loginRaw(body: JSONObject, register: Boolean): JSONObject
     fun e2eState(): JSONObject
     fun e2eSetup(body: JSONObject): JSONObject
+    /** POST /v1/e2e/reset（0.8.0，§11.3） */
+    fun e2eReset(body: JSONObject): JSONObject
     fun e2eUnlock(authKey: String): JSONObject
     fun e2eDevice(pub: String, request: Boolean, commit: String?): JSONObject
     fun e2eChallenge(deviceId: String, nonce: String)
     fun e2eReveal(nonce: String)
-    fun e2eGrant(deviceId: String, pub: String, grant: String)
+    /** kid：转交的私钥对应的 kid（0.8.0，§11.5）；不是账号启用中的钥匙时 409 */
+    fun e2eGrant(deviceId: String, pub: String, grant: String, kid: String)
     fun e2eDeny(deviceId: String)
     fun e2eRecovery(body: JSONObject)
-    fun e2eSetOnly(only: Boolean): JSONObject
-    fun e2eDeletePlain(): Int
     fun accountAuth(body: JSONObject): JSONObject
     fun credentials(body: JSONObject): JSONObject
 }
@@ -182,13 +218,16 @@ data class E2ERequest(
 data class E2EState(
     val enabled: Boolean,
     val keys: List<E2EKeyInfo>,
-    val e2eOnly: Boolean,
     /** 账号已升级到新登录协议 */
     val authKey: Boolean,
     val hasPasswordWrap: Boolean,
     val recoveryWrap: String,
     val device: E2EDevice,
     val requests: List<E2ERequest>,
+    /** 服务器代加密（0.8.0 起始终为真；旧服务端没有这个字段）：也用它判断服务端支不支持自动开启、重置加密（§11） */
+    val serverSeal: Boolean = false,
+    /** 服务器上本账号还剩的明文消息条数（0.8.0 的字段，只解析不显示：0.9.0 起服务器上没有明文） */
+    val plainMessages: Int = 0,
 ) {
     val activeKey get() = keys.firstOrNull { it.active }
 
@@ -205,7 +244,6 @@ data class E2EState(
             return E2EState(
                 enabled = o.optBoolean("enabled"),
                 keys = parseKeys(o.optJSONArray("keys")),
-                e2eOnly = o.optBoolean("e2e_only"),
                 authKey = o.optBoolean("auth_key"),
                 hasPasswordWrap = o.optBoolean("has_password_wrap"),
                 recoveryWrap = o.optString("recovery_wrap"),
@@ -215,6 +253,8 @@ data class E2EState(
                     E2ERequest(it.optString("device_id"), it.optString("name"), it.optString("platform"), it.optString("pub"),
                         it.optLong("requested_at"), it.optString("commit"), it.optString("challenge"), it.optString("reveal"))
                 },
+                serverSeal = o.optBoolean("server_seal"),
+                plainMessages = o.optInt("plain_messages"),
             )
         }
 
@@ -243,9 +283,41 @@ data class Cred(val field: String, val value: String, val unlock: String? = null
 }
 
 /** 账号密码登录 / 注册的结果。keys：登录时顺带解开的私钥（调用方在 Hub.signedIn 之后保存） */
-data class LoginOutcome(val result: LoginResult, val keys: List<LocalKey> = emptyList(), val notice: String? = null, val upgraded: Boolean = false)
+data class LoginOutcome(
+    val result: LoginResult, val keys: List<LocalKey> = emptyList(), val notice: String? = null, val upgraded: Boolean = false,
+    /** 这次用 Argon2 算出的登录凭证（只在内存里）：账号还没开启加密时，自动开启（§11.1）直接复用，不用再算一次 */
+    val pre: PreKeys? = null,
+    /** 这次输入的密码没通过 Core.passwordProblem（自动开启后加密页显示 T24） */
+    val weak: Boolean = false,
+)
 
-data class SetupResult(val key: LocalKey, val recoveryCode: String)
+/** 用当前密码按 Argon2 算出的 salt、登录凭证 auth、解锁钥匙 unlock（§11.1 复用；unlock 只在内存里） */
+data class PreKeys(val salt: String, val auth: String, val unlock: String)
+
+/** 开启加密的方式：MANUAL = §4.1 手动开启（生成恢复码）；AUTO = §11.1 自动开启；RESET = §11.3 重置加密（后两种不生成恢复码） */
+enum class SetupMode { MANUAL, AUTO, RESET }
+
+/** recoveryCode：AUTO、RESET 时为空 */
+/**
+ * 自动开启失败后的重试（§11.1 第 6 步）：指数退避，30 秒起，上限 30 分钟；
+ * 密码不对（403）、尝试太频繁（429）时停止自动重试，等下次输入密码（不耗尽服务端的密码核对限额）
+ */
+object AutoRetry {
+    const val FIRST_MS = 30_000L
+    const val MAX_MS = 30 * 60_000L
+
+    /** 连续失败 fails 次之后，下一次自动重试前要等多久 */
+    fun delayMs(fails: Int): Long = if (fails <= 0) 0L else minOf(MAX_MS, FIRST_MS shl minOf(fails - 1, 16))
+
+    /** 这种失败要停止自动重试（丢掉内存里的凭证） */
+    fun stops(e: Throwable): Boolean =
+        (e as? E2EError)?.kind == E2EError.Kind.WRONG_PASSWORD || (e as? ApiException)?.status.let { it == 403 || it == 429 }
+}
+
+/** replaces：重置时被换掉的那把（发请求前服务器启用中的公钥），刷新时用来判断重置是「还没生效」还是「被别的设备抢先」 */
+/** createdAt：生成时间（毫秒，System.currentTimeMillis），进行中的重置 24 小时后按失败处理 */
+data class SetupResult(val key: LocalKey, val recoveryCode: String, val mode: SetupMode = SetupMode.MANUAL, val replaces: String = "",
+                       val createdAt: Long = System.currentTimeMillis())
 
 /** 更换恢复码进行中（§7 第 3 项）：新恢复码和这次上传的 recovery_wrap（刷新时用它判断是否已经换成功） */
 data class RecoveryRotation(val code: String, val wrap: String)
@@ -365,6 +437,7 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
     fun login(net: E2ENet, server: String, username: String, password: String, name: String, fingerprint: String,
               authed: (String) -> E2ENet): LoginOutcome {
         val body = loginBody(username, name, fingerprint)
+        val weak = c.passwordProblem(password, username) != null
         when (val k = kdf(net, server, username)) {
             Kdf.Legacy -> return LoginOutcome(loginResult(net.loginRaw(body.put("password", password), register = false)))
             is Kdf.Argon -> {
@@ -372,49 +445,109 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
                 val o = net.loginRaw(body.put("auth_key", auth), register = false)
                 val r = loginResult(o)
                 flags.markUpgraded(server, username)
+                val pre = PreKeys(k.salt, auth, unlock)
                 val e = o.optJSONObject("e2e")
                 val wrap = e?.optString("password_wrap").orEmpty()
-                if (e == null || !e.optBoolean("enabled") || wrap.isEmpty()) return LoginOutcome(r, upgraded = true)
+                if (e == null || !e.optBoolean("enabled") || wrap.isEmpty()) return LoginOutcome(r, upgraded = true, pre = pre, weak = weak)
                 // unwrap 失败（管理员重设过密码等）不阻止登录，进入「已锁定」；钥匙对不上时丢弃并提示 T43
-                val sk = try { c.unwrap("hjp1", unlock, wrap) } catch (_: Exception) { return LoginOutcome(r, upgraded = true) }
+                val sk = try { c.unwrap("hjp1", unlock, wrap) } catch (_: Exception) {
+                    return LoginOutcome(r, upgraded = true, pre = pre, weak = weak)
+                }
                 return try {
-                    LoginOutcome(r, listOf(verify(sk, E2EState.parseKeys(e.optJSONArray("keys")), null)), upgraded = true)
+                    LoginOutcome(r, listOf(verify(sk, E2EState.parseKeys(e.optJSONArray("keys")), null)), upgraded = true, pre = pre, weak = weak)
                 } catch (x: E2EError) {
-                    LoginOutcome(r, notice = x.message, upgraded = true)
+                    LoginOutcome(r, notice = x.message, upgraded = true, pre = pre, weak = weak)
                 }
             }
             is Kdf.Pbkdf2 -> {
                 val pk = pbkdf2(password, k)
                 val r = loginResult(net.loginRaw(body.put("password_key", pk), register = false))
                 // 登录后立即自动升级；失败不影响登录，下次登录再试
-                val up = try { autoUpgrade(authed(r.token), server, username, password, pk) } catch (_: Exception) { false }
-                return LoginOutcome(r, upgraded = up)
+                val pre = try { autoUpgrade(authed(r.token), server, username, password, pk) } catch (_: Exception) { null }
+                return LoginOutcome(r, upgraded = pre != null, pre = pre, weak = weak)
             }
         }
     }
 
-    /** §2.1 第 7 步：PBKDF2 登录后升级到 Argon2id。账号已开启加密（管理员重设过密码）时先不升级，等解锁后在 §4.4 完成 */
-    fun autoUpgrade(net: E2ENet, server: String, username: String, password: String, passwordKey: String): Boolean {
-        if (E2EState.parse(net.e2eState()).enabled) return false
+    /**
+     * §2.1 第 7 步：PBKDF2 登录后升级到 Argon2id，返回新的凭证（自动开启加密复用）。
+     * 账号已开启加密（管理员重设过密码）时先不升级（返回 null），等解锁后在 §4.4 完成
+     */
+    fun autoUpgrade(net: E2ENet, server: String, username: String, password: String, passwordKey: String): PreKeys? {
+        if (E2EState.parse(net.e2eState()).enabled) return null
         val salt = c.newSalt()
-        val (auth, _) = c.passwordKeys(password, salt)
+        val (auth, unlock) = c.passwordKeys(password, salt)
         net.accountAuth(JSONObject().put("current_password_key", passwordKey).put("auth_salt", salt).put("auth_key", auth))
         flags.markUpgraded(server, username)
-        return true
+        return PreKeys(salt, auth, unlock)
     }
 
-    /** 注册（§2.2）：服务端有 e2e 时用新协议，密码强度由核心库检查；旧服务端（且没有「已升级」标记）按原来的方式 */
-    fun register(net: E2ENet, server: String, username: String, password: String, name: String, fingerprint: String): LoginOutcome {
+    /**
+     * 注册（§2.2）：服务端有 e2e 时用新协议，密码强度由核心库检查；旧服务端（且没有「已升级」标记）按原来的方式。
+     * inviteCode：服务端要邀请码时带上 invite_code（空的不带）。
+     * withKeys：服务端有 register.e2e（0.9.0 起，注册即开启加密）：在本机生成账号钥匙，按 /v1/e2e/setup 的格式
+     * （pub、password_wrap、auth_salt、auth_key）一起提交，不生成恢复码（注册后建议设置）。成功后这把钥匙就是账号钥匙：
+     * 返回在 keys 里，调用方按「本机生成」保存、钉住公钥，不再自动开启。没有这个功能的旧服务端：注册后再自动开启（§11.1）
+     */
+    fun register(net: E2ENet, server: String, username: String, password: String, name: String, fingerprint: String,
+                 inviteCode: String = "", withKeys: Boolean = false): LoginOutcome {
         val body = loginBody(username, name, fingerprint)
-        if (kdf(net, server, username) == Kdf.Legacy) {
-            return LoginOutcome(loginResult(net.loginRaw(body.put("password", password), register = true)))
-        }
+        inviteCode.trim().takeIf { it.isNotEmpty() }?.let { body.put("invite_code", it) }
+        if (withKeys) return registerWithKeys(net, server, username, password, body)
+        // 注册一律不发密码原文：没有 prelogin（新登录协议）的旧服务端（0.6 及以前）不注册，请用户先升级服务端。登录的旧路径不变
+        if (kdf(net, server, username) == Kdf.Legacy) throw E2EError(E2EText.REGISTER_OLD_SERVER)
         c.passwordProblem(password, username)?.let { throw E2EError(it, E2EError.Kind.WEAK_PASSWORD) }
         val salt = c.newSalt()
-        val (auth, _) = c.passwordKeys(password, salt)
+        val (auth, unlock) = c.passwordKeys(password, salt)
         val r = loginResult(net.loginRaw(body.put("auth_key", auth).put("auth_salt", salt), register = true))
         flags.markUpgraded(server, username)
-        return LoginOutcome(r, upgraded = true)
+        return LoginOutcome(r, upgraded = true, pre = PreKeys(salt, auth, unlock))
+    }
+
+    /**
+     * 注册即开启加密（服务端 0.9.0，register.e2e）。服务器在一个事务里建账号、存公钥和锁住的私钥，所以这里不用像 §4.1
+     * 那样先存「进行中的开启」：响应丢了也不怕，账号要么没建，要么已经用这把公钥建好，之后用密码登录就能解开 password_wrap。
+     * 响应里的 keys 只用来核对：有 keys 而 active 的不是本机这把（服务器不守规矩）→ 不保存，提示 T43
+     */
+    private fun registerWithKeys(net: E2ENet, server: String, username: String, password: String, body: JSONObject): LoginOutcome {
+        val weak = c.passwordProblem(password, username)
+        weak?.let { throw E2EError(it, E2EError.Kind.WEAK_PASSWORD) }
+        val salt = c.newSalt()
+        val (auth, unlock) = c.passwordKeys(password, salt)
+        val kp = c.keypair()
+        body.put("auth_salt", salt).put("auth_key", auth).put("pub", kp.pub).put("password_wrap", c.wrap("hjp1", unlock, kp.sk))
+        val o = net.loginRaw(body, register = true)
+        val r = loginResult(o)
+        flags.markUpgraded(server, username)
+        val pre = PreKeys(salt, auth, unlock)
+        val keys = E2EState.parseKeys(o.optJSONObject("e2e")?.optJSONArray("keys"))
+        val key = if (keys.isEmpty()) LocalKey(kp.kid, kp.pub, kp.sk)
+            else try { verify(kp.sk, keys, kp.pub) } catch (x: E2EError) { return LoginOutcome(r, notice = x.message, upgraded = true, pre = pre) }
+        return LoginOutcome(r, listOf(key), upgraded = true, pre = pre)
+    }
+
+    /**
+     * 注册失败时显示什么（纯函数，方便单测）。返回（文字，这次结果是否不确定）。
+     * - 不是 ApiException 的 IOException（网络断了、超时），或网关的 502 / 503 / 504（反向代理等不到回应，服务器可能已经处理了）：
+     *   请求可能已经到了服务器、账号已经建好 → REGISTER_UNSURE。服务端自己回的 500「注册失败」是明确失败，不算；
+     * - 上次结果不确定，这次被拒（409 用户名已被使用，或 403 邀请码已用完等）：多半是上次已经成功了 → 服务器的说明 + REGISTER_MAYBE_DONE；
+     * - 其他：服务器的说明原样（不按文字做逻辑）
+     */
+    private val GATEWAY_5XX = setOf(502, 503, 504)
+
+    fun registerError(e: Throwable, unsureBefore: Boolean): Pair<String?, Boolean> = when {
+        e is ApiException && e.status in GATEWAY_5XX -> E2EText.REGISTER_UNSURE to true
+        e is ApiException && unsureBefore && (e.status == 409 || e.status == 403) ->
+            (e.message?.takeIf { it.isNotBlank() }?.let { "$it。" }.orEmpty() + E2EText.REGISTER_MAYBE_DONE) to true
+        // 限速（429）、本地检查（密码太短等 E2EError）：没说明上次注册的结果，保持「上次是否不确定」
+        e is ApiException && e.status == 429 -> e.message to unsureBefore
+        e is E2EError -> e.message to unsureBefore
+        e is ApiException || e is UnauthorizedException -> e.message to false
+        // 连接都没建立起来：请求没到服务器，不改变「上次是否不确定」
+        e is java.net.UnknownHostException -> "找不到服务器，请检查地址" to unsureBefore
+        e is java.net.ConnectException -> "连不上服务器" to unsureBefore
+        e is java.io.IOException -> E2EText.REGISTER_UNSURE to true
+        else -> e.message to unsureBefore
     }
 
     private fun loginResult(o: JSONObject) = LoginResult(o.getString("device_id"), o.optString("name"), o.getString("token"))
@@ -429,8 +562,13 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
         else -> E2EStatus.LOCKED
     }
 
+    /** §11.4：本机钉住过公钥，服务器启用中的钥匙却不是它（别的设备重置过加密）：加密页显示 T46，等本机用密码或恢复码解锁 */
+    fun pinStale(st: E2EState?, pinned: String?): Boolean =
+        st != null && st.enabled && pinned != null && st.keys.none { it.active && it.pub == pinned }
+
     /**
-     * §4.5：私钥对应的公钥必须是账号某把 active 的钥匙；本机钉住过公钥时还必须和它相同。否则丢弃（T43）
+     * §4.5：私钥对应的公钥必须是账号某把 active 的钥匙；pinned 不为 null 时还必须和它相同（设备批准拿到的私钥，§11.4），
+     * 否则丢弃（T43）。本机生成、密码解锁、恢复码解锁拿到的私钥传 null：核对通过后由调用方替换钉住的公钥
      */
     fun verify(sk: String, keys: List<E2EKeyInfo>, pinned: String?): LocalKey {
         val (pub, kid) = try { c.publicKey(sk) } catch (_: Exception) { throw E2EError(E2EText.T43, E2EError.Kind.MISMATCH) }
@@ -440,24 +578,24 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
     }
 
     /**
-     * §4.3 第 1 步：新设备认定的账号公钥 acc。钉住过就用钉住的（服务器的 active 钥匙不是它 → T43）；
-     * 没有时用 keys 里唯一一把 active 钥匙（不是正好一把 → T43）
+     * §4.3 第 1 步：新设备认定的账号公钥 acc。钉住过就用钉住的（服务器的 active 钥匙不是它 → T46：钥匙已更换，
+     * 设备批准拿到的私钥不能替换钉住的公钥，要用密码或恢复码解锁，§11.4）；没有时用 keys 里唯一一把 active 钥匙（不是正好一把 → T43）
      */
     fun accountPub(st: E2EState, pinned: String?): String {
         val active = st.keys.filter { it.active }
         if (pinned != null) {
-            if (active.none { it.pub == pinned }) throw E2EError(E2EText.T43, E2EError.Kind.MISMATCH)
+            if (active.none { it.pub == pinned }) throw E2EError(E2EText.T46, E2EError.Kind.STALE_KEY)
             return pinned
         }
         if (active.size != 1 || active[0].pub.isEmpty()) throw E2EError(E2EText.T43, E2EError.Kind.MISMATCH)
         return active[0].pub
     }
 
-    /** §7 第 1 项：只用钉住的公钥；没有钉住 → T73；服务器的 active 钥匙和钉住的不同 → T43。账号没开启加密时为 null */
+    /** §7 第 1 项：只用钉住的公钥；没有钉住 → T73；服务器的 active 钥匙和钉住的不同 → T46（§11.4）。账号没开启加密时为 null */
     fun sendKey(pushkey: String, st: E2EState?, pinned: String?): SendKey? {
         if (st == null || !st.enabled) return null
         if (pinned == null) return SendKey(null, E2EText.T73)
-        if (st.keys.none { it.active && it.pub == pinned }) return SendKey(null, E2EText.T43)
+        if (st.keys.none { it.active && it.pub == pinned }) return SendKey(null, E2EText.T46)
         return SendKey("$pushkey.e2e.$pinned", null)
     }
 
@@ -468,44 +606,70 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
         throw if (e.status == 403) E2EError(E2EText.T3, E2EError.Kind.WRONG_PASSWORD) else e
     }
 
-    // ---------- 开启加密（§4.1） ----------
+    // ---------- 开启加密（§4.1、§11.1）、重置加密（§11.3） ----------
 
     /**
      * newPassword 为 null：不换密码，继续用当前密码。
-     * pending：上一次网络出错、结果不明时留在内存里的钥匙和恢复码：先 GET /v1/e2e 核对（第 4 步），已经开启成功就直接用它
+     * pending：上一次网络出错、结果不明时留下的钥匙和恢复码：先 GET /v1/e2e 核对（第 4 步），已经开启成功就直接用它。
+     * mode：MANUAL = 手动开启（检查密码强度、生成恢复码）；AUTO = 自动开启（§11.1：不生成恢复码、不换密码，
+     * 密码弱也照样开启）；RESET = 重置加密（§11.3：POST /v1/e2e/reset，同样不生成恢复码）。
+     * pre：AUTO 时刚登录 / 注册算出的 salt、auth、unlock，直接复用（不再算 Argon2，「当前密码」凭证就是这个 auth）。
+     * allowLegacy：RESET 在管理员重设密码后（账号回到旧登录方式）允许用 pbkdf2 算当前密码凭证（同 §4.4 第 4 步）
      */
     fun setup(net: E2ENet, server: String, username: String, current: String, newPassword: String?, pending: SetupResult? = null,
-              onGenerated: (SetupResult) -> Unit = {}): SetupResult {
-        if (pending != null && confirmSetup(net, server, username, pending)) return pending
-        if (newPassword == null) {
-            if (c.passwordProblem(current, username) != null) throw E2EError(E2EText.WEAK_CURRENT, E2EError.Kind.WEAK_CURRENT)
-        } else {
-            c.passwordProblem(newPassword, username)?.let { throw E2EError(it, E2EError.Kind.WEAK_PASSWORD) }
+              onGenerated: (SetupResult) -> Unit = {}, mode: SetupMode = SetupMode.MANUAL, pre: PreKeys? = null,
+              allowLegacy: Boolean = false): SetupResult {
+        if (pending != null && pending.mode == mode && confirmSetup(net, server, username, pending)) return pending
+        if (mode == SetupMode.MANUAL) {
+            if (newPassword == null) {
+                if (c.passwordProblem(current, username) != null) throw E2EError(E2EText.WEAK_CURRENT, E2EError.Kind.WEAK_CURRENT)
+            } else {
+                c.passwordProblem(newPassword, username)?.let { throw E2EError(it, E2EError.Kind.WEAK_PASSWORD) }
+            }
         }
-        val actual = newPassword ?: current
-        val cred = credential(net, server, username, current, Use.E2E)
+        // 当前密码凭证 + 新的登录凭证（auth_salt / auth_key）和解锁钥匙：
+        // 手动开启时都按（新）密码重算；自动开启、重置不换密码：Argon2 账号沿用当前的 salt，凭证就是这次算出的 auth
+        val cred: Cred
+        val salt: String
+        val auth: String
+        val unlock: String
+        if (mode != SetupMode.MANUAL && pre != null) {
+            cred = Cred("current_auth_key", pre.auth, pre.unlock)
+            salt = pre.salt; auth = pre.auth; unlock = pre.unlock
+        } else {
+            val k = kdf(net, server, username, if (allowLegacy) Use.RESET else Use.E2E, known())
+            cred = credOf(k, current)
+            if (mode != SetupMode.MANUAL && k is Kdf.Argon && cred.unlock != null) {
+                salt = k.salt; auth = cred.value; unlock = cred.unlock
+            } else {
+                salt = c.newSalt()
+                c.passwordKeys(newPassword ?: current, salt).let { (a, u) -> auth = a; unlock = u }
+            }
+        }
+        // 重置：记下被换掉的那把（刷新时核对用）
+        val replaces = if (mode == SetupMode.RESET) E2EState.parse(net.e2eState()).activeKey?.pub.orEmpty() else ""
         val kp = c.keypair()
-        val salt = c.newSalt()
-        val (auth, unlock) = c.passwordKeys(actual, salt)
-        val (code, rkey) = c.recoveryNew()
-        val result = SetupResult(LocalKey(kp.kid, kp.pub, kp.sk), code)
+        val recovery = if (mode == SetupMode.MANUAL) c.recoveryNew() else null
+        val result = SetupResult(LocalKey(kp.kid, kp.pub, kp.sk), recovery?.first.orEmpty(), mode, replaces)
         // 发出请求之前先存好（和私钥同等保护）：结果不明、App 被终止后，刷新状态时还能核对并完成（§4.1）
         onGenerated(result)
         val body = cred.into(JSONObject().put("pub", kp.pub).put("auth_salt", salt).put("auth_key", auth)
-            .put("password_wrap", c.wrap("hjp1", unlock, kp.sk))
-            .put("recovery_wrap", c.wrap("hjr1", rkey, kp.sk)))
+            .put("password_wrap", c.wrap("hjp1", unlock, kp.sk)))
+        recovery?.let { body.put("recovery_wrap", c.wrap("hjr1", it.second, kp.sk)) }
+        // 网络出错、5xx：可能其实已经成功（响应丢了），也可能请求还在服务器上处理。先核对；看到「还没生效」也不马上删，
+        // 抛 SETUP_UNSURE（带着这次的记录），调用方保留，之后刷新时再核对（PendingCheck：连续两次、间隔 30 秒以上才算失败）
+        val notYet = if (mode == SetupMode.RESET) E2EText.RESET_NOT_YET_CALL else E2EText.SETUP_NOT_YET
         try {
-            checked { net.e2eSetup(body) }
+            checked { if (mode == SetupMode.RESET) net.e2eReset(body) else net.e2eSetup(body) }
         } catch (e: ApiException) {
             if (e.status == 409) throw E2EError(e.message ?: "别的设备刚开启了加密", E2EError.Kind.CONFLICT)
             if (e.status < 500) throw e
-            if (!confirmSetup(net, server, username, result)) throw E2EError(E2EText.SETUP_RETRY)
+            if (!confirmSetup(net, server, username, result)) throw E2EError(notYet, E2EError.Kind.SETUP_UNSURE, pending = result)
             return result
         } catch (e: UnauthorizedException) {
             throw e
         } catch (e: java.io.IOException) {
-            // 网络出错：可能其实已经开启成功（响应丢了）。先核对，不要马上丢掉钥匙和恢复码
-            if (!confirmSetup(net, server, username, result)) throw E2EError(E2EText.SETUP_RETRY)
+            if (!confirmSetup(net, server, username, result)) throw E2EError(notYet, E2EError.Kind.SETUP_UNSURE, pending = result)
             return result
         }
         flags.markUpgraded(server, username)
@@ -513,8 +677,8 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
     }
 
     /**
-     * 开启加密的结果不明时核对：开启了、active 公钥就是这把 → true（成功）；没开启 → false（可以重试）；
-     * 开启了但公钥不是这把 → 丢弃（CONFLICT）。取不到状态 → SETUP_UNSURE，钥匙和恢复码留在内存里
+     * 开启 / 重置加密的结果不明时核对：active 公钥就是这把 → true（成功）；开启时账号还没开启、重置时还是旧钥匙 → false（可以重试）；
+     * 开启时账号已经用别的公钥开启 → 丢弃（CONFLICT）。取不到状态 → SETUP_UNSURE，钥匙和恢复码留着
      */
     private fun confirmSetup(net: E2ENet, server: String, username: String, p: SetupResult): Boolean {
         val st = try {
@@ -522,53 +686,100 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
         } catch (e: UnauthorizedException) {
             throw e
         } catch (e: Exception) {
-            throw E2EError(E2EText.SETUP_UNSURE, E2EError.Kind.SETUP_UNSURE, pending = p)
+            val msg = if (p.mode == SetupMode.RESET) E2EText.RESET_UNSURE else E2EText.SETUP_UNSURE
+            throw E2EError(msg, E2EError.Kind.SETUP_UNSURE, pending = p)
+        }
+        if (st.keys.any { it.active && it.pub == p.key.pub }) { flags.markUpgraded(server, username); return true }
+        if (p.mode == SetupMode.RESET) {
+            // 还是被换掉的那把：还没生效；换成了第三把：别的设备也重置过，确定失败
+            if (st.enabled && (p.replaces.isEmpty() || st.activeKey?.pub == p.replaces)) return false
+            throw E2EError("别的设备刚重置了加密，已重新读取状态", E2EError.Kind.CONFLICT)
         }
         if (!st.enabled) return false
-        if (st.keys.any { it.active && it.pub == p.key.pub }) { flags.markUpgraded(server, username); return true }
         throw E2EError("别的设备刚开启了加密，已重新读取状态", E2EError.Kind.CONFLICT)
     }
 
-    /** 刷新状态时怎么处理本机存着的「进行中的开启」（§4.1） */
+    /** 刷新状态时怎么处理本机存着的「进行中的开启 / 重置」（§4.1、§11.3） */
     enum class PendingSetup {
-        /** 已开启，active 公钥就是这把：保存私钥、钉住公钥、显示恢复码页 */
+        /** active 公钥就是这把：保存私钥、钉住公钥（手动开启时显示恢复码页） */
         COMPLETE,
-        /** 已开启，但公钥不是这把（别的设备开启的）：删除 */
+        /** 确定失败：已经是别的公钥（别的设备开启 / 重置的）：删除 */
         DROP,
-        /** 还没开启：保留，提示重试 */
+        /** 还没生效（还没开启；重置时还是被换掉的那把）：保留，提示重试（重试时先核对） */
         KEEP,
     }
 
-    fun pendingSetup(st: E2EState, p: SetupResult): PendingSetup = when {
-        !st.enabled -> PendingSetup.KEEP
+    /**
+     * 和 §4.1 同一条规则：确定失败才删。inFlight：本机还有这次开启 / 重置的请求没回来。
+     * 重置：新钥匙启用 → 完成；还是被换掉的那把（或请求还在路上）→ 保留；换成了第三把（别的设备也重置过）→ 删除
+     */
+    fun pendingSetup(st: E2EState, p: SetupResult, inFlight: Boolean = false, now: Long = System.currentTimeMillis()): PendingSetup = when {
         st.keys.any { it.active && it.pub == p.key.pub } -> PendingSetup.COMPLETE
+        p.mode == SetupMode.RESET -> {
+            val active = st.activeKey?.pub
+            when {
+                inFlight -> PendingSetup.KEEP
+                !(st.enabled && (p.replaces.isEmpty() || active == p.replaces)) -> PendingSetup.DROP
+                now - p.createdAt >= RESET_EXPIRE_MS -> PendingSetup.DROP       // 24 小时还没生效：按失败处理
+                else -> PendingSetup.KEEP
+            }
+        }
+        !st.enabled -> PendingSetup.KEEP
         else -> PendingSetup.DROP
+    }
+
+    /**
+     * 刷新时看到进行中的开启 / 重置「还没生效」（pendingSetup 返回 KEEP、本机没有请求在路上）：
+     * 同一把钥匙连续两次、间隔 minGapMs 以上都是这样，才算确定失败、可以删（请求可能超时了但服务器还在处理）
+     */
+    class PendingCheck(private val minGapMs: Long = 30_000L) {
+        private var pub: String? = null
+        private var first = 0L
+
+        /** 又看到一次「还没生效」，返回是否可以确定失败 */
+        @Synchronized
+        fun notYet(pub: String, now: Long): Boolean {
+            if (this.pub != pub) { this.pub = pub; first = now; return false }
+            return now - first >= minGapMs
+        }
+
+        /** 完成、删除、换了别的记录：重新计 */
+        @Synchronized
+        fun clear() { pub = null }
     }
 
     // ---------- 解锁（§4.2、§4.4） ----------
 
-    /** §4.2：用密码解锁（配对码登录的设备） */
-    fun unlockWithPassword(net: E2ENet, server: String, username: String, password: String, pinned: String?): LocalKey {
+    /**
+     * §4.2：用密码解锁（配对码登录的设备）。hjp1 用只有本机知道的 unlock 锁住，服务器伪造不了：
+     * 只核对是服务器 active 的钥匙，核对通过后调用方用它替换钉住的公钥（§11.4）
+     */
+    fun unlockWithPassword(net: E2ENet, server: String, username: String, password: String): LocalKey {
         val cred = credential(net, server, username, password, Use.UNLOCK)
         // 账号回到了旧登录方式（管理员重设过密码）：密码副本已失效
         val unlock = cred.unlock ?: throw E2EError(E2EText.WRAP_GONE, E2EError.Kind.WRAP_INVALID)
+        return unlockWithKeys(net, cred.value, unlock)
+    }
+
+    /** 用已经算好的登录凭证和解锁钥匙解锁（自动开启遇到 409 时，§11.1 第 4 步） */
+    fun unlockWithKeys(net: E2ENet, auth: String, unlock: String): LocalKey {
         val wrap = try {
-            checked { net.e2eUnlock(cred.value) }.optString("password_wrap")
+            checked { net.e2eUnlock(auth) }.optString("password_wrap")
         } catch (e: ApiException) {
             if (e.status == 409) throw E2EError(e.message ?: E2EText.WRAP_GONE, E2EError.Kind.WRAP_INVALID)
             throw e
         }
         val sk = try { c.unwrap("hjp1", unlock, wrap) } catch (_: Exception) { throw E2EError(E2EText.WRAP_GONE, E2EError.Kind.WRAP_INVALID) }
-        return verify(sk, E2EState.parse(net.e2eState()).keys, pinned)
+        return verify(sk, E2EState.parse(net.e2eState()).keys, null)
     }
 
-    /** §4.4：用恢复码解锁，返回私钥和解锁时的状态（看是否需要重新设置密码） */
-    fun unlockWithRecovery(net: E2ENet, code: String, pinned: String?): Pair<LocalKey, E2EState> {
+    /** §4.4：用恢复码解锁，返回私钥和解锁时的状态（看是否需要重新设置密码）。同样可以替换钉住的公钥（§11.4） */
+    fun unlockWithRecovery(net: E2ENet, code: String): Pair<LocalKey, E2EState> {
         val key = try { c.recoveryKey(code) } catch (e: Core.Failure) { throw E2EError(e.message ?: E2EText.T41) }
         val st = E2EState.parse(net.e2eState())
         if (st.recoveryWrap.isEmpty()) throw E2EError(E2EText.T41)
         val sk = try { c.unwrap("hjr1", key, st.recoveryWrap) } catch (_: Exception) { throw E2EError(E2EText.T41) }
-        return verify(sk, st.keys, pinned) to st
+        return verify(sk, st.keys, null) to st
     }
 
     // ---------- 密码、恢复码、用户名（§2.4、§4.4 T42、§7） ----------
@@ -590,8 +801,9 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
         val salt = c.newSalt()
         val (auth, unlock) = c.passwordKeys(newPassword, salt)
         val body = cred.into(JSONObject().put("auth_salt", salt).put("auth_key", auth))
-        if (enabled && sk != null) body.put("password_wrap", c.wrap("hjp1", unlock, sk))
-        checked { net.accountAuth(body) }
+        // 带上这份副本对应的 kid：服务器的 active 钥匙已经换了（别的设备重置过加密）时返回 409，不会用旧钥匙覆盖（§11.5）
+        if (enabled && sk != null) body.put("password_wrap", c.wrap("hjp1", unlock, sk)).put("kid", c.publicKey(sk).second)
+        if (enabled && sk != null) staleOn409(net, sk) { checked { net.accountAuth(body) } } else checked { net.accountAuth(body) }
         flags.markUpgraded(server, username)
     }
 
@@ -626,18 +838,59 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
      * 设置初始密码（账号还没有密码，§2.1 第 4 条）：没有新接口，只能发原文。本机标记了「已升级」（或服务器说 auth_key 为真）时
      * 拒绝（T1）；成功后立即按 §2.1 第 7 步升级（失败不影响，下次用密码登录时再升级）。返回是否已升级
      */
-    fun setInitialPassword(net: E2ENet, server: String, username: String, password: String): Boolean {
+    fun setInitialPassword(net: E2ENet, server: String, username: String, password: String): PreKeys? {
         val k = known()
         if (flags.isUpgraded(server, username) || k.authKey ||
             k.localUsername?.takeIf { it.isNotBlank() }?.let { flags.isUpgraded(server, it) } == true) throw E2EError(E2EText.T1)
         checked { net.credentials(JSONObject().put("username", username).put("password", password)) }
+        // 返回升级后的 salt、auth、unlock，给自动开启加密复用（§11.1）；没有升级成功时为 null
         return try {
             when (val kd = kdf(net, server, username)) {
                 is Kdf.Pbkdf2 -> autoUpgrade(net, server, username, password, pbkdf2(password, kd))
-                is Kdf.Argon -> { flags.markUpgraded(server, username); true }
-                Kdf.Legacy -> false
+                is Kdf.Argon -> {
+                    flags.markUpgraded(server, username)
+                    c.passwordKeys(password, kd.salt).let { (a, u) -> PreKeys(kd.salt, a, u) }
+                }
+                Kdf.Legacy -> null
             }
-        } catch (_: Exception) { false }
+        } catch (_: Exception) { null }
+    }
+
+    /**
+     * §11.1 末尾：首页要不要显示提示条 T67。账号还没开启加密、服务端支持自动开启（server_seal），
+     * 本机内存里却没有这次的密码凭证（升级前就登录了、配对码登录）时显示；开启后（enabled 为真）消失
+     */
+    fun autoPrompt(st: E2EState?, hasCreds: Boolean): Boolean = st != null && !st.enabled && st.serverSeal && !hasCreds
+
+    /**
+     * 提示条 T67 点开后输入的当前密码：按 §2.4 算出自动开启要用的 salt、auth、unlock。
+     * Argon2 账号直接算（密码对不对由 POST /v1/e2e/setup 的 current_auth_key 核对，错了是 T3）；
+     * 还没升级的（pbkdf2）先按 §2.1 第 7 步升级（PUT /v1/account/auth 核对当前密码），再用升级后的凭证
+     */
+    fun autoKeys(net: E2ENet, server: String, username: String, password: String): PreKeys =
+        when (val k = kdf(net, server, username, Use.E2E, known())) {
+            is Kdf.Argon -> c.passwordKeys(password, k.salt).let { (a, u) -> PreKeys(k.salt, a, u) }
+            is Kdf.Pbkdf2 -> checked { autoUpgrade(net, server, username, password, pbkdf2(password, k)) }
+                ?: throw E2EError("别的设备刚开启了加密，已重新读取状态", E2EError.Kind.CONFLICT)
+            Kdf.Legacy -> throw E2EError(E2EText.NO_PRELOGIN)
+        }
+
+    /** 密码太弱（§11.1：自动开启照样开，加密页显示 T24） */
+    fun weakPassword(password: String, username: String): Boolean = c.passwordProblem(password, username) != null
+
+    /**
+     * 上传 wrap / grant 时服务器返回 409：重新读状态，带的 kid 已经不是 active 钥匙（别的设备重置过加密）→ T46（STALE_KEY，
+     * 调用方刷新状态）；其他 409（密码刚被改等）照原样抛出（§11.5）
+     */
+    fun <T> staleOn409(net: E2ENet, sk: String, block: () -> T): T = try { block() } catch (e: ApiException) {
+        if (e.status == 409 && isStale(net, sk)) throw E2EError(E2EText.T46, E2EError.Kind.STALE_KEY)
+        throw e
+    }
+
+    private fun isStale(net: E2ENet, sk: String): Boolean {
+        val pub = runCatching { c.publicKey(sk).first }.getOrNull() ?: return false
+        val st = runCatching { E2EState.parse(net.e2eState()) }.getOrNull() ?: return false
+        return st.enabled && st.keys.none { it.active && it.pub == pub }
     }
 
     /**
@@ -652,7 +905,7 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
         val rot = RecoveryRotation(code, c.wrap("hjr1", rkey, sk))
         onGenerated(rot)
         try {
-            checked { net.e2eRecovery(cred.into(JSONObject().put("recovery_wrap", rot.wrap))) }
+            staleOn409(net, sk) { checked { net.e2eRecovery(cred.into(JSONObject().put("recovery_wrap", rot.wrap).put("kid", c.publicKey(sk).second))) } }
         } catch (e: ApiException) {
             if (e.status < 500) throw e
             confirmRotation(net, rot)
@@ -679,6 +932,8 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
     fun rotationDone(st: E2EState, rot: RecoveryRotation) = st.recoveryWrap.isNotEmpty() && st.recoveryWrap == rot.wrap
 
     companion object {
+        /** 进行中的重置多久还没生效就按失败处理 */
+        const val RESET_EXPIRE_MS = 24 * 3600_000L
         const val ARGON_TIME = 3
         const val ARGON_MEMORY_KIB = 65536
         const val ARGON_LANES = 1
@@ -863,9 +1118,16 @@ class Approval(private val c: E2ECrypto, val deviceId: String, val name: String,
     fun approve(net: E2ENet, sk: String) {
         val p = pub ?: throw E2EError("还没有核对码，不能批准")
         try {
-            net.e2eGrant(deviceId, p, c.grantSeal(sk, p))
+            net.e2eGrant(deviceId, p, c.grantSeal(sk, p), c.publicKey(sk).second)
         } catch (e: ApiException) {
-            if (e.status == 409) { stage = Stage.Failed(e.message ?: E2EText.T51); throw E2EError(e.message ?: E2EText.T51) }
+            if (e.status == 409) {
+                // 本机的钥匙已经不是 active（别的设备重置过加密，§11.5）→ T46，调用方刷新状态；否则是对方取消了或换了公钥
+                val myPub = runCatching { c.publicKey(sk).first }.getOrNull()
+                val stale = runCatching { E2EState.parse(net.e2eState()) }.getOrNull()
+                    ?.let { st -> st.enabled && st.keys.none { it.active && it.pub == myPub } } == true
+                if (stale) { stage = Stage.Failed(E2EText.T46); throw E2EError(E2EText.T46, E2EError.Kind.STALE_KEY) }
+                stage = Stage.Failed(e.message ?: E2EText.T51); throw E2EError(e.message ?: E2EText.T51)
+            }
             throw e
         }
         stage = Stage.Granted
@@ -881,6 +1143,28 @@ class Approval(private val c: E2ECrypto, val deviceId: String, val name: String,
 
 /** 收消息（§6.1）：解开信封，换成载荷里的标题、正文、类型和附件，本地生成 doc */
 object E2EMessages {
+    /** 列表里标题前的标记（§6.3、§11.5） */
+    enum class ListMark { NONE, LOCK, SENT_PLAIN, PLAIN }
+
+    /**
+     * 列表标记：服务器代加密的（sealed: "server"）显示小标签「明文发送」、不显示 🔒；发送端加密的显示 🔒；
+     * 账号开了加密、这条却是明文（本机保留的旧消息）显示「未加密」
+     */
+    fun listMark(m: Message, e2eOn: Boolean): ListMark = when {
+        m.encrypted && m.serverSealed -> ListMark.SENT_PLAIN
+        m.encrypted -> ListMark.LOCK
+        e2eOn -> ListMark.PLAIN
+        else -> ListMark.NONE
+    }
+
+    /** 详情页元信息行的标记：服务器代加密 T64；发送端加密「🔒 端到端加密」；账号开了加密、这条是明文 T63 */
+    fun detailMark(m: Message, e2eOn: Boolean): String = when (listMark(m, e2eOn)) {
+        ListMark.SENT_PLAIN -> E2EText.T64
+        ListMark.LOCK -> E2EText.ENCRYPTED
+        ListMark.PLAIN -> E2EText.T63
+        ListMark.NONE -> ""
+    }
+
     const val OK = "ok"
     const val LOCKED = "locked"
     const val WRONG_KEY = "wrong_key"

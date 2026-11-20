@@ -53,6 +53,7 @@ final class SelfTest {
         out("回笺 iOS 自检 \(AppInfo.clientLabel)")
         unitTests()
         updateVerifyUnitTests()
+        registerMessageTests()
         await MDSelfTest.runAsync { check($0, $1, $2) }
         // 端到端加密（离线部分：参数核对、防降级、状态、§4.5、消息与附件解密、核对失败自动拒绝；和 Mac 共用 E2ESelfTest.swift）
         out("— 端到端加密（离线）")
@@ -322,8 +323,7 @@ final class SelfTest {
               && ManageRules.usernameProblem("demo user") == nil && ManageRules.usernameProblem("bad!") != nil
               && ManageRules.passwordProblem("1234567") != nil)
         await model.refreshAccount()
-        check("管理：/v1/me 的 can_admin（本机没有管理权限）和账号有密码", model.canAdmin == false && model.accountHasPassword == true,
-              "\(String(describing: model.canAdmin)) \(String(describing: model.accountHasPassword))")
+        check("管理：/v1/me 的账号有密码", model.accountHasPassword == true, "\(String(describing: model.accountHasPassword))")
         check("管理：服务端功能清单里有 keys / account / channels / pair.status",
               ["keys", "account", "channels", "pair.status"].allSatisfy { model.supports($0) == true })
 
@@ -341,7 +341,7 @@ final class SelfTest {
             check("管理：吊销、删除这把 key", r.isRevoked && !left.contains { $0.id == k.id })
         } catch { check("管理：pushkey", false, shortError(error)) }
 
-        // 账户：当前密码不对 → 服务端说明，用户名不变；没有管理权限不能移除有管理权限的设备
+        // 账户：当前密码不对 → 服务端说明，用户名不变；移除本账号的其他设备（0.9.0 起同一账号的设备权限相同），不能移除别的账号的设备
         // 登录时账号已自动升级到新登录协议：改用户名用当前密码派生的凭证核对，服务端 403 显示 T3
         do {
             _ = try await model.changeCredentials(username: user + "x", password: "", current: pass + "wrong")
@@ -353,13 +353,25 @@ final class SelfTest {
         do {
             let d = try await api.account()
             check("管理：设备列表标出本机", d.devices.contains { $0.current && $0.id == model.settings.deviceID })
-            if let mac = d.devices.first(where: { $0.name == "我的 MacBook" && !$0.revoked }) {
-                do { try await api.revokeDevice(mac.id); check("管理：移除有管理权限的设备应失败", false) }
-                catch { check("管理：没有管理权限不能移除有管理权限的设备 → 服务端说明", shortError(error).contains("管理权限"), shortError(error)) }
-            }
             let pc = try await api.createPairCode()
             let st = try await api.pairCodeStatus(pc.code)
             check("管理：生成配对码（3 分钟）并能查状态", pc.code.count == 6 && st.state == "waiting")
+            // 用这个配对码加一台临时设备，再从本机移除它（不动 hub.sh 的「我的 MacBook」，截图和其他用例还要用）
+            let fp = (0..<32).map { _ in String(format: "%02x", Int.random(in: 0...255)) }.joined()
+            let tmp = try await API(server: api.server, token: nil).pair(code: pc.code, name: "自检临时设备", fingerprint: fp)
+            try await api.revokeDevice(tmp.device_id)
+            let after = try await api.account()
+            var tmpDead = false
+            do { _ = try await API(server: api.server, token: tmp.token).me() } catch { tmpDead = (error as? APIError) == .unauthorized }
+            check("管理：移除本账号的另一台设备 → 成功，设备列表里标为已移除或不再出现，它的 token 失效",
+                  after.devices.first { $0.id == tmp.device_id }?.revoked ?? true && tmpDead
+                  && after.devices.contains { $0.name == "我的 MacBook" && !$0.revoked })
+            // 不是本账号的设备（服务端按账号过滤）：404「设备不存在」，什么都不动
+            do { try await api.revokeDevice("d_not_mine_0000"); check("管理：移除别的账号的设备应失败", false) }
+            catch {
+                let is404: Bool = { if case .http(404, _)? = error as? APIError { return true }; return false }()
+                check("管理：不能移除别的账号 / 不存在的设备 → 404「\(shortError(error))」", is404, "\(error)")
+            }
         } catch { check("管理：账户", false, shortError(error)) }
 
         // 频道：改名、排序、删除（先改本地，服务端确认后保留）
@@ -381,16 +393,18 @@ final class SelfTest {
             _ = try await api.revokeKey(id: k.id)
         } catch { check("管理：频道", false, shortError(error)) }
 
-        // 注册：服务端没开放时显示服务端说明，本机登录状态不变
+        // 注册（服务端 0.9.0：账号只能注册产生，tests/hub.sh 的服务器是默认的邀请制）：邀请码不对时原样显示服务端说明，本机登录状态不变
+        let info = try? await api.info()
+        check("管理：/v1/info 的注册方式（邀请制：invite）、有 register.e2e",
+              info?.registerMode == "invite" && info?.features?.contains { $0.id == "register.e2e" } == true, info?.registerMode ?? "nil")
         do {
             // 注册的密码强度在本机检查（新登录协议），这里用一个合格的密码，看服务端的说明
-            try await model.register(server: server, username: "selftest-new", password: "Selftest-Register-Strong-9", name: "x")
-            check("管理：没开放注册应失败", false)
+            try await model.register(server: server, username: "selftest-new", password: "Selftest-Register-Strong-9", name: "x",
+                                     inviteCode: "ZZZZZ22222")
+            check("管理：邀请码不对时注册应失败", false)
         } catch {
-            check("管理：没开放注册 → 服务端说明，仍保持登录（\(shortError(error))）", shortError(error).contains("没有开放注册") && model.loggedIn)
+            check("管理：邀请码不对 → 服务端说明，仍保持登录（\(shortError(error))）", shortError(error).contains("邀请码无效") && model.loggedIn)
         }
-        let info = try? await api.info()
-        check("管理：/v1/info 带 register_open", info?.register_open == false)
 
         // 设置实时同步（服务端 0.6.1 起）：keys / devices / account 变更 → 后台重新拉取，连续多条合并成一次；不认识的 kind 忽略
         out("— 设置实时同步")
@@ -424,6 +438,35 @@ final class SelfTest {
             check("设置同步：本机被移除的判断", AppModel.selfRemoved(d, deviceID: "d_me") && AppModel.selfRemoved(d, deviceID: "d_x")
                   && !AppModel.selfRemoved(d, deviceID: "d_other"))
         } else { check("设置同步：设备列表解码", false) }
+    }
+
+    /// 注册失败时登录页的提示（纯逻辑，和 Mac / 安卓一致）：网络出错 / 超时 → 结果不确定、请先登录；
+    /// 之后再注册被拒（409 / 403）→ 服务端说明 + 改去登录；其他照常显示服务端说明
+    private func registerMessageTests() {
+        typealias F = E2E.Failure
+        let u = AppModel.registerMessage(F(.uncertain, E2E.T.registerUncertain), unsureBefore: false)
+        check("注册提示：网络出错 / 超时 → 结果不确定，请先登录", u.unsure && u.text == E2E.T.registerUncertain, u.text)
+        let taken = AppModel.registerMessage(F(.conflict, "这个用户名已被使用", status: 409), unsureBefore: true)
+        let used = AppModel.registerMessage(F(.server, "邀请码已用完", status: 403), unsureBefore: true)
+        check("注册提示：上次不确定，这次 409 / 403 → 服务端说明 + 改去登录",
+              taken.unsure && taken.text.hasPrefix("这个用户名已被使用。") && taken.text.hasSuffix(E2E.T.registerTryLogin)
+              && used.unsure && used.text.hasPrefix("邀请码已用完。"), "\(taken.text) / \(used.text)")
+        let plain = AppModel.registerMessage(F(.conflict, "这个用户名已被使用", status: 409), unsureBefore: false)
+        let bad = AppModel.registerMessage(F(.server, "用户名不合法", status: 400), unsureBefore: true)
+        check("注册提示：没有不确定在先时 409 原样显示；400 不改成去登录",
+              !plain.unsure && plain.text == "这个用户名已被使用" && bad.text == "用户名不合法", "\(plain.text) / \(bad.text)")
+        // 注册方式（GET /v1/info）：0.9.0 起看 register；旧服务端只有 register_open；不认识的值按 register_open 回退，都没有就是 closed
+        func mode(_ j: String) -> String { (try? JSONDecoder().decode(ServerInfo.self, from: Data(j.utf8)))?.registerMode ?? "解码失败" }
+        let modes = [mode(#"{"register":"invite","register_open":false}"#), mode(#"{"register":"open"}"#), mode(#"{"register":"closed","register_open":true}"#),
+                     mode(#"{"register_open":true}"#), mode(#"{"register_open":false}"#), mode(#"{}"#),
+                     mode(#"{"register":"vip","register_open":true}"#), mode(#"{"register":"vip"}"#)]
+        check("注册方式：register 优先；旧服务端按 register_open；不认识的值回退；都没有是 closed",
+              modes == ["invite", "open", "closed", "open", "closed", "closed", "open", "closed"], "\(modes)")
+        // 不确定之后中间遇到 429、本机校验错误：照常显示，但「不确定」标记保留（之后再被 409 / 403 拒绝仍提示去登录）
+        let busy = AppModel.registerMessage(F(.server, "尝试太频繁，请稍后再试", status: 429), unsureBefore: true)
+        let local = AppModel.registerMessage(APIError.invalid("密码至少 10 位"), unsureBefore: true)
+        check("注册提示：不确定之后的 429、本机校验错误照常显示，不清掉「不确定」",
+              busy.unsure && busy.text == "尝试太频繁，请稍后再试" && local.unsure && local.text == "密码至少 10 位", "\(busy) / \(local)")
     }
 
     // MARK: 集成（本地 hub）
@@ -477,17 +520,29 @@ final class SelfTest {
         check("首次同步：游标推进、标记完成", model.settings.cursor >= (first.last?.id ?? 1) && model.settings.initialSyncDone)
         let onDisk = Persistence.load()
         check("首次同步：已落盘", onDisk.messages.count == first.count)
-        check("登录：旧账号（PBKDF2）登录后自动升级到新登录协议，记下「已升级」",
+        check("登录：新登录协议（账号由 huijian register 注册），记下「已升级」、取到账号 id",
               E2E.UpgradeMarks(defaults: .standard).isUpgraded(server: model.settings.server, username: user)
               && model.settings.accountID != nil, "accountID=\(String(describing: model.settings.accountID))")
-        // §11.1：密码登录后，账号还没开启加密时在后台自动开启（不生成恢复码、不弹恢复码页），本机随即解锁
-        if model.supports("e2e.auto") == true {
-            for _ in 0..<60 where model.e2eStatus != .unlocked { try? await Task.sleep(nanoseconds: 250_000_000) }
-            check("登录：自动开启加密并解锁，没有恢复码、不弹恢复码页（T23）",
-                  model.e2eStatus == .unlocked && model.e2eRecovery == nil && model.e2eState?.hasRecovery == false
-                  && model.e2ePasswordKeys == nil && model.e2eRing?.pinned != nil,
-                  "\(String(describing: model.e2eStatus))")
+        // 服务端 0.9.0：账号注册时已开启加密（tests/hub.sh 用 huijian register 建号，不设恢复码）。
+        // 用密码登录即解锁，不再自动开启、不留密码钥匙；没有恢复码 → 首页显示不打断的「设置恢复码」建议（T23）
+        for _ in 0..<60 where model.e2eStatus != .unlocked { try? await Task.sleep(nanoseconds: 250_000_000) }
+        check("登录：账号注册时已开启加密，密码登录即解锁，不留密码钥匙、不弹恢复码页",
+              model.e2eStatus == .unlocked && model.e2eRecovery == nil && model.e2eState?.hasRecovery == false
+              && model.e2ePasswordKeys == nil && !model.e2eAutoSetupRunning && model.e2eRing?.pinned != nil,
+              "\(String(describing: model.e2eStatus))")
+        if let scope = model.e2eRing?.scope {
+            let saved = model.settings.e2eRecoveryHintDismissed
+            model.settings.e2eRecoveryHintDismissed = saved.filter { $0 != scope }
+            let shown = model.e2eSuggestRecovery
+            model.e2eDismissRecoveryHint()
+            check("登录：没有恢复码时首页建议设置（T23），「以后再说」后按账号记住、不再显示",
+                  shown && !model.e2eSuggestRecovery && model.settings.e2eRecoveryHintDismissed.contains(scope))
+            model.settings.e2eRecoveryHintDismissed = saved
         }
+        // 普通 pushkey 发的演示消息：服务器代加密（sealed == "server"），列表和详情标「明文发送」
+        let sealed = first.filter(\.isServerSealed)
+        check("普通 pushkey 的演示消息都是服务器代加密（标「明文发送」），本机已解开",
+              !first.isEmpty && sealed.count == first.count && !first.contains(where: \.e2eUnreadable), "\(sealed.count)/\(first.count)")
         check("频道显示名（train → 训练）", model.channelName("train") == "训练", model.channelName("train"))
         check("频道设置已落盘（后台冷启动可用）", model.settings.channels.contains { $0.topic == "train" && $0.alias == "训练" }
               && model.settings.channels.contains { $0.topic == "debug" && $0.hidden })
@@ -706,8 +761,39 @@ final class SelfTest {
             check("退出后旧 token 失效", false)
         } catch { check("退出后旧 token 失效", (error as? APIError) == .unauthorized, "\(error)") }
 
-        // 端到端加密联网流程：用 tests/hub.sh 另建的账号（旧方式设置的密码），会改掉它的密码、删掉它服务器上的明文消息，不影响上面的演示账号
+        // AppModel 层的注册即开启加密（正确邀请码）：放在退出登录之后，注册会换成新账号
+        await registerModelTests(server: server)
+
+        // 端到端加密联网流程：用 tests/hub.sh 给的邀请码另注册一个账号（会改掉它的密码），不影响上面的演示账号
         await e2eOnlineTests(server: server)
+    }
+
+    /// 服务端 0.9.0 注册即开启加密，走 AppModel.register（和登录页同一条路）：用正确的邀请码注册一个新账号后，
+    /// 本机已解锁、钉住本机生成的公钥（就是服务器上 active 的那把），没有自动开启 / setup，不留密码钥匙；没有恢复码 → 首页建议设置（T23）。
+    /// 用 -demoE2EInvite（可用多次），测完退出登录
+    private func registerModelTests(server: String) async {
+        guard let invite = UserDefaults.standard.string(forKey: "demoE2EInvite") else { out("（跳过注册即开启加密：没有 -demoE2EInvite）"); return }
+        let user = "selftest-reg-\(Int.random(in: 1000...9999))"
+        do {
+            try await model.register(server: server, username: user, password: "Selftest-Register-Strong-9", name: "自检注册", inviteCode: invite)
+        } catch { check("注册即开启加密：用正确邀请码注册", false, shortError(error)); return }
+        guard let api = model.api() else { check("注册即开启加密：注册后已登录", false); return }
+        let unlockedAtOnce = !model.e2eKeys.isEmpty && model.e2ePasswordKeys == nil && model.e2eRing?.pinned != nil
+        await model.refreshAux(api, model.session, force: true)
+        await model.refreshE2E()
+        for _ in 0..<40 where model.e2eStatus != .unlocked { try? await Task.sleep(nanoseconds: 250_000_000) }
+        let st = model.e2eState
+        check("注册即开启加密：注册成功即登录、本机已有私钥、不留密码钥匙（\(user)）",
+              model.loggedIn && unlockedAtOnce, "keys=\(model.e2eKeys.count) pk=\(model.e2ePasswordKeys != nil)")
+        check("注册即开启加密：服务器已开启（有用密码锁住的副本、没有恢复码），本机已解锁",
+              st?.enabled == true && st?.has_password_wrap == true && st?.hasRecovery == false && model.e2eStatus == .unlocked,
+              "\(String(describing: model.e2eStatus))")
+        check("注册即开启加密：钉住的公钥 = 服务器 active 的那把，只有一把钥匙（没有再调 setup / 自动开启）",
+              model.e2eRing?.pinned != nil && model.e2eRing?.pinned == st?.activeKey?.pub && st?.keys.count == 1
+              && model.e2eKeys.count == 1 && !model.e2eAutoSetupRunning && model.e2eAutoFailures == 0)
+        check("注册即开启加密：没有恢复码 → 首页建议设置（T23）", model.e2eSuggestRecovery)
+        model.logout(notifyServer: true)
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
     }
 
     // MARK: 端到端加密
@@ -918,30 +1004,24 @@ final class SelfTest {
         try? await model.persistNow()
     }
 
-    /// 对本地 hub 跑完整的端到端加密流程（和 Mac 共用 E2ESelfTest.online）：自动升级、开启加密、三种解锁、设备批准、
-    /// 收加密消息（含附件）、设置项。需要 -demoE2EUser / -demoE2EPass（tests/hub.sh 用管理后台建的账号，旧方式设置的密码）
+    /// 对本地 hub 跑完整的端到端加密流程（和 Mac 共用 E2ESelfTest.online）：注册即开启加密、三种解锁、设备批准、
+    /// 收加密消息（含附件）、设置项。需要 -demoE2EInvite（可用多次的邀请码）/ -demoE2EUser / -demoE2EPass（要注册的新账号，tests/hub.sh 给出）
     private func e2eOnlineTests(server: String) async {
         let d = UserDefaults.standard
-        guard let user = d.string(forKey: "demoE2EUser"), let pass = d.string(forKey: "demoE2EPass"), let url = URL(string: server) else {
-            out("（跳过端到端加密联网测试：没有 -demoE2EUser / -demoE2EPass）")
+        guard let user = d.string(forKey: "demoE2EUser"), let pass = d.string(forKey: "demoE2EPass"),
+              let invite = d.string(forKey: "demoE2EInvite"), let url = URL(string: server) else {
+            out("（跳过端到端加密联网测试：没有 -demoE2EUser / -demoE2EPass / -demoE2EInvite）")
             return
         }
         let open = API(server: url, token: nil)
-        guard (try? await open.info())?.features?.contains(where: { $0.id == "e2e" }) == true else {
-            out("（服务端没有 e2e 功能，跳过端到端加密联网测试）")
+        guard (try? await open.info())?.features?.contains(where: { $0.id == "register.e2e" }) == true else {
+            out("（服务端没有 register.e2e 功能（需要 0.9.0 以上），跳过端到端加密联网测试）")
             return
         }
         out("— 端到端加密（联网）")
-        do {
-            // 旧方式登录（这个账号还没升级），拿一台设备的 token 和一把 pushkey；之后的流程全部走新协议
-            let fp = (0..<32).map { _ in String(format: "%02x", Int.random(in: 0...255)) }.joined()
-            let r = try await open.login(username: user, password: pass, name: "自检 e2e 设备 A", fingerprint: fp)
-            let k = try await API(server: url, token: r.token).createKey(name: "e2e 自检")
-            await E2ESelfTest.online({ check($0, $1, $2) }, server: url, transport: { API(server: url, token: $0) },
-                                     tokenA: r.token, username: user, password: pass, pushkey: k.key)
-        } catch {
-            check("端到端加密联网测试：准备账号", false, shortError(error))
-        }
+        // 服务端 0.9.0：账号只能注册产生、注册即开启加密。共用流程用邀请码注册这个新账号（钥匙只放内存，不碰钥匙串），之后全部走新协议
+        await E2ESelfTest.online({ check($0, $1, $2) }, server: url, transport: { API(server: url, token: $0) },
+                                 invite: invite, username: user, password: pass)
     }
 
     private func changesTests(_ api: API) async {

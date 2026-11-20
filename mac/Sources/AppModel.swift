@@ -140,9 +140,7 @@ final class AppModel: ObservableObject {
     @Published var scrollTarget: String?
 
     // 账户信息（来自 /v1/me）
-    @Published var canAdmin: Bool?
     @Published var deviceName: String
-    @Published var adminMessage: String?
 
     // 账号（来自 /v1/me）
     @Published var account: APIClient.AccountInfo?
@@ -558,7 +556,7 @@ final class AppModel: ObservableObject {
     }
 
     /// 用户名密码登录；register=true 时注册新账号（服务器需开放注册）
-    func login(server: String, username: String, password: String, name: String, register: Bool) async throws {
+    func login(server: String, username: String, password: String, name: String, register: Bool, inviteCode: String? = nil) async throws {
         let trimmed = Self.normalizeServer(server)
         guard !trimmed.isEmpty else { throw APIError.invalid("请填写服务器地址") }
         guard let url = URL(string: trimmed), url.scheme == "http" || url.scheme == "https", url.host != nil else {
@@ -569,14 +567,19 @@ final class AppModel: ObservableObject {
             let r = try await E2E.login(server: APIClient(server: url, token: nil), authed: { APIClient(server: url, token: $0) },
                                         serverID: trimmed, username: username.trimmingCharacters(in: .whitespaces), password: password,
                                         device: .init(name: name, platform: "macos", fingerprint: DeviceFingerprint.value),
-                                        register: register, marks: e2eMarks, secrets: e2eSecrets)
-            try adopt(try JSONDecoder().decode(APIClient.PairResult.self, from: r.response), server: trimmed)
+                                        register: register, marks: e2eMarks, secrets: e2eSecrets, inviteCode: inviteCode, alive: e2eAlive)
+            do {
+                try adopt(try JSONDecoder().decode(APIClient.PairResult.self, from: r.response), server: trimmed)
+            } catch where register {
+                // 注册已经成功（服务端建了号、扣了邀请码），只是本机没接上（响应解码、写钥匙串失败）：按结果不确定处理，提示去登录
+                throw E2E.Failure(.uncertain, E2E.T.registerUncertain)
+            }
             e2eLoginNote = r.note
             e2ePendingLoginKey = r.pendingKey
             e2eNotePasswordKeys(r.passwordKeys, keep: !r.unlocked)     // 登录时已经解锁：钥匙不留
         } catch APIError.unsupported {
             throw APIError.invalid("这个服务端版本较旧，还不支持账号登录（需要 0.5.0 以上），请用配对码配对")
-        } catch let f as E2E.Failure where f.kind == .unsupported {
+        } catch let f as E2E.Failure where f.kind == .unsupported && !register {
             throw APIError.invalid("这个服务端版本较旧，还不支持账号登录（需要 0.5.0 以上），请用配对码配对")
         }
     }
@@ -608,7 +611,6 @@ final class AppModel: ObservableObject {
         syncTask = nil
         Keychain.delete(service: keychainService)
         token = nil
-        canAdmin = nil
         account = nil
         changesCursor = nil     // 下次登录（可能是别的账号）先对账
         e2eSealedRetry = [:]    // 等着重新拉取的补加密消息：退出登录后不再拉（审查 N2）
@@ -618,7 +620,7 @@ final class AppModel: ObservableObject {
     }
 
     /// 退出登录：先让服务端作废本机凭证，再清除本地凭证。本地消息保留。
-    /// 返回服务端是否确认作废（旧服务端没有这个接口，凭证需要在管理后台吊销）
+    /// 返回服务端是否确认作废（旧服务端没有这个接口，凭证需要在本账号其他设备上移除）
     @discardableResult
     func logout() async -> Bool {
         var revoked = false
@@ -821,8 +823,8 @@ final class AppModel: ObservableObject {
 
     /// 本客户端认识的服务端功能 id（服务端多出来的，提示「更新客户端后可用」）
     static let knownFeatures: [String: String] = [
-        "push": "发送消息与附件", "stream": "实时接收", "admin.link": "一键进入管理后台", "update": "应用内更新",
-        "me.rename": "修改设备名称", "keys": "管理 pushkey", "info": "版本与功能协商", "storage": "服务端存储与备份",
+        "push": "发送消息与附件", "stream": "实时接收", "update": "应用内更新",
+        "me.rename": "修改设备名称", "keys": "管理 pushkey", "info": "版本与功能协商",
         "account": "账号登录", "devices": "设备身份与配对记录", "subscriptions": "按设备设置接收方式", "presence": "在用设备优先",
         "keys.delete": "删除已吊销的 pushkey", "messages.manage": "删除和归档消息", "channels": "频道改名、隐藏、静音、排序",
         "pair.status": "配对码倒计时与使用状态",
@@ -831,9 +833,13 @@ final class AppModel: ObservableObject {
         "poll.long": "省电的实时接收（按网络自适应等待时长）",
         "e2e": "端到端加密",
         "e2e.auto": "默认自动加密（服务器代加密、重置加密）",
+        "register.invite": "注册邀请码", "register.e2e": "注册即开启加密",
         // 下面三项 Mac 客户端不需要做什么（iPhone 的 Bark 转发和软件源、服务端在管理后台自更新），认识即可，不提示「更新客户端」
         "bark": "iPhone 锁屏通知（Bark 转发）", "ios.source": "iPhone 客户端软件源", "server.update": "服务端一键更新",
     ]
+    /// 认识、但客户端用不到的功能：不提示「更新客户端」，服务端没有也不提示「更新服务端」。
+    /// admin.link、storage：0.9.0 起客户端不再进入管理后台、不看存储与备份（旧服务端仍会列出）；其余是服务端自己的行为
+    static let ignoredFeatures: Set<String> = ["admin.link", "storage", "admin.accounts", "push.e2e"]
     /// 0.5.0 以前的服务端没有功能清单；这些功能在 0.4.x 里可能有，直接调用、按「接口不存在」判断
     nonisolated static let maybeOnLegacy: Set<String> = ["push", "stream", "admin.link", "update", "me.rename", "keys"]
 
@@ -849,7 +855,7 @@ final class AppModel: ObservableObject {
 
     /// 服务端支持、但本客户端还不认识的功能
     var featuresNeedingClientUpdate: [APIClient.Feature] {
-        serverInfo?.features.filter { Self.knownFeatures[$0.id] == nil } ?? []
+        serverInfo?.features.filter { Self.knownFeatures[$0.id] == nil && !Self.ignoredFeatures.contains($0.id) } ?? []
     }
 
     /// 本客户端支持、但服务端还没有的功能
@@ -914,7 +920,7 @@ final class AppModel: ObservableObject {
         try? await client.presence()
     }
 
-    // MARK: 账户 / 管理后台
+    // MARK: 账户
 
     /// 配对成功但账号还没有用户名密码：主窗口只显示「完成账号设置」，设置完才能使用
     /// （旧服务端不支持账号时不拦）
@@ -970,7 +976,6 @@ final class AppModel: ObservableObject {
         guard let client else { return false }
         guard let me = try? await client.me() else { return false }
         do {
-            canAdmin = me.can_admin ?? false
             account = me.account
             awaySilent = me.away_silent ?? true
             // 换了账号登录：本地保存的是上一个账号的消息，清掉后按新账号重新同步
@@ -1005,22 +1010,6 @@ final class AppModel: ObservableObject {
         guard token == tok else { throw CancellationError() }
         deviceName = saved
         defaults.set(saved, forKey: Self.key("deviceName"))
-    }
-
-    /// 申请一次性登录链接并用默认浏览器打开（浏览器会被记住一年）
-    func openAdmin() async {
-        adminMessage = nil
-        guard let client else { adminMessage = "尚未配对"; return }
-        do {
-            let url = try await client.adminLink()
-            canAdmin = true
-            NSWorkspace.shared.open(url)
-        } catch APIError.http(403, _) {
-            canAdmin = false
-            adminMessage = "在管理网页的设备页为本机开启「可进入管理后台」"
-        } catch {
-            adminMessage = (error as? APIError)?.localizedDescription ?? Self.shortError(error)
-        }
     }
 
     // MARK: 消息
@@ -1916,7 +1905,6 @@ final class AppModel: ObservableObject {
            let a = messages.flatMap(\.attachments).first(where: { localFiles[$0.id] == nil && FileKind.of(name: $0.name, mime: $0.mime) == .archive }) {
             progress[a.id] = 0.62 // 演示"下载中"状态
         }
-        if env["HUIJIAN_DEMO_CANADMIN"] != nil { canAdmin = true }
         if env["HUIJIAN_DEMO_FILTER"] == "archived" {
             filter = .archived
             if let m = archivedMessages.last { selectThread(threadKey(m)); focusedMessage = m.id }

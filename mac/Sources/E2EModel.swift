@@ -229,6 +229,19 @@ extension AppModel {
         e2eAutoSetupNext = .distantPast
     }
 
+    /// 已解锁、账号还没有恢复码、用户没点过「以后再说」：消息列表顶部显示一条不打断的建议（T23，§11.2）。
+    /// 注册即开启加密时不生成恢复码，靠它提醒；「以后再说」按「服务器 + 账号」记在偏好设置里
+    var e2eSuggestRecovery: Bool {
+        guard e2eStatus == .unlocked, e2eState?.hasRecovery == false, let ring = e2eRing else { return false }
+        return !defaults.bool(forKey: Self.key("e2eRecoveryHintDismissed|" + ring.scope))
+    }
+
+    func e2eDismissRecoveryHint() {
+        guard let ring = e2eRing else { return }
+        objectWillChange.send()
+        defaults.set(true, forKey: Self.key("e2eRecoveryHintDismissed|" + ring.scope))
+    }
+
     /// 密码偏弱（§11.1 第 5 步）：照样开启加密，加密页显示 T24。按「服务器 + 账号」记在偏好设置里，改密码后清除
     var e2eWeakPassword: Bool {
         get { e2eRing.map { defaults.bool(forKey: Self.key("e2eWeakPassword|" + $0.scope)) } ?? false }
@@ -612,12 +625,6 @@ extension AppModel {
 
     // MARK: 设置项（§7）
 
-    func e2eSetOnly(_ on: Bool) async throws {
-        guard let api = e2eAPI else { return }
-        try await E2E.setE2EOnly(api, on)
-        await refreshE2E()
-    }
-
     /// 更换恢复码；新的恢复码放在 e2eRecoveryCode，用户点「完成」才清除
     func e2eRotateRecovery(password: String) async throws {
         let (api, ring, u) = try e2eContext()
@@ -633,12 +640,6 @@ extension AppModel {
         e2eRecoveryCode = code
         e2eRecoveryFromSetup = false
         await refreshE2E()
-    }
-
-    /// 删除服务器上的明文消息。本机已同步的副本保留：服务端发来 purge 变更时记为「仅本机保留」（见 applyChanges）
-    func e2eDeletePlain() async throws -> Int {
-        guard let api = e2eAPI else { return 0 }
-        return try await E2E.deletePlain(api)
     }
 
     /// 某把 pushkey 的加密发送密钥：只用本机钉住的账号公钥（§7 第 1 项）

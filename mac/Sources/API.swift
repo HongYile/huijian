@@ -150,6 +150,7 @@ struct APIClient {
         let device_id: String
         let name: String
         let platform: String?
+        /// 旧服务端才有意义；0.9.0 起恒为 false，客户端不再使用（只为兼容解码保留）
         let can_admin: Bool?
         let admin_url: String?
         let account: AccountInfo?
@@ -261,16 +262,6 @@ struct APIClient {
         return try JSONDecoder().decode(Me.self, from: data)
     }
 
-    /// 一次性管理登录链接（60 秒有效）。未授权设备返回 HTTP 403。
-    func adminLink() async throws -> URL {
-        let (data, resp) = try await Self.apiSession.data(for: request("/v1/admin/link", method: "POST"))
-        try Self.check(resp, data)
-        struct R: Decodable { let url: String }
-        let r = try JSONDecoder().decode(R.self, from: data)
-        guard let u = URL(string: r.url) else { throw APIError.invalid("链接格式不对") }
-        return u
-    }
-
     // MARK: 设备自助管理（改名、pushkey）
 
     struct PushKey: Decodable, Identifiable, Equatable {
@@ -342,6 +333,16 @@ struct APIClient {
         let features: [Feature]
         /// 长轮询最长等待秒数（0.6.4 起，功能 poll.long）
         var long_poll_max: Int? = nil
+        /// 注册方式（0.9.0 起，功能 register.invite）："closed" 不开放、"invite" 要邀请码、"open" 开放
+        var register: String? = nil
+        /// 旧服务端：是否开放注册
+        var register_open: Bool? = nil
+
+        /// 注册方式；服务端都没说时 nil（不知道，照旧显示注册入口）
+        var registerMode: String? {
+            if let r = register, ["closed", "invite", "open"].contains(r) { return r }
+            return register_open.map { $0 ? "open" : "closed" }
+        }
     }
 
     /// 服务端版本和功能清单；旧服务端（< 0.5.0）抛出 .unsupported
@@ -349,59 +350,6 @@ struct APIClient {
         let (data, resp) = try await Self.apiSession.data(for: request("/v1/info"))
         try Self.check(resp, data)
         return try JSONDecoder().decode(ServerInfo.self, from: data)
-    }
-
-    // MARK: 服务端存储与备份（需要允许管理）
-
-    struct BackupStatus: Codable, Equatable {
-        let at: Int64
-        let ok: Bool
-        let error: String?
-        let warning: String?
-        let reason: String?
-        let db: String?
-        let db_size: Int64?
-        let files: Bool?
-        let copied: Int?
-        let seconds: Double?
-    }
-
-    struct StorageInfo: Codable, Equatable {
-        let version: String?
-        let data_dir: String
-        let db_size: Int64
-        let files_dir: String
-        let files_ok: Bool
-        let files_error: String?
-        let files_count: Int
-        let files_size: Int64
-        let files_free: Int64
-        let pending: Int
-        let legacy: Int
-        let backup_enabled: Bool
-        let backup_dir: String?
-        let backup_ok: Bool
-        let backup_error: String?
-        let backup_free: Int64
-        let backup_at: String?
-        let backup_keep: Int?
-        let backup_files: Bool?
-        let next: Int64?
-        let running: Bool
-        let last: BackupStatus?
-        let tz: String?
-    }
-
-    func storage(fresh: Bool = false) async throws -> StorageInfo {
-        let q: [URLQueryItem] = fresh ? [.init(name: "fresh", value: "1")] : []
-        let (data, resp) = try await Self.apiSession.data(for: request("/v1/storage", query: q))
-        try Self.check(resp, data)
-        return try JSONDecoder().decode(StorageInfo.self, from: data)
-    }
-
-    /// 让服务端开始一次备份（在后台进行），返回开始时的状态
-    func startBackup() async throws -> StorageInfo {
-        try JSONDecoder().decode(StorageInfo.self, from: try await send("/v1/storage/backup", method: "POST", body: nil))
     }
 
     // MARK: 消息

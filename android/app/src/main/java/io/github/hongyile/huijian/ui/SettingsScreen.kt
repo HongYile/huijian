@@ -90,6 +90,7 @@ fun SettingsScreen(back: () -> Unit, requestNotify: () -> Unit, open: (Screen) -
     var testMsg by remember { mutableStateOf<String?>(null) }
     var confirmLogout by remember { mutableStateOf(false) }
     val e2eStatus by E2EHub.status.collectAsStateWithLifecycle()
+    val e2eState by E2EHub.state.collectAsStateWithLifecycle()
 
     fun applyMode(m: ReceiveMode, min: Int) {
         mode = m; interval = min
@@ -156,9 +157,10 @@ fun SettingsScreen(back: () -> Unit, requestNotify: () -> Unit, open: (Screen) -
                 NavRow("频道", "显示名、排序、置顶、静音、隐藏、删除", Modifier.testTag("openChannels")) { open(Screen.Channels) }
                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                 NavRow("端到端加密", when (e2eStatus) {
-                    E2EStatus.UNLOCKED -> "已开启 · 本机已解锁"
+                    // 还没有恢复码（注册即开启加密时不强制设置）：不打断地提一句，点进去加密页有 T23 和「设置恢复码」
+                    E2EStatus.UNLOCKED -> if (e2eState?.recoveryWrap.isNullOrEmpty()) "已开启 · 建议设置恢复码" else "已开启 · 本机已解锁"
                     E2EStatus.LOCKED -> "已开启 · 本机已锁定，点这里解锁"
-                    E2EStatus.DISABLED -> "未开启：消息只有你的设备能解开"
+                    E2EStatus.DISABLED -> "未开启：开启后消息只有你的设备能解开"
                     E2EStatus.UNSUPPORTED -> "更新服务端后可用"
                     E2EStatus.UNKNOWN -> "开启加密、解锁、批准其他设备"
                 }, Modifier.testTag("openE2E")) { open(Screen.E2E) }

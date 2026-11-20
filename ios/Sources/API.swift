@@ -56,7 +56,7 @@ struct Me: Decodable {
     let account: Account?
     /// 账号的 Bark 转发配置；旧服务端没有这个字段，未配置时为 null
     let bark: BarkConfig?
-    /// 这台设备有没有服务器管理权限（管理后台「设备」页的「允许管理」）
+    /// 旧服务端：这台设备有没有服务器管理权限。0.9.0 起恒为 false，客户端不再使用（只保留解码兼容）
     var can_admin: Bool? = nil
 
     struct Account: Decodable {

@@ -54,6 +54,8 @@ data class Message(
     val e2e: String? = null,
     /** 加密消息的解密结果：ok / locked / wrong_key / format（E2EMessages）；空 = 还没处理（刚从服务端拉到） */
     val e2eStatus: String = "",
+    /** 服务器代加密（§11.5，服务端 0.8.0 起消息 JSON 的 sealed: "server"）：发送方发的是明文，服务器收到后才加密。详情页显示 T64 */
+    val serverSealed: Boolean = false,
 ) {
     val title get() = text.ifBlank { attachments.firstOrNull()?.name ?: "（无标题）" }
 
@@ -70,6 +72,7 @@ data class Message(
         .put("silent", silent).put("silent_reason", silentReason).put("archive", archive)
         .apply { if (doc != null) put("doc", doc); if (preview.isNotEmpty()) put("preview", preview) }   // 本地缓存里 doc 存成字符串
         .apply { if (e2e != null) put("e2e", e2e); if (e2eStatus.isNotEmpty()) put("e2e_status", e2eStatus) }
+        .apply { if (serverSealed) put("sealed", "server") }
 
     /** 列表摘要 / 通知正文：优先用服务端的 preview，旧服务端或旧缓存退回本地去标记 */
     fun summary(): String = preview.ifBlank { if (type == "text") desp.trim() else Markdown.plain(desp) }
@@ -105,6 +108,7 @@ data class Message(
                 preview = o.optString("preview"),
                 e2e = o.optString("e2e").ifBlank { null },
                 e2eStatus = o.optString("e2e_status"),
+                serverSealed = o.optString("sealed") == "server",
             )
         }
     }

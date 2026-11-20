@@ -53,7 +53,7 @@ enum SelfTest {
             args.removeSubrange(i...(i + 1))
         }
         guard args.count >= 3, let server = URL(string: args[0]) else {
-            print("用法: Huijian --selftest <server> <pairCode> <pushkey> [--workdir <dir>]")
+            print("用法: Huijian --selftest <server> <pairCode> <pushkey> [--workdir <dir>]（账号密码、邀请码见环境变量 HJ_SELFTEST_PASSWORD / HJ_SELFTEST_INVITE）")
             return 2
         }
         let code = args[1], pushkey = args[2]
@@ -161,10 +161,38 @@ enum SelfTest {
         model.useToken(token, server: server.absoluteString)
         let client = APIClient(server: server, token: token)
 
+        // 2b. 0.9.0 账号注册即开启加密：配对码登录的设备先用密码解锁（之后收到的消息才能解开）
+        step("2b 用密码解锁加密")
+        // refreshE2E 要先知道服务端支持 e2e（功能清单）。App 里由同步循环在取到功能清单后刷新加密状态（AppModel 同步循环
+        // 「if support("e2e") == .yes { refreshE2E }」）；自检没有启动同步循环，这里照同样的顺序做：先等功能清单，再刷新
+        model.refreshServerInfo()
+        await model.refreshMe()
+        for _ in 0..<50 where model.serverInfo == nil { try? await Task.sleep(nanoseconds: 100_000_000) }
+        await model.refreshE2E()
+        func e2eDiag() -> String {
+            "e2eStatus=\(model.e2eStatus.map { "\($0)" } ?? "nil") e2eState=\(model.e2eState == nil ? "nil" : "有")"
+                + " e2eKeys=\(model.e2eKeys.count) serverInfo=\(model.serverInfo == nil ? "nil" : "有")"
+        }
+        check(model.serverInfo != nil && model.e2eState?.enabled == true && model.e2eStatus == .locked,
+              "取到功能清单后刷新加密状态：账号已开启、配对码登录的设备已锁定（\(e2eDiag())）")
+        if let ring = model.e2eRing, let u = model.account?.username {
+            do {
+                try await E2E.unlockWithPassword(E2E.API(client), ring: ring, server: model.e2eServerID, username: u,
+                                                 password: accountPassword, marks: model.e2eMarks)
+                model.loadE2EKeys()
+                await model.refreshE2E()
+                check(model.e2eStatus == .unlocked, "配对码登录的设备用密码解锁：已解锁（\(u)，\(e2eDiag())）")
+            } catch { ng("用密码解锁失败：\(error.localizedDescription)") }
+        } else {
+            ng("取不到账号信息，无法解锁加密")
+        }
+        e2eModel = model
+
         // 4. 拉历史 + 本地持久化
         step("4 历史消息与持久化")
         do {
-            let hist = try await client.allMessages(since: 0)
+            let hist = await dec(try await client.allMessages(since: 0))
+            check(hist.allSatisfy { $0.serverSealed && $0.e2eStatus == "ok" }, "历史消息都是服务器代加密的（明文发送），本机解开")
             model.merge(hist, notify: false)
             check(!hist.isEmpty, "拉到历史消息 \(hist.count) 条，最大 id \(model.maxID)")
             if let m = hist.first(where: { !$0.attachments.isEmpty }) {
@@ -236,7 +264,7 @@ enum SelfTest {
         } catch {
             ng("发送失败：\(error.localizedDescription)")
         }
-        let got = await poll.value
+        let got = await dec(await poll.value)
         let total = Date().timeIntervalSince(pollStart)
         model.merge(got, notify: false)
         received = got.first { $0.text == marker }
@@ -252,7 +280,7 @@ enum SelfTest {
                 try await pushMultipart(server: server, pushkey: pushkey, text: "batch-\(i)", desp: "", priority: 2,
                                         fileName: nil, fileData: nil)
             }
-            let batch = try await client.messages(since: model.maxID, limit: 200, wait: 50)
+            let batch = await dec(try await client.messages(since: model.maxID, limit: 200, wait: 50))
             model.merge(batch, notify: false)
             check(batch.map(\.text) == ["batch-1", "batch-2", "batch-3"], "积压的 3 条一次取回且有序")
         } catch {
@@ -270,8 +298,9 @@ enum SelfTest {
                     Task { @MainActor in progressValues.append(p) }
                 }
                 try? await Task.sleep(nanoseconds: 200_000_000)
+                // 服务端的 sha256 是密文的（下载时已校验），解密后和发出的原文件比
                 let actual = try sha256OfFile(url)
-                check(actual == a.sha256, "sha256 一致 \(actual.prefix(12))…")
+                check(a.key != nil && actual == E2ESelfTest.sha256Hex(payload), "密文校验通过、解密后和原文件一致 \(actual.prefix(12))…")
                 check(FileManager.default.fileExists(atPath: url.path) && url.lastPathComponent == "实时附件.bin",
                       "保存为 att/\(a.id)/\(url.lastPathComponent)")
                 check(!progressValues.isEmpty && (progressValues.last ?? 0) >= 0.99,
@@ -348,7 +377,7 @@ enum SelfTest {
         uiLogicTests()
 
         // 13. 账户与管理后台一键登录
-        step("13 账户与管理后台")
+        step("13 账户（客户端不再进入管理后台）")
         await accountTests(server: server, token: token, adminCode: adminCode)
 
         // 16. 代理、自动下载、GitHub 更新源
@@ -359,7 +388,7 @@ enum SelfTest {
         // 17. 设备自助管理：改名、pushkey
         step("17 设备自助管理（改名 / pushkey）")
         let adminClient = await selfServiceTests(client: client, model: model, server: server, keysCode: opts["--keys-code"])
-        step("18 版本协商 / 服务端存储与备份 / 附件位置 / 配置迁移")
+        step("18 版本协商 / 附件位置 / 配置迁移")
         await compatStorageTests(normal: client, admin: adminClient, model: model, workdir: workdir)
 
         // 14. 应用内更新
@@ -421,9 +450,20 @@ enum SelfTest {
         check(!starredOld, "收藏的消息不自动归档")
         check(model.archivedThreads(now: later).contains(threadKey(fakes[0])), "整个线程都超期时线程归档")
         let realCount = model.messages.count - fakes.count
+        let fakeIDs = Set(fakes.map(\.id))
         do {
             try await model.reconcile(client)
-            check(model.messages.count == realCount && !model.starred.contains(9_000_013), "对账：服务端没有的消息从本机删除（收藏标记一起清掉）")
+            if model.e2eAccountEnabled {
+                // 账号已开启加密（0.9.0 起所有账号都是）：本地明文、服务器上找不到的，按 §7.4 记为「仅本机保留」，不删除；
+                // 用户手动删除时只删本地（收藏标记一起清掉）
+                check(fakeIDs.allSatisfy { id in model.messages.contains { $0.id == id } } && model.e2ePlainKept.isSuperset(of: fakeIDs),
+                      "对账：账号已开启加密，本地明文、服务器上已没有的消息记为「仅本机保留」，不删除（§7.4）")
+                model.removeLocal(Array(fakeIDs))
+                check(model.messages.count == realCount && !model.starred.contains(9_000_013) && model.e2ePlainKept.isDisjoint(with: fakeIDs),
+                      "手动删除「仅本机保留」的消息：只删本地，收藏标记和保留记录一起清掉")
+            } else {
+                check(model.messages.count == realCount && !model.starred.contains(9_000_013), "对账：服务端没有的消息从本机删除（收藏标记一起清掉）")
+            }
         } catch {
             ng("对账失败：\(error.localizedDescription)")
         }
@@ -451,7 +491,7 @@ enum SelfTest {
             try await pushMultipart(server: server, pushkey: pushkey, text: "manage-B", desp: "", priority: 3,
                                     fileName: "b.bin", fileData: Data(repeating: 7, count: 2048))
             try await pushMultipart(server: server, pushkey: pushkey, text: "manage-C", desp: "", priority: 3, fileName: nil, fileData: nil)
-            let got = try await client.allMessages(since: since)
+            let got = await dec(try await client.allMessages(since: since))
             model.merge(got, notify: false)
             ids = ["manage-A", "manage-B", "manage-C"].compactMap { t in got.first { $0.text == t }?.id }
         } catch {
@@ -566,7 +606,7 @@ enum SelfTest {
             for (t, p) in [("ch-a", 3), ("ch-b", 3), ("ch-c", 3), ("ch-c", 5)] {
                 try await pushMultipart(server: server, pushkey: pushkey, text: "频道 \(t)", desp: "", priority: p, fileName: nil, fileData: nil, topic: t)
             }
-            model.merge(try await client.allMessages(since: model.maxID), notify: false)
+            model.merge(await dec(try await client.allMessages(since: model.maxID)), notify: false)
         } catch {
             ng("发送频道测试消息失败：\(error.localizedDescription)")
             return
@@ -667,35 +707,21 @@ enum SelfTest {
     }
 
     @MainActor static func accountTests(server: URL, token: String, adminCode: String?) async {
+        // 0.9.0 起客户端不能进入管理后台（后台只能在服务器上进入）：can_admin 恒为 false，管理链接、存储与备份接口都已删除
         let c = APIClient(server: server, token: token)
         do {
             let me = try await c.me()
-            check(me.can_admin == false && (me.admin_url ?? "").hasPrefix("http"), "/v1/me：普通设备 can_admin=false，admin_url=\(me.admin_url ?? "")")
+            check(me.can_admin != true, "/v1/me：can_admin 不为 true（0.9.0 起恒为 false，客户端不再使用）")
         } catch { ng("/v1/me 失败：\(error.localizedDescription)") }
-        do {
-            _ = try await c.adminLink()
-            ng("未授权设备居然拿到了管理链接")
-        } catch APIError.http(403, let m) {
-            ok("未授权设备申请管理链接返回 403（\(m)）")
-        } catch { ng("错误类型不对：\(error)") }
-
-        guard let adminCode else { print("    （未提供 --admin-code，跳过授权设备测试）"); return }
-        do {
-            let r = try await APIClient.pair(server: server, code: adminCode, name: "selftest-admin", fingerprint: String(repeating: "cd", count: 32))
-            let ac = APIClient(server: server, token: r.token)
-            let me = try await ac.me()
-            check(me.can_admin == true, "带 can_admin 的配对码配出的设备 can_admin=true")
-            let url = try await ac.adminLink()
-            check(url.absoluteString.contains("/auth/link?t=L_"), "拿到一次性链接 \(url.absoluteString.prefix(48))…")
-            let (code1, cookie1) = await fetchNoRedirect(url)
-            if code1 == 404 {
-                print("    （服务端管理页暂未实现 /auth/link，跳过链接登录验证）")
-            } else {
-                check(code1 == 303 && cookie1.contains("huijian_admin="), "打开链接：HTTP \(code1)，设置了登录 Cookie")
-                let (code2, cookie2) = await fetchNoRedirect(url)
-                check(!cookie2.contains("huijian_admin=") || code2 != 303, "同一链接第二次使用无效（HTTP \(code2)）")
-            }
-        } catch { ng("授权设备测试失败：\(error.localizedDescription)") }
+        for (method, path) in [("POST", "/v1/admin/link"), ("GET", "/v1/storage"), ("POST", "/v1/storage/backup")] {
+            do {
+                let (d, r) = try await APIClient.apiSession.data(for: c.request(path, method: method))
+                try APIClient.check(r, d)
+                ng("\(method) \(path) 居然成功了")
+            } catch APIError.unsupported {
+                ok("\(method) \(path)：接口已删除")
+            } catch { ng("\(method) \(path)：预期接口不存在，实际 \(error)") }
+        }
     }
 
     final class NoRedirect: NSObject, URLSessionTaskDelegate {
@@ -816,7 +842,7 @@ enum SelfTest {
         try? await pushMultipart(server: server, pushkey: currentPushkey, text: "auto-dl", desp: "", priority: 3,
                                  fileName: "auto.bin", fileData: Data(repeating: 7, count: 300_000))
         let client = APIClient(server: server, token: token)
-        if let fresh = try? await client.messages(since: since, limit: 10, wait: 5), let m = fresh.last, let a = m.attachments.first {
+        if let raw = try? await client.messages(since: since, limit: 10, wait: 5), case let fresh = await dec(raw), let m = fresh.last, let a = m.attachments.first {
             model.autoDownload(model.merge(fresh, notify: false))
             for _ in 0..<50 where model.localFiles[a.id] == nil { try? await Task.sleep(nanoseconds: 100_000_000) }
             check(model.localFiles[a.id] != nil, "新消息的 300KB 附件已自动下载")
@@ -875,6 +901,15 @@ enum SelfTest {
     }
 
     @MainActor static var currentPushkey = ""
+    /// 0.9.0：所有消息都加密（普通 pushkey 的由服务器代加密）。自检账号的密码、注册新账号用的邀请码从环境变量读，不出现在命令行
+    @MainActor static var accountPassword: String { ProcessInfo.processInfo.environment["HJ_SELFTEST_PASSWORD"] ?? "" }
+    @MainActor static var inviteCode: String { ProcessInfo.processInfo.environment["HJ_SELFTEST_INVITE"] ?? "" }
+    /// 用来解密服务端消息的 model（已用密码解锁）：自检里直接从接口拿的消息先经过它（和 App 收消息一样走 prepareE2E）
+    @MainActor static var e2eModel: AppModel?
+    @MainActor static func dec(_ msgs: [Message]) async -> [Message] {
+        guard let m = e2eModel else { return msgs }
+        return await m.prepareE2E(msgs)
+    }
 
     @discardableResult
     @MainActor static func selfServiceTests(client normal: APIClient, model: AppModel, server: URL, keysCode: String?) async -> APIClient? {
@@ -884,8 +919,11 @@ enum SelfTest {
         } catch { ng("列出 pushkey 失败：\(error)") }
         // 用不同的设备指纹，模拟另一台设备（同一台 Mac 的指纹会沿用本机的设备记录，让本机旧 token 失效）
         let otherFP = String(repeating: "ab", count: 32)
-        guard let keysCode, let pr = try? await APIClient.pair(server: server, code: keysCode, name: "自检管理设备", fingerprint: otherFP) else {
-            ng("没有提供 / 无法使用允许管理的配对码，跳过 pushkey 测试")
+        // 0.9.0 起配对码只能由已登录的设备生成（管理后台不再生成）：没从命令行传进来时由本机生成一个
+        var code2 = keysCode
+        if code2 == nil { code2 = try? await normal.createPairCode() }
+        guard let code2, let pr = try? await APIClient.pair(server: server, code: code2, name: "自检第二台设备", fingerprint: otherFP) else {
+            ng("拿不到第二台设备的配对码，跳过 pushkey 测试")
             return nil
         }
 
@@ -938,13 +976,15 @@ enum SelfTest {
         // 版本协商
         do {
             let info = try await normal.info()
-            check(info.name == "huijian" && !info.version.isEmpty && info.features.contains { $0.id == "storage" },
-                  "/v1/info：服务端 \(info.version)，\(info.features.count) 项功能")
+            check(info.name == "huijian" && !info.version.isEmpty && info.features.contains { $0.id == "e2e.auto" }
+                  && !info.features.contains { $0.id == "admin.link" || $0.id == "storage" },
+                  "/v1/info：服务端 \(info.version)，\(info.features.count) 项功能，没有 admin.link / storage")
+            check(info.registerMode != nil, "/v1/info：注册方式 \(info.registerMode ?? "-")")
             check(ServerVersionSeen.current == info.version, "响应头 X-Huijian-Server 已记录")
         } catch { ng("/v1/info 失败：\(Updater.describe(error))") }
         model.refreshServerInfo()
         for _ in 0..<30 where model.serverInfo == nil { try? await Task.sleep(nanoseconds: 100_000_000) }
-        check(model.support("storage") == .yes && model.support("keys") == .yes, "功能清单：storage / keys 可用")
+        check(model.support("e2e.auto") == .yes && model.support("keys") == .yes, "功能清单：e2e.auto / keys 可用")
         check(model.featuresNeedingServerUpdate.isEmpty && model.featuresNeedingClientUpdate.isEmpty, "客户端与服务端功能一致")
 
         // 接口不存在的判断（旧服务端）
@@ -963,32 +1003,24 @@ enum SelfTest {
         catch APIError.http(404, let m) { check(m == "附件不存在", "业务上的 404（带 JSON）不算接口不存在") } catch { ng("业务 404：\(error)") }
         check((try? APIClient.check(resp(202), Data())) != nil, "202 视为成功")
         let legacyInfo: APIClient.ServerInfo? = nil
-        check(AppModel.support("storage", info: legacyInfo, legacy: true) == .needsServerUpdate
-              && AppModel.support("keys", info: nil, legacy: true) == .unknown, "旧服务端：存储需更新服务端，pushkey 先尝试")
+        check(AppModel.support("e2e", info: legacyInfo, legacy: true) == .needsServerUpdate
+              && AppModel.support("keys", info: nil, legacy: true) == .unknown, "旧服务端：加密需更新服务端，pushkey 先尝试")
         let future = APIClient.ServerInfo(name: "huijian", version: "9.0.0", api: 9,
                                           features: [.init(id: "push", title: "发送", since: "0.1.0"), .init(id: "future.x", title: "未来功能", since: "9.0.0")])
         check(AppModel.support("keys", info: future, legacy: false) == .needsServerUpdate, "服务端功能清单里没有的功能：需更新服务端")
         check(future.features.filter { AppModel.knownFeatures[$0.id] == nil }.map(\.id) == ["future.x"], "客户端不认识的功能：提示更新客户端")
-
-        // 服务端存储与备份
-        do {
-            _ = try await normal.storage()
-            ng("没有管理权限的设备不应能查看存储")
-        } catch APIError.http(403, _) { ok("没有管理权限查看存储返回 403") } catch { ng("预期 403：\(error)") }
-        if let admin {
-            do {
-                let s = try await admin.storage(fresh: true)
-                check(s.files_ok && s.backup_enabled, "存储状态：附件目录可用，备份已开启（\(s.files_dir)）")
-                let started = try await admin.startBackup()
-                check(started.running || started.last != nil, "开始备份")
-                var last = started
-                for _ in 0..<50 where last.running { try? await Task.sleep(nanoseconds: 200_000_000); last = try await admin.storage() }
-                check(!last.running && last.last?.ok == true && (last.last?.db ?? "").hasPrefix("huijian-"),
-                      "备份完成：\(last.last?.db ?? "-")，\(last.last?.reason ?? "")")
-            } catch { ng("存储 / 备份失败：\(Updater.describe(error))") }
-        } else {
-            ng("没有允许管理的设备，跳过存储测试")
+        // 旧服务端列出的 admin.link / storage：客户端不再用，不提示更新客户端；服务端没有也不提示更新服务端
+        check(["admin.link", "storage"].allSatisfy { AppModel.ignoredFeatures.contains($0) && AppModel.knownFeatures[$0] == nil },
+              "admin.link / storage 不再是客户端功能（0.9.0 起不能从客户端进入管理后台）")
+        // 注册方式：0.9.0 的 register 字段优先；旧服务端按 register_open
+        func reg(_ json: String) -> String? {
+            (try? JSONDecoder().decode(APIClient.ServerInfo.self, from: Data(json.utf8)))?.registerMode
         }
+        let head = #"{"name":"huijian","version":"0.9.0","api":1,"features":[]"#
+        check(reg(head + #","register":"invite","register_open":true}"#) == "invite" && reg(head + #","register":"closed"}"#) == "closed"
+              && reg(head + #","register_open":true}"#) == "open" && reg(head + #","register_open":false}"#) == "closed"
+              && reg(head + "}") == nil && reg(head + #","register":"weird"}"#) == nil,
+              "注册方式：register 字段优先，旧服务端按 register_open，都没有时不知道")
 
         // 附件保存位置：按日期分目录、更换位置并搬移
         let cdir = workdir.appendingPathComponent("cache-test")
@@ -1052,8 +1084,9 @@ enum SelfTest {
     @MainActor static func accountTests(normal: APIClient, other: APIClient?, model: AppModel, server: URL, pushkey: String) async {
         do {
             await model.refreshMe()
-            check(model.account != nil && model.account?.has_password == false, "账号信息：第一个账号还没有密码")
-            check(model.needsAccountSetup, "账号没有密码：主窗口显示「完成账号设置」，不进入消息界面")
+            // 0.9.0：账号只能注册产生（注册即有密码、即开启加密），不再有「还没有密码」的账号
+            check(model.account?.has_password == true && !model.needsAccountSetup && model.accountName == "自检用户",
+                  "账号信息：注册的账号已有用户名和密码，直接进入消息界面，左下角显示「\(model.accountName)」")
             // 用户名规则与服务端 account_name_test.go 用同一组用例
             let okNames = ["me", "Alex Chen", "  Alex   Chen ", "张三", "张 三", "a.b-c_d", "Mary Jane Watson", "Alex\u{3000}Chen", "〇号", "第①组"]
             let badNames = ["a", "a/b", "a@b", "x\ty\nz!", "123456789012345678901234567890123", "Alex\u{3164}Chen", "\u{3164}\u{3164}", "a\u{200B}b", "e\u{301}x"]
@@ -1062,30 +1095,37 @@ enum SelfTest {
             check(wrongOK.isEmpty && wrongBad.isEmpty && AppModel.normalizeUsername("  Alex   Chen ") == "Alex Chen",
                   "客户端用户名规则与服务端一致" + (wrongOK.isEmpty && wrongBad.isEmpty ? "" : "（误拒 \(wrongOK)，误放 \(wrongBad)）"))
             do {
-                _ = try await normal.setCredentials(username: "自检用户", password: "selftest-pass-1", current: "")
-                ng("没有管理权限的设备却设置了初始密码")
-            } catch APIError.http(403, _) { ok("没有管理权限的设备不能设置初始密码") }
-            guard let other else { ng("缺少允许管理的设备（--keys-code），无法继续账号测试"); return }
-            let a = try await other.setCredentials(username: "自检用户", password: "selftest-pass-1", current: "")
-            check(a.username == "自检用户" && a.has_password, "允许管理的设备设置用户名和密码")
-            await model.refreshMe()
-            check(!model.needsAccountSetup && model.accountName == "自检用户", "账号设置完成后放行，左下角显示用户名「\(model.accountName)」")
-            do {
                 _ = try await normal.setCredentials(username: "自检用户", password: "another-pass-2", current: "wrong")
-                ng("已有密码时没提供正确的当前密码却改成功了")
-            } catch APIError.http(403, _) { ok("修改密码需要当前密码") }
+                ng("没提供正确的当前密码却改成功了")
+            } catch APIError.http(let code, _) where (400...499).contains(code) {
+                ok("旧接口改密码被拒绝（HTTP \(code)：已升级的账号要用新登录协议、核对当前密码）")
+            }
             do {
-                _ = try await APIClient.login(server: server, username: "自检用户", password: "wrong-pass", name: "x", register: false)
+                _ = try await APIClient.login(server: server, username: "自检用户", password: accountPassword, name: "x", register: false)
+                ng("已升级的账号用密码原文登录却成功了")
+            } catch APIError.http(let code, let m) where code == 403 || code == 426 { ok("已升级的账号不接受密码原文登录（HTTP \(code)：\(m)）") }
+            let marks = model.e2eMarks
+            func dev(_ name: String, _ fp: String) -> E2E.Device { .init(name: name, platform: "macos", fingerprint: fp) }
+            do {
+                _ = try await E2E.login(server: APIClient(server: server, token: nil), authed: { APIClient(server: server, token: $0) },
+                                        serverID: model.e2eServerID, username: "自检用户", password: accountPassword + "x",
+                                        device: dev("x", String(repeating: "ef", count: 32)), register: false, marks: marks, secrets: E2E.MemorySecrets())
                 ng("密码错误却登录成功")
-            } catch APIError.http(403, let m) { ok("密码错误被拒绝（\(m)）") }
+            } catch let f as E2E.Failure where f.status == 403 { ok("密码错误被拒绝（\(f.message)）") }
             do {
-                _ = try await APIClient.login(server: server, username: "新人", password: "newbie-pass", name: "x", register: true)
-                ng("未开放注册却注册成功")
-            } catch APIError.http(403, _) { ok("服务器未开放注册时不能注册") }
+                _ = try await E2E.login(server: APIClient(server: server, token: nil), authed: { APIClient(server: server, token: $0) },
+                                        serverID: model.e2eServerID, username: "新人\(Int.random(in: 1000...9999))", password: "Newbie#Pass-2026x",
+                                        device: dev("x", String(repeating: "ef", count: 32)), register: true, marks: marks, secrets: E2E.MemorySecrets())
+                ng("没有邀请码却注册成功")
+            } catch let f as E2E.Failure where f.status == 403 { ok("没有邀请码不能注册（\(f.message)）") }
 
             let me = try await normal.me()
-            let r = try await APIClient.login(server: server, username: "自检用户", password: "selftest-pass-1", name: "重装后的 Mac", register: false)
-            check(r.reused == true && r.device_id == me.device_id && r.name == me.name, "同一台 Mac 用密码登录：沿用原设备记录（\(r.device_id)，名称仍是「\(r.name)」）")
+            let lr = try await E2E.login(server: APIClient(server: server, token: nil), authed: { APIClient(server: server, token: $0) },
+                                         serverID: model.e2eServerID, username: "自检用户", password: accountPassword,
+                                         device: dev("重装后的 Mac", DeviceFingerprint.value), register: false, marks: marks, secrets: E2E.MemorySecrets())
+            let r = try JSONDecoder().decode(APIClient.PairResult.self, from: lr.response)
+            check(r.reused == true && r.device_id == me.device_id && r.name == me.name && lr.unlocked,
+                  "同一台 Mac 用密码登录：沿用原设备记录（\(r.device_id)，名称仍是「\(r.name)」），自动解锁")
             do { _ = try await normal.me(); ng("旧 token 应失效") } catch APIError.unauthorized { ok("旧 token 失效") }
             let c = APIClient(server: server, token: r.token)
             let d = try await c.account()
@@ -1104,12 +1144,12 @@ enum SelfTest {
             let since = try await c.messagesPage(since: -1, limit: 1).messages.last?.id ?? 0
             try await pushMultipart(server: server, pushkey: pushkey, text: "静默测试", desp: "", priority: 4, fileName: nil, fileData: nil)
             try await pushMultipart(server: server, pushkey: pushkey, text: "紧急不静默", desp: "", priority: 5, fileName: nil, fileData: nil)
-            let got = try await c.messages(since: since)
+            let got = await dec(try await c.messages(since: since))
             check(got.map(\.text) == ["静默测试", "紧急不静默"] && got.map(\.silent) == [true, false] && got.first?.pushkeyID == k.id,
                   "本机设为静默：普通消息标记静默、紧急照常；消息带 pushkey_id")
             try await c.setSubscription(keyID: k.id, mode: "off")
             try await pushMultipart(server: server, pushkey: pushkey, text: "不接收测试", desp: "", priority: 4, fileName: nil, fileData: nil)
-            let got2 = try await c.messages(since: got.last?.id ?? since)
+            let got2 = await dec(try await c.messages(since: got.last?.id ?? since))
             check(got2.isEmpty, "本机设为不接收：看不到这把 key 的新消息")
             try await c.setSubscription(keyID: k.id, mode: "notify")
 
@@ -1121,13 +1161,13 @@ enum SelfTest {
             check(!(try await c.listKeys()).contains { $0.id == tmp.id }, "吊销后删除：列表里不再出现")
 
             // 在用设备优先：另一台设备上报在用 → 本机普通消息静默
-            do {
+            if let other {
                 try await other.presence()
                 try await pushMultipart(server: server, pushkey: pushkey, text: "另一台在用", desp: "", priority: 3, fileName: nil, fileData: nil)
-                let got3 = try await c.messages(since: got.last?.id ?? since).filter { $0.text == "另一台在用" }
+                let got3 = await dec(try await c.messages(since: got.last?.id ?? since)).filter { $0.text == "另一台在用" }
                 check(got3.first?.silent == true, "另一台设备正在使用：本机普通消息静默")
                 try await c.setAwaySilent(false)
-                let got4 = try await c.messages(since: got.last?.id ?? since).filter { $0.text == "另一台在用" }
+                let got4 = await dec(try await c.messages(since: got.last?.id ?? since)).filter { $0.text == "另一台在用" }
                 check(got4.first?.silent == false, "关掉「在用设备优先」后照常提醒")
             }
 
@@ -1136,13 +1176,13 @@ enum SelfTest {
             m.silent = true
             check(m.silent && got[1].priority == 5, "静默标记会传到通知判断（merge 里跳过）")
 
-            // 端到端加密联网流程（服务端 0.7.0 起）：自动升级、开启加密、三种解锁、设备批准、收加密消息、设置项。
-            // 会改掉账号密码、删除服务器上的明文消息，所以放在账号测试的最后
-            if (try? await c.info())?.features.contains(where: { $0.id == "e2e" }) == true {
+            // 端到端加密联网流程（服务端 0.9.0）：用邀请码注册一个新账号（注册即开启加密），三种解锁、设备批准、收加密消息、设置项
+            if (try? await c.info())?.features.contains(where: { $0.id == "register.e2e" }) == true {
                 step("22 端到端加密（联网）")
                 await E2ESelfTest.online({ name, good, detail in check(good, good ? name : "\(name)  \(detail)") },
                                          server: server, transport: { APIClient(server: server, token: $0) },
-                                         tokenA: r.token, username: "自检用户", password: "selftest-pass-1", pushkey: pushkey)
+                                         invite: inviteCode, username: "自检加密用户\(Int.random(in: 100...999))",
+                                         password: "Selftest#E2e-\(Int.random(in: 100000...999999))-pw")
             } else {
                 print("    （服务端没有 e2e 功能，跳过端到端加密联网测试）")
             }

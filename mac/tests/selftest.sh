@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 起独立 hub（默认 127.0.0.1:28790/28791），准备 pushkey、配对码、历史消息，然后跑 Huijian --selftest。
+# 起独立 hub（默认 127.0.0.1:28790/28791），用邀请码注册自检账号（注册即开启加密），准备 pushkey、配对码、历史消息（服务器代加密），然后跑 Huijian --selftest。
 # 使用仓库内 server/ 编译出的 huijian（若不存在会自动编译）。
 # 用法: tests/selftest.sh [监听IP，默认 127.0.0.1]
 set -u
@@ -8,20 +8,30 @@ cd "$(dirname "$0")/.."
 if [ ! -x ../server/bin/huijian ] || [ -n "$(find ../server -name '*.go' -newer ../server/bin/huijian | head -1)" ]; then
   (cd ../server && GOTOOLCHAIN=local go build -o bin/huijian .) || exit 1
 fi
+# 自检跑的是 build/Huijian.app：比源码旧时直接停（否则跑的是旧的自检代码，结果没有意义）。先执行 ./build.sh
+if [ ! -x build/Huijian.app/Contents/MacOS/Huijian ] || [ -n "$(find Sources -name '*.swift' -newer build/Huijian.app/Contents/MacOS/Huijian | head -1)" ]; then
+  echo "build/Huijian.app 比 Sources 旧（或不存在），请先执行 ./build.sh 再跑自检"; exit 1
+fi
 IP=${1:-127.0.0.1}
 T=test-run.noindex; rm -rf $T test-run; mkdir -p $T/data   # .noindex：测试用的 App 副本不进 Spotlight
 PUB=http://$IP:28790; ADM=http://127.0.0.1:28791
 HUIJIAN_DATA=$T/data HUIJIAN_PUBLIC_ADDR=$IP:28790 HUIJIAN_ADMIN_ADDR=127.0.0.1:28791 \
   ../server/bin/huijian hub > $T/hub.log 2>&1 &
-HUB=$!; trap 'kill $HUB 2>/dev/null' EXIT
+HUB=$!; trap 'kill $HUB 2>/dev/null; rm -f $T/cli.token' EXIT
 for i in $(seq 1 30); do curl -sf $PUB/healthz >/dev/null && break; sleep 0.2; done
-J=$T/cookies
-curl -s -c $J -o /dev/null -d "token=$(cat $T/data/admin.token)" $ADM/login
-LOC=$(curl -s -b $J -o /dev/null -w '%{redirect_url}' -H "Origin: $ADM" --data-urlencode "name=mac selftest" $ADM/pushkeys)
-PK=$(python3 -c "import sys,urllib.parse as u;print(u.parse_qs(u.urlparse(sys.argv[1]).query)['key'][0])" "$LOC")
-CODE=$(curl -s -b $J -o /dev/null -w '%{redirect_url}' -H "Origin: $ADM" -X POST $ADM/pair | sed -E 's/.*code=([0-9]+).*/\1/')
-ACODE=$(curl -s -b $J -o /dev/null -w '%{redirect_url}' -H "Origin: $ADM" -d can_admin=on $ADM/pair | sed -E 's/.*code=([0-9]+).*/\1/')
-KCODE=$(curl -s -b $J -o /dev/null -w '%{redirect_url}' -H "Origin: $ADM" -d can_admin=on $ADM/pair | sed -E 's/.*code=([0-9]+).*/\1/')
+# 0.9.0：账号只能注册产生（注册即开启加密），管理端只发邀请码；pushkey、配对码都由账号自己的设备生成
+# 邀请码只够用 2 次：命令行注册「自检用户」1 次 + 自检第 22 步注册一个加密测试账号 1 次（故意填错的不扣次数）
+INV=$(HUIJIAN_DATA=$T/data HUIJIAN_ADMIN_ADDR=127.0.0.1:28791 ../server/bin/huijian invite new -n 1 -uses 2 -note "mac selftest" 2>/dev/null | head -1)
+[ -n "$INV" ] || { echo "生成邀请码失败"; exit 1; }
+# 密码和邀请码不 export：只在启动 App 的那一行作为环境变量传进去（其他子进程看不到）
+SELFTEST_PW="Selftest#Mac-$RANDOM-$RANDOM-pw"
+printf '%s\n' "$SELFTEST_PW" | ../server/bin/huijian register -u $PUB -invite "$INV" -platform cli -name "selftest-cli" \
+  -token-out $T/cli.token "自检用户" >/dev/null 2>$T/register.err || { echo "注册失败：$(cat $T/register.err)"; exit 1; }
+AUTH="Authorization: Bearer $(cat $T/cli.token)"
+KEYBODY='{"name":"mac selftest"}'   # JSON 先放变量（bash 3.2 会把 "$(… -d "{…,…}" …)" 里的逗号做花括号展开）
+PK=$(curl -s -X POST -H "$AUTH" -H 'Content-Type: application/json' -d "$KEYBODY" $PUB/v1/keys | python3 -c 'import sys,json;print(json.load(sys.stdin)["key"])')
+CODE=$(curl -s -X POST -H "$AUTH" $PUB/v1/pair-codes | python3 -c 'import sys,json;print(json.load(sys.stdin)["code"])')
+[ -n "$PK" ] && [ -n "$CODE" ] || { echo "新建 pushkey / 配对码失败"; exit 1; }
 # 历史消息：一条纯文字，一条带 PNG + PDF
 python3 - $T/loss.png $T/report.pdf <<'PY'
 import sys,zlib,struct
@@ -66,11 +76,12 @@ cp $T/upd.zip $T/gh/Huijian-$VER-$NEXT.zip
 python3 tools/make_manifest.py $HY $GKEY $VER $NEXT "$GNOTES" $T/gh/Huijian-$VER-$NEXT.zip > $T/gh/update-macos.json
 : > $T/mock.log
 python3 tests/mock_net.py 28795 28796 $T/gh $T/mock.log & MOCK=$!
-trap 'kill $HUB $MOCK 2>/dev/null' EXIT
+trap 'kill $HUB $MOCK 2>/dev/null; rm -f $T/cli.token' EXIT
 for i in $(seq 1 20); do curl -sf http://127.0.0.1:28795/zen >/dev/null && break; sleep 0.2; done
 TARGET="$PWD/$T/inst/Huijian.app"
-build/Huijian.app/Contents/MacOS/Huijian --selftest $PUB $CODE $PK --admin-code $ACODE --workdir $T/selftest \
-  --update-pub $UPUB --install-target "$TARGET" --keys-code $KCODE \
+HJ_SELFTEST_PASSWORD="$SELFTEST_PW" HJ_SELFTEST_INVITE="$INV" \
+  build/Huijian.app/Contents/MacOS/Huijian --selftest $PUB $CODE $PK --workdir $T/selftest \
+  --update-pub $UPUB --install-target "$TARGET" \
   --mock-gh-port 28795 --mock-proxy-port 28796 --mock-log $T/mock.log --gh-pub $GPUB --gh-build $NEXT
 RC=$?
 echo "[15 替换脚本（自检进程退出后）]"

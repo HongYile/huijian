@@ -403,6 +403,7 @@ struct ThreadListView: View {
             }
             .safeAreaInset(edge: .top, spacing: 0) {
                 if model.e2eNeedsEnable { E2EEnableBanner() } else if model.e2eLocked { E2ELockedBanner() }
+                else if model.e2eSuggestRecovery { E2ERecoveryHintBanner() }
             }
             .onChange(of: model.filter) { _, _ in multi = [] }
             // 搜索、筛选、其他设备的操作、自动归档都会让会话从列表里消失：多选只保留还看得见的
@@ -512,8 +513,9 @@ struct ThreadRow: View {
                 indicator(style).frame(width: 12, height: 16)
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        if m.isE2E {
-                            // 加密消息：标题前一个小锁（只表示内容加密了，不表示来源可信）
+                        if m.isE2E && !m.serverSealed {
+                            // 发送端加密的消息：标题前一个小锁（只表示内容加密了，不表示来源可信）。
+                            // 服务器代加密的（普通 pushkey 明文发送）不显示小锁，标题后显示「明文发送」（§11.5）
                             Image(systemName: "lock.fill").font(.system(size: 10)).foregroundStyle(Theme.text3)
                                 .help("端到端加密")
                         }
@@ -521,7 +523,13 @@ struct ThreadRow: View {
                             .font(.system(size: Theme.fRowTitle, weight: unread ? .semibold : .regular))
                             .foregroundStyle(titleColor)
                             .lineLimit(1)
-                        if !m.isE2E, model.e2eAccountEnabled {
+                        if m.serverSealed {
+                            Text(E2E.T.plainSentTag).font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.text3)
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(Capsule().fill(Theme.surface2))
+                                .fixedSize()
+                                .help(E2E.T.t64)
+                        } else if !m.isE2E, model.e2eAccountEnabled {
                             Text("未加密").font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.text3)
                                 .padding(.horizontal, 5).padding(.vertical, 1)
                                 .background(Capsule().fill(Theme.surface2))
@@ -607,7 +615,7 @@ struct FirstRunEmpty: View {
             Text("在任意机器上执行下面的命令，给自己发第一条：")
                 .font(.system(size: 12.5)).foregroundStyle(Theme.text2).multilineTextAlignment(.center)
             CopyableCode(text: cmd)
-            Text("pushkey 在管理网页「Pushkey」页创建。")
+            Text("pushkey 在「设置 → Pushkey」页创建。")
                 .font(.system(size: 11.5)).foregroundStyle(Theme.text3)
         }
         .padding(24)
@@ -828,7 +836,7 @@ struct MessageHeader: View {
                 Text("#\(message.id)").monospacedDigit()
                 if message.serverSealed {
                     Text("·")
-                    Text(E2E.T.t64)          // §11.5：元信息行显示完整的 T64（各端一致）
+                    Text(E2E.T.plainSentTag).help(E2E.T.t64)
                 } else if message.isE2E {
                     Text("·")
                     Text("🔒 端到端加密").help("内容在发送端加密，只有你的设备能解开（不表示来源一定可信）")
@@ -840,6 +848,13 @@ struct MessageHeader: View {
             .font(.system(size: Theme.fMeta))
             .foregroundStyle(Theme.text3)
             .padding(.top, 6)
+            if message.serverSealed {
+                // §11.5：明文发送的消息在元信息下面显示完整的 T64（各端一致；太长，不挤在同一行里）
+                Text(E2E.T.t64)
+                    .font(.system(size: Theme.fMeta)).foregroundStyle(Theme.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
+            }
             Rectangle().fill(Theme.border).frame(height: 1).padding(.top, 18).padding(.bottom, 18)
         }
     }
@@ -1222,21 +1237,38 @@ struct PairView: View {
     @State private var mode: PairMode = .code
     @State private var busy = false
     @State private var error: String?
+    @State private var invite = ""
+    /// 上次注册结果不确定的「服务器 + 用户名」：同一个再注册被拒（409 / 403）时提示改去登录。
+    /// 只在注册 / 登录成功、或改了服务器 / 用户名时清掉；中间的 429、本地校验错误（密码太短、两次不一致）都不清（三端一致）
+    @State private var uncertainRegister: String?
+    /// 这个服务器的注册方式（/v1/info）："closed" / "invite" / "open"；没取到时 nil，照旧显示注册
+    @State private var registerMode: String?
 
     var subtitle: String {
         switch mode {
-        case .code: return "输入管理网页「设备」页，或已登录设备的「账户」窗口生成的 6 位配对码。"
+        case .code: return "输入已登录设备「账户」窗口生成的 6 位配对码。"
         case .login: return "用账号的用户名和密码登录，pushkey 和历史消息会自动同步过来。"
-        case .register: return "在这个服务器上注册新账号（需要管理员开放注册）。"
+        case .register:
+            switch registerMode {
+            case "closed": return "这个服务器没有开放注册，请联系管理员。"
+            case "invite": return "在这个服务器上注册新账号，需要管理员给你的邀请码。"
+            case "open": return "在这个服务器上注册新账号。"
+            default: return "在这个服务器上注册新账号（需要管理员开放注册）。"
+            }
         }
     }
+
+    /// 服务器不开放注册：「注册」页只显示提示，不能提交
+    var registerClosed: Bool { mode == .register && registerMode == "closed" }
+    var needsInvite: Bool { mode == .register && registerMode == "invite" }
 
     var canSubmit: Bool {
         switch mode {
         case .code: return code.count == 6
         case .login: return !username.trimmingCharacters(in: .whitespaces).isEmpty && !password.isEmpty
-        case .register: return AppModel.normalizeUsername(username).count >= 2 && AppModel.usernameProblem(username) == nil
+        case .register: return !registerClosed && AppModel.normalizeUsername(username).count >= 2 && AppModel.usernameProblem(username) == nil
             && password.count >= 8 && password == password2 && registerProblem == nil
+            && (!needsInvite || !invite.trimmingCharacters(in: .whitespaces).isEmpty)
         }
     }
 
@@ -1255,7 +1287,10 @@ struct PairView: View {
                     ForEach(PairMode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented).labelsHidden().fixedSize().padding(.top, 12)
-                .onChange(of: mode) { _, _ in error = nil }
+                .onChange(of: mode) { _, m in
+                    error = nil
+                    if m == .register { Task { _ = await loadRegisterMode() } }      // 进入注册页时重新取注册方式
+                }
                 Text(subtitle)
                     .font(.system(size: 12.5)).foregroundStyle(Theme.text2).multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1286,7 +1321,10 @@ struct PairView: View {
                                     if d != v { code = d }
                                 }
                         }
-                    } else {
+                    } else if !registerClosed {
+                        if needsInvite {
+                            field("邀请码") { WarmField(placeholder: "管理员给你的邀请码", text: $invite) }
+                        }
                         field("用户名") {
                             VStack(alignment: .leading, spacing: 5) {
                                 WarmField(placeholder: "用户名", text: $username)
@@ -1342,6 +1380,15 @@ struct PairView: View {
             if server.isEmpty { server = model.server.isEmpty ? AppModel.defaultServer : model.server }
             if name.isEmpty { name = model.deviceName }
         }
+        .onChange(of: server) { _, _ in uncertainRegister = nil }
+        .onChange(of: username) { _, _ in uncertainRegister = nil }
+        // 服务器地址变了（停止输入 0.5 秒后）：取 /v1/info 看注册方式（不开放 / 要邀请码 / 开放）
+        .task(id: server) {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if Task.isCancelled { return }
+            registerMode = nil       // 换了服务器：旧的注册方式作废，取到新的再说
+            _ = await loadRegisterMode()
+        }
     }
 
     func field<C: View>(_ label: String, @ViewBuilder _ c: () -> C) -> some View {
@@ -1351,21 +1398,55 @@ struct PairView: View {
         }
     }
 
+    /// 取一次这个服务器的注册方式（/v1/info）。取到了（包括没有 /v1/info 的旧服务端）返回 true；
+    /// 连不上返回 false，registerMode 不动——不猜（三端一致，审查 M1）
+    func loadRegisterMode() async -> Bool {
+        let s = AppModel.normalizeServer(server)
+        guard let url = URL(string: s), url.scheme == "http" || url.scheme == "https", url.host != nil else { return false }
+        do {
+            registerMode = try await APIClient(server: url, token: nil).info().registerMode
+            return true
+        } catch APIError.unsupported {
+            registerMode = nil
+            return true
+        } catch {
+            return false
+        }
+    }
+
     func doPair() async {
         busy = true
         error = nil
+        defer { busy = false }
+        if mode == .register {
+            // 提交前重新取一次注册方式：取不到就不提交；刚变成要邀请码 / 不开放时先让用户看到
+            guard await loadRegisterMode() else { error = E2E.T.serverUnreachable; return }
+            if registerClosed { error = "这个服务器没有开放注册，请联系管理员。"; return }
+            if needsInvite && invite.trimmingCharacters(in: .whitespaces).isEmpty { error = "请填写邀请码"; return }
+        }
         do {
             let n = name.isEmpty ? model.deviceName : name
             switch mode {
             case .code: try await model.pair(server: server, code: code, name: n)
             case .login: try await model.login(server: server, username: username, password: password, name: n, register: false)
-            case .register: try await model.login(server: server, username: username, password: password, name: n, register: true)
+            case .register: try await model.login(server: server, username: username, password: password, name: n, register: true,
+                                                  inviteCode: needsInvite ? invite : nil)
             }
-            password = ""; password2 = ""
+            password = ""; password2 = ""; invite = ""
+            uncertainRegister = nil
         } catch {
-            self.error = (error as? APIError)?.localizedDescription ?? AppModel.shortError(error)
+            let who = AppModel.normalizeServer(server) + "|" + AppModel.normalizeUsername(username).lowercased()
+            if mode == .register, (error as? E2E.Failure)?.kind == .uncertain {
+                uncertainRegister = who
+            }
+            if mode == .register, uncertainRegister == who, let hint = E2E.registerAfterUncertain(error) {
+                self.error = hint
+            } else {
+                self.error = (error as? APIError)?.localizedDescription ?? AppModel.shortError(error)
+            }
+            // 403（可能是这期间改成了要邀请码 / 不开放）：刷新注册方式，邀请码框该出现就出现
+            if mode == .register, (error as? E2E.Failure)?.status == 403 { _ = await loadRegisterMode() }
         }
-        busy = false
     }
 }
 
@@ -1447,10 +1528,6 @@ struct SettingsView: View {
             Spacer()
             if model.token != nil {
                 Rectangle().fill(Theme.border).frame(height: 1).padding(.vertical, 6)
-                SidebarActionButton(title: model.canAdmin == false ? "管理后台（本机未开启）" : "打开管理后台", icon: "safari") {
-                    Task { await model.openAdmin() }
-                }
-                .disabled(model.canAdmin == false)
                 SidebarActionButton(title: "退出登录…", icon: "rectangle.portrait.and.arrow.right", destructive: true) {
                     AccountMenu.confirmLogout(model)
                 }
@@ -1821,11 +1898,6 @@ struct MenuPanel: View {
                     closeMenuPanel()
                     if model.needsAccountSetup || model.token == nil { AppDelegate.shared?.showMainWindow(select: nil) } else { AppDelegate.shared?.showAccount() }
                 }
-                PanelAction(icon: "safari", title: "管理后台",
-                            subtitle: model.canAdmin == false ? "未开启：在管理网页的设备页为本机开启" : model.adminMessage,
-                            disabled: model.canAdmin == false || model.token == nil) {
-                    Task { await model.openAdmin(); if model.adminMessage == nil { closeMenuPanel() } }
-                }
                 PauseRow(model: model)
                 PanelUpdateRow(updater: model.updater)
                 PanelAction(icon: "gearshape", title: "设置…", trailing: "⌘,") {
@@ -2085,8 +2157,29 @@ struct E2ELockedBanner: View {
     }
 }
 
+/// 消息列表顶部：建议设置恢复码（T23，§11.2）。不打断：可以「以后再说」，设置好后自动消失
+struct E2ERecoveryHintBanner: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "key").font(.system(size: 12)).foregroundStyle(Theme.accent)
+            Text(E2E.T.t23).font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button("去设置") { AppDelegate.shared?.showSettings(tab: .e2e) }.buttonStyle(SoftButtonStyle())
+            Button("以后再说") { model.e2eDismissRecoveryHint() }.buttonStyle(.plain)
+                .font(.system(size: 12)).foregroundStyle(Theme.text3)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.accent.opacity(0.08)))
+        .padding(.horizontal, 8).padding(.top, 6)
+        .background(Theme.bg)
+    }
+}
+
 /// 消息列表顶部：账号还没开启加密、服务端支持自动开启（§11.1 末尾，T67），不能关闭。
-/// 有密码：弹出只输当前密码的小窗；没有密码：去「账户」页设置密码，设置后自动开启。开启后（本机或别的设备）自动消失
+/// 有密码：弹出只输当前密码的小窗；没有密码：进「完成账号设置」设置初始密码，设置后自动开启。开启后（本机或别的设备）自动消失
 struct E2EEnableBanner: View {
     @EnvironmentObject var model: AppModel
     @State private var hover = false
@@ -2094,7 +2187,14 @@ struct E2EEnableBanner: View {
 
     var body: some View {
         Button {
-            if model.account?.has_password == true { asking = true } else { AppDelegate.shared?.showSettings(tab: .account) }
+            // 没有密码：直接进「完成账号设置」（账号没有密码时主窗口就是这一页，本账号任何设备都能设置初始密码），
+            // 设置好后自动开启加密。账号信息还没取到时先取一次，取到后主窗口自动切过去
+            if model.account?.has_password == true {
+                asking = true
+            } else {
+                AppDelegate.shared?.showMainWindow(select: nil)
+                if model.account == nil { Task { await model.refreshMe() } }
+            }
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "lock.shield").font(.system(size: 12)).foregroundStyle(Theme.accent)

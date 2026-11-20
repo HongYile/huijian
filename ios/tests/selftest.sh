@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 在 iOS 模拟器上跑应用内自检（App 带 -selfTest 启动）：纯逻辑测试 + 连本地独立 hub 的集成测试
-# （登录、首次同步、补拉、长轮询、附件校验、更新检查和应用内下载新版 IPA 的校验、Bark 设置 / 测试 / 转发、后台刷新、退出登录）。
+# （登录、首次同步、补拉、长轮询、附件校验、更新检查和应用内下载新版 IPA 的校验、Bark 设置 / 测试 / 转发、后台刷新、退出登录，
+# 以及端到端加密：服务端 0.9.0 注册即开启加密，演示账号和加密自检账号都是注册产生的）。
 # 用法：tests/selftest.sh            环境变量 SIM 指定模拟器名称（默认 iPhone 16 Pro）
 set -u
 cd "$(dirname "$0")/.."
@@ -11,7 +12,7 @@ UPDATE_PUBKEY=$TEST_UPDATE_PUB ./build.sh sim > /dev/null || { echo "❌ 构建�
 NEXT=$(( $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/sim/Huijian.app/Info.plist) + 1 ))
 NEXT_VER=$(awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}' VERSION)
 head -c 300000 /dev/urandom > $T/fake.ipa
-HUIJIAN_ADMIN_URL=$ADM HUIJIAN_ADMIN_TOKEN=$(cat /tmp/huijian-ios-test/data/admin.token) $B release -key "$TEST_UPDATE_KEY" -platform ios \
+HUIJIAN_ADMIN_URL=$ADM HUIJIAN_ADMIN_TOKEN=$(cat $DEMO/data/admin.token) $B release -key "$TEST_UPDATE_KEY" -platform ios \
   -version $NEXT_VER -build $NEXT -notes $'- 自检用的新版本\n- 应用内下载测试' $T/fake.ipa > $T/release.log 2>&1 \
   || { echo "❌ 发布测试版本失败"; cat $T/release.log; exit 1; }
 SIM="${SIM:-iPhone 16 Pro}"
@@ -29,7 +30,7 @@ xcrun simctl install "$UDID" build/sim/Huijian.app
 BKEY=HyTestKey0123456789abcdefABCDEF0; BIV=HyTestIV01234567
 xcrun simctl launch --console-pty "$UDID" $BID -selfTest YES -demoServer $PUB -demoUser $DEMO_USER -demoPass $DEMO_PASS \
   -demoBarkURL $BARK_URL -demoBarkKey $BKEY -demoBarkIV $BIV -demoUpdateBuild $NEXT \
-  -demoE2EUser $E2E_USER -demoE2EPass $E2E_PASS > $T/selftest.log 2>&1 &
+  -demoE2EUser $E2E_USER -demoE2EPass "$E2E_PASS" -demoE2EInvite "$E2E_INVITE" > $T/selftest.log 2>&1 &
 L=$!
 # 端到端加密的联网流程要做十几次 Argon2id（每次 0.1–0.4 秒），比原来多给两分钟
 for i in $(seq 1 300); do kill -0 $L 2>/dev/null || break; sleep 1; done

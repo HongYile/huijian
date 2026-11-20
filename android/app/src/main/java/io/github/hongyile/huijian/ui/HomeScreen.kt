@@ -67,6 +67,7 @@ import io.github.hongyile.huijian.Background
 import io.github.hongyile.huijian.ConnState
 import io.github.hongyile.huijian.E2EHub
 import io.github.hongyile.huijian.E2EStatus
+import io.github.hongyile.huijian.E2EMessages
 import io.github.hongyile.huijian.E2EText
 import io.github.hongyile.huijian.Hub
 import io.github.hongyile.huijian.Manage
@@ -78,7 +79,7 @@ import kotlinx.coroutines.delay
 private enum class Filter(val label: String) { ALL("全部"), UNREAD("未读"), IMPORTANT("重要") }
 
 @Composable
-fun HomeScreen(open: (Long) -> Unit, openSettings: () -> Unit, openE2E: () -> Unit = {}) {
+fun HomeScreen(open: (Long) -> Unit, openSettings: () -> Unit, openE2E: () -> Unit = {}, openAccount: () -> Unit = {}) {
     val ctx = LocalContext.current
     val messages by Hub.messages.collectAsStateWithLifecycle()
     val read by Hub.read.collectAsStateWithLifecycle()
@@ -86,8 +87,12 @@ fun HomeScreen(open: (Long) -> Unit, openSettings: () -> Unit, openE2E: () -> Un
     val channels by Hub.channels.collectAsStateWithLifecycle()
     val e2eStatus by E2EHub.status.collectAsStateWithLifecycle()
     val e2eState by E2EHub.state.collectAsStateWithLifecycle()
-    /** 账号已开启加密：明文消息标「未加密」 */
+    /** 账号已开启加密：本机保留的旧明文消息标「未加密」 */
     val e2eOn = e2eState?.enabled == true
+    val scope = rememberCoroutineScope()
+    val autoPrompt by E2EHub.autoPrompt.collectAsStateWithLifecycle()
+    var askPassword by rememberSaveable { mutableStateOf(false) }
+    if (askPassword) EnableE2EDialog { askPassword = false }
     var filter by rememberSaveable { mutableStateOf(Filter.ALL) }
     var topic by rememberSaveable { mutableStateOf<String?>(null) }
     // 回到前台时重新检查权限（用户可能刚去系统设置里改过）
@@ -177,6 +182,20 @@ fun HomeScreen(open: (Long) -> Unit, openSettings: () -> Unit, openE2E: () -> Un
             } else if (!setupOk) {
                 Banner("后台运行还没设置好，锁屏后可能收不到消息", "去设置", onClick = openSettings)
             }
+            if (state != ConnState.Unauthorized && autoPrompt) {
+                // §11.1 末尾：已经登录、内存里没有密码的设备，账号还没开启加密：不能关闭，开启后（或别的设备开启后）消失
+                Banner(E2EText.T67, null, Modifier.testTag("autoPrompt")) {
+                    scope.launch {
+                        val has = Hub.account.value?.account?.hasPassword
+                            ?: runCatching { api { it.account() } }.getOrNull()?.also(Hub::noteAccount)?.account?.hasPassword
+                        when (has) {
+                            true -> askPassword = true
+                            false -> { E2EHub.requestSetPassword(true); openAccount() }      // 先设置密码，成功后自动开启
+                            null -> askPassword = true       // 读不到账户信息：先按有密码处理，小窗里会显示错误
+                        }
+                    }
+                }
+            }
             if (state != ConnState.Unauthorized && e2eStatus == E2EStatus.LOCKED) {
                 LockBanner(openE2E)
             }
@@ -227,13 +246,16 @@ private fun MessageRow(m: Message, channel: String, unread: Boolean, clock: Int,
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // 加密消息：标题前一个小锁（弱化颜色）；账号开了加密、这条却是明文：「未加密」灰色小徽章（e2ee-client.md §6.3）
-                if (m.encrypted) {
-                    Icon(Icons.Default.Lock, "端到端加密", Modifier.size(13.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
-                    Spacer(Modifier.width(4.dp))
-                } else if (e2eOn) {
-                    PlainBadge()
-                    Spacer(Modifier.width(5.dp))
+                // 发送端加密的：标题前一个小锁（弱化颜色）；服务器代加密的（普通 pushkey 发的）：「明文发送」小标签、不显示锁（§11.5）；
+                // 账号开了加密、这条却是明文（本机保留的旧消息）：「未加密」小标签（e2ee-client.md §6.3）
+                when (E2EMessages.listMark(m, e2eOn)) {
+                    E2EMessages.ListMark.LOCK -> {
+                        Icon(Icons.Default.Lock, "端到端加密", Modifier.size(13.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    E2EMessages.ListMark.SENT_PLAIN -> { PlainBadge(E2EText.SENT_PLAIN); Spacer(Modifier.width(5.dp)) }
+                    E2EMessages.ListMark.PLAIN -> { PlainBadge(E2EText.PLAIN_BADGE); Spacer(Modifier.width(5.dp)) }
+                    E2EMessages.ListMark.NONE -> {}
                 }
                 Text(
                     m.title, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -257,12 +279,59 @@ private fun MessageRow(m: Message, channel: String, unread: Boolean, clock: Int,
     }
 }
 
-/** 「未加密」灰色小徽章 */
+/** 「明文发送」/「未加密」灰色小标签 */
 @Composable
-private fun PlainBadge() {
+private fun PlainBadge(text: String) {
     Surface(shape = RoundedCornerShape(4.dp), color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f)) {
-        Text("未加密", Modifier.padding(horizontal = 4.dp), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(text, Modifier.padding(horizontal = 4.dp), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
+}
+
+/**
+ * 提示条 T67 点开后：只要求输入当前密码，按 §2.4 核对后在后台开启加密（不生成恢复码、不换密码，§11.1）。
+ * 密码不对等失败留在小窗里显示；成功后关闭，提示条随之消失
+ */
+@Composable
+private fun EnableE2EDialog(onDismiss: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var pw by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { Text("开启端到端加密") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(E2EText.T67, fontSize = 14.sp)
+                androidx.compose.material3.OutlinedTextField(pw, { pw = it; error = null }, Modifier.fillMaxWidth().testTag("autoPassword"),
+                    label = { Text("当前密码") }, singleLine = true, isError = error != null,
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Password),
+                    supportingText = error?.let { { Text(it) } })
+            }
+        },
+        confirmButton = {
+            TextButton({
+                if (pw.isEmpty()) { error = "请填写当前密码"; return@TextButton }
+                busy = true; error = null
+                scope.launch {
+                    try {
+                        E2EHub.work {
+                            val net = Hub.api() ?: throw java.io.IOException("未登录")
+                            val u = net.account().account.username.ifBlank { throw io.github.hongyile.huijian.E2EError("这个账号还没有用户名和密码") }
+                            Hub.store.username = u
+                            E2EHub.enableWithPassword(net, u, pw)
+                        }
+                        pw = ""
+                        onDismiss()
+                    } catch (e: Exception) {
+                        error = describe(e)
+                    } finally { busy = false }
+                }
+            }, enabled = !busy, modifier = Modifier.testTag("autoSubmit")) { Text(if (busy) "正在开启…" else "开启") }
+        },
+        dismissButton = { TextButton(onDismiss, enabled = !busy) { Text("取消") } },
+    )
 }
 
 /** 加密消息已锁定（T10）：整条可点，进入解锁页 */

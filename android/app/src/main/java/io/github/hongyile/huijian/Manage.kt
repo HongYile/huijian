@@ -47,8 +47,92 @@ data class PairCode(val code: String, val expiresIn: Int)
 /** 配对码状态：waiting / used / expired */
 data class PairCodeStatus(val state: String, val expiresIn: Int?, val usedBy: String?)
 
+/** 服务端的注册方式（/v1/info 的 register，功能 id register.invite）：关闭 / 要邀请码 / 开放 */
+enum class RegisterMode { CLOSED, INVITE, OPEN }
+
+/**
+ * 登录页上和注册有关的显示（由 Manage.registerUi 从 /v1/info 的读取结果算出，纯数据，方便单测）。
+ * loaded：读到了 /v1/info；failed：读过但没读到（连不上、地址不对）。都为 false = 正在读（或地址还没填好）。
+ * withKeys：注册时一起开启加密（register.e2e）
+ */
+data class RegisterUi(val mode: RegisterMode, val withKeys: Boolean, val loaded: Boolean, val failed: Boolean = false) {
+    /** 显示「没有账号？注册新账号」：读到了且没关闭注册；读不到时也显示（点了重新读 /v1/info） */
+    val showEntry get() = if (loaded) mode != RegisterMode.CLOSED else failed
+    /** 注册已关闭时的说明（没读到 /v1/info 时为 null，免得把连不上说成没开放） */
+    val closedNote get() = if (loaded && mode == RegisterMode.CLOSED) Manage.REGISTER_CLOSED else null
+
+    /** 注册入口按钮显示不显示：正在注册时总显示（「已有账号？直接登录」退回去） */
+    fun entryVisible(wantRegister: Boolean) = wantRegister || showEntry
+
+    /** 当前是否显示注册表单：用户点了注册、不是配对码登录，且服务端没关闭注册（还没读到 /v1/info 时照样显示，提交前再读） */
+    fun registering(wantRegister: Boolean, usePair: Boolean) =
+        wantRegister && !usePair && (!loaded || mode != RegisterMode.CLOSED)
+
+    /** 注册表单是否显示必填的邀请码框（要读到 /v1/info 才知道） */
+    fun needInvite(registering: Boolean) = registering && loaded && mode == RegisterMode.INVITE
+
+    /** 点注册入口：已经在注册 → 退回登录；没读到 /v1/info → 先重新读，读到再按结果显示；否则切到注册 */
+    fun onEntryTap(wantRegister: Boolean): EntryTap = when {
+        wantRegister -> EntryTap.TOGGLE
+        !loaded -> EntryTap.FETCH_INFO
+        else -> EntryTap.TOGGLE
+    }
+
+    /** 点提交：登录 / 注册 / 先读 /v1/info（还不知道注册方式时不提交，读不到就提示连不上） */
+    fun submitPlan(wantRegister: Boolean, usePair: Boolean): SubmitPlan = when {
+        !registering(wantRegister, usePair) -> SubmitPlan.LOGIN
+        !loaded -> SubmitPlan.NEED_INFO
+        else -> SubmitPlan.REGISTER
+    }
+
+    enum class EntryTap { TOGGLE, FETCH_INFO }
+    enum class SubmitPlan { LOGIN, REGISTER, NEED_INFO }
+}
+
 object Manage {
     // ---------- 解析 ----------
+
+    /**
+     * /v1/info 里的注册方式：有 register（"closed" / "invite" / "open"）时以它为准；
+     * 没有（服务端 0.9.0 以前）时看 register_open。认不出的值按关闭处理，不显示注册入口
+     */
+    fun registerMode(info: JSONObject): RegisterMode = when (info.optString("register")) {
+        "open" -> RegisterMode.OPEN
+        "invite" -> RegisterMode.INVITE
+        "" -> if (info.optBoolean("register_open")) RegisterMode.OPEN else RegisterMode.CLOSED
+        else -> RegisterMode.CLOSED
+    }
+
+    /**
+     * 登录页注册相关的显示。info 为 null：没读到 /v1/info——failed = false 是正在读（什么都不显示），
+     * failed = true 是读过但读不到（连不上、地址不对）：给注册入口，点了重新读；不说「没开放」
+     */
+    fun registerUi(info: JSONObject?, failed: Boolean = false): RegisterUi {
+        if (info == null) return RegisterUi(RegisterMode.CLOSED, withKeys = false, loaded = false, failed = failed)
+        return RegisterUi(registerMode(info), registerWithKeys(info), loaded = true)
+    }
+
+    /** 读不到 /v1/info 时（点注册、提交注册前）的提示 */
+    const val INFO_UNREACHABLE = "连不上服务器，请检查地址或网络后重试"
+
+    /** 注册被拒（403：注册已关闭、邀请码问题等）后重新读一次 /v1/info，刷新注册方式（服务端可能刚改了） */
+    fun refetchInfoAfter(e: Throwable) = e is ApiException && e.status == 403
+
+    /** /v1/info 的 features 里有没有这个功能 id */
+    fun hasFeature(info: JSONObject, id: String): Boolean {
+        val a = info.optJSONArray("features") ?: return false
+        return (0 until a.length()).any { a.optJSONObject(it)?.optString("id") == id || a.optString(it) == id }
+    }
+
+    /** 服务端注册时就开启加密（0.9.0，功能 id register.e2e）：注册请求要带上本机生成的账号钥匙 */
+    fun registerWithKeys(info: JSONObject) = hasFeature(info, "register.e2e")
+
+    /** 关闭注册时登录页显示的说明（注册入口不显示） */
+    const val REGISTER_CLOSED = "这个服务器没有开放注册，请联系管理员"
+
+    /** 邀请码：要邀请码时必填（只有空白也算没填，提交时去掉首尾空白） */
+    fun inviteProblem(mode: RegisterMode, code: String): String? =
+        if (mode == RegisterMode.INVITE && code.isBlank()) "请填写邀请码" else null
 
     fun key(o: JSONObject) = PushKey(
         id = o.optLong("id"),

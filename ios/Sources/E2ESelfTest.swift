@@ -980,6 +980,182 @@ enum E2ESelfTest {
             } catch { check("T67 没有新登录协议的服务端：报错，不发密码原文", (error as? E2E.Failure)?.kind == .unsupported, "") }
         } catch { check("T67 用例", false, "\(error)") }
 
+        // 0.9.0 注册即开启加密（register.e2e）：钥匙随注册一起提交，成功后本机已解锁、钉住本机生成的公钥，不再调 setup；
+        // 旧服务端（没有这个功能）照旧只注册，留下 passwordKeys 给调用方自动开启
+        for withFeature in [true, false] {
+            var regBody: [String: Any] = [:]
+            let suite = "io.github.hongyile.huijian.e2e-selftest-rege2e"
+            let m = freshMarks(suite)
+            let secrets = E2E.MemorySecrets()
+            let mock = MockTransport { _, path, body -> (Int, Any) in
+                switch path {
+                case "/v1/info": return (200, ["name": "huijian", "version": withFeature ? "0.9.0" : "0.8.0", "api": 1,
+                                                "features": withFeature ? [["id": "e2e.auto"], ["id": "register.e2e"]] : [["id": "e2e.auto"]]] as Any)
+                case "/v1/prelogin": return (200, good as Any)
+                case "/v1/me": return (200, ["account": ["id": 7]] as Any)
+                case "/v1/register":
+                    regBody = body
+                    var r: [String: Any] = ["device_id": "d1", "name": "注册", "token": "T_reg", "reused": false]
+                    if let pub = body["pub"] as? String {
+                        r["e2e"] = ["enabled": true, "keys": [["kid": "kreg", "pub": pub, "active": true]],
+                                    "password_wrap": body["password_wrap"] as? String ?? ""]
+                    }
+                    return (200, r as Any)
+                case "/v1/e2e/setup": return (409, ["error": "已经开启"] as Any)
+                default: return (500, ["error": "x"] as Any)
+                }
+            }
+            do {
+                let r = try await E2E.login(server: mock, authed: { _ in mock }, serverID: server, username: "rege2e",
+                                            password: "Tq7#mZ2!pL9x-new", device: E2E.Device(name: "注册", platform: "macos", fingerprint: String(repeating: "cd", count: 32)),
+                                            register: true, marks: m, secrets: secrets, inviteCode: "ABCDE23456")
+                let ring = E2E.KeyRing(secrets: secrets, scope: E2E.scope(server: server, accountID: 7), defaults: m.defaults)
+                let keys = (try? ring.accountKeys()) ?? []
+                if withFeature {
+                    let pub = regBody["pub"] as? String ?? ""
+                    let unwrapped = try? Core.unwrap("hjp1", key: r.passwordKeys?.unlockKey ?? "", wrap: regBody["password_wrap"] as? String ?? "")
+                    check("注册即开启加密：随注册提交 pub / password_wrap / auth_salt / auth_key / invite_code（不带恢复码、不发密码原文），不调 setup",
+                          !pub.isEmpty && regBody["auth_salt"] != nil && regBody["auth_key"] != nil && regBody["recovery_wrap"] == nil
+                          && regBody["password"] == nil && regBody["invite_code"] as? String == "ABCDE23456"
+                          && !mock.calls.contains { $0.path == "/v1/e2e/setup" }, "")
+                    check("注册即开启加密：成功后本机已解锁，私钥存好、钉住本机生成的公钥，password_wrap 用密码能解开",
+                          r.unlocked && keys.count == 1 && ring.pinned == pub && unwrapped == keys.first
+                          && m.isUpgraded(server: server, username: "rege2e"), "")
+                } else {
+                    check("旧服务端（没有 register.e2e）：只注册不带钥匙，未解锁，留下 passwordKeys 给调用方自动开启",
+                          regBody["pub"] == nil && regBody["password_wrap"] == nil && regBody["auth_key"] != nil
+                          && !r.unlocked && keys.isEmpty && r.passwordKeys != nil, "")
+                }
+            } catch { check("注册即开启加密用例（\(withFeature)）", false, "\(error)") }
+        }
+
+        // 审查 0.9 M1 / L1 / L2 / L4：取不到 /v1/info 不猜（不提交）；200 之后的失败按结果不确定；
+        // 服务器给的有效钥匙不是本机那把 → T43、不保存；取不到账号 id → 私钥留在 pendingKey，之后保存并钉住
+        do {
+            var regMode = "mismatch"
+            var posts = 0
+            let other = try Core.keypair()
+            let mock = MockTransport { _, path, body -> (Int, Any) in
+                switch path {
+                case "/v1/info":
+                    if regMode == "noinfo" { return (503, "service unavailable" as Any) }
+                    return (200, ["name": "huijian", "version": "0.9.0", "api": 1, "features": [["id": "register.e2e"]]] as Any)
+                case "/v1/prelogin": return (200, good as Any)
+                case "/v1/me": return regMode == "noaid" ? (500, ["error": "x"] as Any) : (200, ["account": ["id": 9]] as Any)
+                case "/v1/register":
+                    posts += 1
+                    if regMode == "notoken" { return (200, ["device_id": "d"] as Any) }
+                    let pub = regMode == "mismatch" ? other.pub : (body["pub"] as? String ?? "")
+                    return (200, ["device_id": "d", "name": "n", "token": "T_x", "reused": false,
+                                  "e2e": ["enabled": true, "keys": [["kid": "k", "pub": pub, "active": true]], "password_wrap": "hjp1.x"]] as Any)
+                default: return (500, ["error": "x"] as Any)
+                }
+            }
+            func reg(_ secrets: E2ESecrets, _ m: E2E.UpgradeMarks) async throws -> E2E.LoginResult {
+                try await E2E.login(server: mock, authed: { _ in mock }, serverID: server, username: "l4user", password: "Tq7#mZ2!pL9x-new",
+                                    device: E2E.Device(name: "x", platform: "macos", fingerprint: String(repeating: "cd", count: 32)),
+                                    register: true, marks: m, secrets: secrets)
+            }
+            let m1 = freshMarks("io.github.hongyile.huijian.e2e-selftest-l4")
+            let sec1 = E2E.MemorySecrets()
+            let r1 = try await reg(sec1, m1)
+            let ring1 = E2E.KeyRing(secrets: sec1, scope: E2E.scope(server: server, accountID: 9), defaults: m1.defaults)
+            check("注册后服务器给的有效钥匙不是本机生成的那把：T43，不保存、不钉住，留着 passwordKeys 之后用密码解锁",
+                  r1.note == E2E.T.t43 && !r1.unlocked && ((try? ring1.accountKeys()) ?? ["x"]).isEmpty && ring1.pinned == nil
+                  && r1.passwordKeys != nil && r1.pendingKey == nil, "\(r1.note ?? "-")")
+            regMode = "noaid"
+            let m2 = freshMarks("io.github.hongyile.huijian.e2e-selftest-l4b")
+            let sec2 = E2E.MemorySecrets()
+            let r2 = try await reg(sec2, m2)
+            var later = false
+            if let pk = r2.pendingKey {
+                let ring2 = E2E.KeyRing(secrets: sec2, scope: E2E.scope(server: server, accountID: 9), defaults: m2.defaults)
+                let nothingYet = ((try? ring2.accountKeys()) ?? ["x"]).isEmpty
+                try E2E.acceptOwnKey(pk.sk, keys: pk.keys, ring: ring2)      // 拿到账号 id 后调用方这样保存（Mac loadE2EKeys）
+                later = nothingYet && ((try? ring2.accountKeys()) ?? []) == [pk.sk] && ring2.pinned == pk.keys.first?.pub
+            }
+            check("注册后取不到账号 id：私钥核对后留在 pendingKey（还没保存），拿到账号 id 后保存并钉住", r2.accountID == nil && !r2.unlocked && later, "")
+            regMode = "noinfo"
+            let before = posts
+            do { _ = try await reg(E2E.MemorySecrets(), freshMarks("io.github.hongyile.huijian.e2e-selftest-l4c")); check("取不到 info 却注册了", false, "") }
+            catch { check("注册前取不到 /v1/info：不猜新旧，提示连不上服务器，不提交注册", error.localizedDescription == E2E.T.serverUnreachable && posts == before, error.localizedDescription) }
+            regMode = "notoken"
+            do { _ = try await reg(E2E.MemorySecrets(), freshMarks("io.github.hongyile.huijian.e2e-selftest-l4d")); check("200 但没有 token", false, "") }
+            catch { check("注册返回 200 但响应不对：账号可能已建好，按结果不确定处理", (error as? E2E.Failure)?.kind == .uncertain, "\(error)") }
+        } catch { check("审查 0.9 L4 用例", false, "\(error)") }
+
+        // 三端一致：注册结果不确定（网络出错、网关 5xx）→ T.registerUncertain；之后同一个用户名再注册被拒（409 / 403）→ 提示改去登录。
+        // 注册一律不发密码原文：没有新登录协议的旧服务端直接报 T.registerServerTooOld
+        do {
+            final class Flaky: E2ETransport {
+                var mode = 0      // 0 网络出错、1 网关 502、2 服务端 500、3 旧服务端（没有 prelogin）
+                var posted = 0
+                func e2eSend(_ method: String, _ path: String, query: [URLQueryItem], body: Data?) async throws -> E2E.Response {
+                    func json(_ st: Int, _ o: Any) -> E2E.Response {
+                        E2E.Response(status: st, data: (try? JSONSerialization.data(withJSONObject: o)) ?? Data(), contentType: "application/json")
+                    }
+                    switch path {
+                    case "/v1/info": return json(200, ["name": "huijian", "version": "0.8.0", "api": 1, "features": [["id": "e2e.auto"]]])
+                    case "/v1/prelogin":
+                        if mode == 3 { return E2E.Response(status: 404, data: Data("404 page not found".utf8), contentType: "text/plain") }
+                        return json(200, ["kdf": "argon2id", "salt": String(repeating: "ab", count: 16), "time": 3, "memory_kib": 65536, "lanes": 1])
+                    case "/v1/register":
+                        posted += 1
+                        switch mode {
+                        case 0: throw URLError(.timedOut)
+                        case 1: return E2E.Response(status: 502, data: Data("bad gateway".utf8), contentType: "text/plain")
+                        default: return json(500, ["code": 500, "error": "注册失败"])
+                        }
+                    default: return json(500, ["error": "x"])
+                    }
+                }
+            }
+            let t = Flaky()
+            var kinds: [String] = []
+            for mode in 0...3 {
+                t.mode = mode
+                do {
+                    _ = try await E2E.login(server: t, authed: { _ in t }, serverID: server, username: "flaky", password: "Tq7#mZ2!pL9x-new",
+                                            device: E2E.Device(name: "x", platform: "macos", fingerprint: String(repeating: "cd", count: 32)),
+                                            register: true, marks: freshMarks("io.github.hongyile.huijian.e2e-selftest-flaky"), secrets: E2E.MemorySecrets())
+                    kinds.append("ok")
+                } catch let f as E2E.Failure { kinds.append("\(f.kind.rawValue):\(f.message)") } catch { kinds.append("other") }
+            }
+            check("注册网络出错、网关 502：结果不确定（提示先去登录）；服务端 500：明确失败；旧服务端：不发原文，提示升级服务端",
+                  kinds == ["uncertain:" + E2E.T.registerUncertain, "uncertain:" + E2E.T.registerUncertain, "server:注册失败",
+                            "unsupported:" + E2E.T.registerServerTooOld] && t.posted == 3, "\(kinds)")
+            let after409 = E2E.registerAfterUncertain(E2E.Failure(.conflict, "这个用户名已被使用", status: 409))
+            let after403 = E2E.registerAfterUncertain(E2E.Failure(.server, "邀请码已用完。", status: 403))
+            check("上次结果不确定、这次被拒（409 / 403）：提示改去登录；其他错误照常",
+                  after409 == "这个用户名已被使用。" + E2E.T.registerTryLogin && after403 == "邀请码已用完。" + E2E.T.registerTryLogin
+                  && E2E.registerAfterUncertain(E2E.Failure(.server, "x", status: 400)) == nil, "")
+        }
+
+        // 0.9.0 注册邀请码：填了就带 invite_code（去掉首尾空白），没填不带；邀请码不对时服务端 403 的说明原样给用户
+        do {
+            var bodies: [[String: Any]] = []
+            let reg = MockTransport { _, path, body -> (Int, Any) in
+                switch path {
+                case "/v1/info": return (200, ["name": "huijian", "version": "0.8.0", "api": 1, "features": [["id": "e2e.auto"]]] as Any)
+                case "/v1/prelogin": return (200, good as Any)
+                case "/v1/register": bodies.append(body); return (403, ["error": "邀请码不对或已经用完"] as Any)
+                default: return (500, ["error": "x"] as Any)
+                }
+            }
+            let d = E2E.Device(name: "邀请", platform: "macos", fingerprint: String(repeating: "ab", count: 32))
+            var msgs: [String] = []
+            for code in [" INV-123 ", nil] {
+                do {
+                    _ = try await E2E.login(server: reg, authed: { _ in reg }, serverID: server, username: "invitee",
+                                            password: "Tq7#mZ2!pL9x-new", device: d, register: true, marks: freshMarks("io.github.hongyile.huijian.e2e-selftest-invite"),
+                                            secrets: E2E.MemorySecrets(), inviteCode: code)
+                } catch { msgs.append(error.localizedDescription) }
+            }
+            check("注册邀请码：填了带 invite_code（去掉空白），没填不带；403 的说明原样显示",
+                  bodies.count == 2 && bodies[0]["invite_code"] as? String == "INV-123" && bodies[1]["invite_code"] == nil
+                  && msgs == ["邀请码不对或已经用完", "邀请码不对或已经用完"], "\(msgs)")
+        }
+
         // 审查 M2（iOS）：补加密的消息只在「本地明文 → 服务器代加密、id 一致」时替换本地记录
         struct FM: E2EMessageFacts { let id: Int64; let isE2E: Bool; let sealed: String? }
         let plainOld = FM(id: 7, isE2E: false, sealed: nil), resealed = FM(id: 7, isE2E: true, sealed: "server")
@@ -1027,12 +1203,26 @@ enum E2ESelfTest {
               g1.sealed && g1.messageID == 42 && !g2.sealed && g2.reason == "missing" && !g3.sealed && g3.reason == "missing", "")
     }
 
-    // MARK: 默认自动加密（§11）联网用例：服务端 0.8.0，注册要开放
+    // MARK: 默认自动加密（§11）联网用例：服务端 0.9.0（注册即开启加密）
 
-    /// 注册一个新账号（不设置恢复码），验证自动开启、服务器代加密、补加密的 sealed 变更、410 reason、重置加密与 T46、kid。
-    /// username / password：新账号（会注册）；server 必须已开放注册
-    static func onlineAuto(_ check: Check, server: URL, transport: @escaping (String?) -> E2ETransport,
-                           username: String, password: String) async {
+    /// 0.9.0 以前存下的明文历史（测试脚本停服后直接写进数据库，启动时服务端补加密）：
+    /// 那个账号的用户名、密码，它一台设备的 token，补加密以前的变更游标，旧附件 id，原文
+    struct SealFixture {
+        var username: String
+        var password: String
+        var token: String
+        var cursor: Int64
+        var oldAttachment: String
+        var text: String
+        var desp: String
+        var attachmentName: String
+        var attachmentData: Data
+    }
+
+    /// 注册一个新账号（注册即开启加密，没有恢复码），验证服务器代加密、重置加密与 T46、kid；
+    /// seal 不为空时验证补加密历史的 sealed 变更和 410 reason；noKeyPushkey 是一个还没有钥匙的旧账号的 pushkey（明文推送应 403）
+    static func onlineAuto(_ check: Check, server: URL, transport: @escaping (String?) -> E2ETransport, invite: String,
+                           username: String, password: String, seal: SealFixture?, noKeyPushkey: String?) async {
         let sid = server.absoluteString
         let marks = freshMarks("io.github.hongyile.huijian.e2e-selftest-online-auto")
         var n = 0
@@ -1043,72 +1233,86 @@ enum E2ESelfTest {
         }
         func dev(_ name: String) -> E2E.Device { .init(name: name, platform: "macos", fingerprint: (try? Core.random32()) ?? name) }
         do {
-            // 注册：服务端还没开启加密
+            // 0.9.0 以前留下的明文历史：启动时补加密，变更里出现 kind "sealed"，GET /v1/messages/{id} 拿到 sealed: "server" 的加密消息
+            if let seal {
+                let lg = try await E2E.login(server: transport(nil), authed: transport, serverID: sid, username: seal.username, password: seal.password,
+                                             device: dev("补加密 L"), register: false, marks: marks, secrets: E2E.MemorySecrets())
+                guard let aid = lg.accountID else { check("补加密账号的 id", false, ""); return }
+                let ringS = ring(aid)
+                let apiS = E2E.API(transport(seal.token))
+                try await E2E.unlockWithPassword(apiS, ring: ringS, server: sid, username: seal.username, password: seal.password, marks: marks)
+                var sealedID: Int64?
+                for _ in 0..<50 where sealedID == nil {
+                    let d = try await apiS.call("GET", "/v1/messages", query: [URLQueryItem(name: "since", value: String(Int64.max / 2)),
+                                                                              URLQueryItem(name: "changes_since", value: String(seal.cursor))])
+                    let changes = ((try JSONSerialization.jsonObject(with: d) as? [String: Any])?["changes"] as? [[String: Any]]) ?? []
+                    sealedID = changes.first { $0["kind"] as? String == "sealed" }.flatMap { ($0["id"] as? NSNumber)?.int64Value }
+                    if sealedID == nil { try await Task.sleep(nanoseconds: 100_000_000) }
+                }
+                check("启动时补加密 0.9.0 以前的明文历史，变更里出现 kind \"sealed\"", sealedID != nil, "")
+                if let id = sealedID {
+                    let one = try JSONSerialization.jsonObject(with: try await apiS.call("GET", "/v1/messages/\(id)")) as? [String: Any]
+                    let msg = one?["message"] as? [String: Any] ?? [:]
+                    let newAtt = ((msg["attachments"] as? [[String: Any]])?.first?["id"] as? String) ?? ""
+                    let opened = E2E.open(envelope: msg["e2e"] as? String ?? "", keys: try ringS.accountKeys(), serverAttachments: newAtt.isEmpty ? [] : [newAtt])
+                    var same = false
+                    if case .ok(let o) = opened {
+                        same = o.text == seal.text && o.desp == seal.desp && o.atts.first?.name == seal.attachmentName
+                            && o.atts.first?.size == Int64(seal.attachmentData.count)
+                        if let a = o.atts.first, same {
+                            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("hj-seal-\(UUID().uuidString)")
+                            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                            defer { try? FileManager.default.removeItem(at: dir) }
+                            let ct = dir.appendingPathComponent("c"), out = dir.appendingPathComponent("p")
+                            try await apiS.call("GET", "/v1/att/\(newAtt)").write(to: ct)
+                            try await E2E.decryptAttachment(key: a.key, src: ct, dst: out)
+                            same = (try? Data(contentsOf: out)) == seal.attachmentData
+                        }
+                    }
+                    check("GET /v1/messages/{id}：sealed=\"server\" 的加密消息，附件换了新 id，本机解开后标题、正文、附件都和原文一致",
+                          msg["sealed"] as? String == "server" && !newAtt.isEmpty && newAtt != seal.oldAttachment && same, "\(opened)")
+                    let gone = try await transport(seal.token).e2eSend("GET", "/v1/att/\(seal.oldAttachment)", query: [], body: nil)
+                    let g = E2E.gone(gone.data)
+                    check("用旧附件 id 下载：410 reason=sealed，带消息 id（重新拉取，不是附件丢失）",
+                          gone.status == 410 && g.sealed && g.messageID == id, "\(gone.status) \(g)")
+                }
+            }
+            if let pk = noKeyPushkey {
+                do {
+                    try await push(server: server, fields: ["pushkey": pk, "text": "没有钥匙的账号"], file: nil)
+                    check("还没有钥匙的账号收明文", false, "居然收下了")
+                } catch {
+                    check("还没有钥匙的账号：明文推送 403（服务器不保存明文）", (error as? E2E.Failure)?.status == 403, error.localizedDescription)
+                }
+            }
+
+            // 注册即开启加密（没有恢复码）
+            let secretsR = E2E.MemorySecrets()
             let reg = try await E2E.login(server: transport(nil), authed: transport, serverID: sid, username: username, password: password,
-                                          device: dev("自动 R"), register: true, marks: marks, secrets: E2E.MemorySecrets())
-            guard let aid = reg.accountID, let keys = reg.passwordKeys else { check("注册后拿到账号 id 和这次的密码钥匙", false, ""); return }
+                                          device: dev("自动 R"), register: true, marks: marks, secrets: secretsR, inviteCode: invite)
+            guard let aid = reg.accountID else { check("注册后拿到账号 id", false, ""); return }
             let apiR = E2E.API(transport(reg.token))
+            let ringR = E2E.KeyRing(secrets: secretsR, scope: E2E.scope(server: sid, accountID: aid), defaults: marks.defaults)
             var st = try await apiR.state()
-            check("注册后：账号还没开启加密，服务器代加密始终开启（server_seal）", !st.enabled && st.server_seal, "")
-            // 开启以前收到的明文消息（带附件）
+            let pub1 = st.activeKey?.pub ?? ""
+            let keysR1 = try ringR.accountKeys()
+            check("注册即开启：已开启、没有恢复码、服务器代加密始终开启，本机已解锁并钉住公钥",
+                  reg.unlocked && st.enabled && !st.hasRecovery && st.server_seal && E2E.status(st, localKeys: keysR1) == .unlocked
+                  && ringR.pinned == pub1 && !pub1.isEmpty, "")
+
+            // 服务器代加密：普通 pushkey 发的明文（带附件）
             struct K: Decodable { let key: String }
             let pk = try JSONDecoder().decode(K.self, from: try await apiR.call("POST", "/v1/keys", body: ["name": "auto"])).key
             let fileData = Data((0..<20_000).map { _ in UInt8.random(in: 0...255) })
-            try await push(server: server, fields: ["pushkey": pk, "text": "开启前的明文", "desp": "**旧正文**"], file: (name: "旧附件.bin", data: fileData))
-            guard let plain = try await messages(apiR, since: 0).last, let plainID = (plain["id"] as? NSNumber)?.int64Value else {
-                check("开启前的明文消息", false, ""); return
-            }
-            let oldAtt = ((plain["attachments"] as? [[String: Any]])?.first?["id"] as? String) ?? ""
-            st = try await apiR.state()
-            check("还没有钥匙时收到的消息先存明文（plain_messages 计数）", plain["e2e"] == nil && !oldAtt.isEmpty && st.plain_messages >= 1, "\(st.plain_messages)")
-            let stateData = try await apiR.call("GET", "/v1/messages/state")
-            let cursor = ((try JSONSerialization.jsonObject(with: stateData) as? [String: Any])?["changes_next"] as? NSNumber)?.int64Value ?? 0
-
-            // §11.1 自动开启
-            let ringR = ring(aid)
-            let r = try await E2E.autoSetup(apiR, ring: ringR, server: sid, username: username, keys: keys, marks: marks)
-            st = try await apiR.state()
-            let pub1 = st.activeKey?.pub ?? ""
-            let keysR1 = try ringR.accountKeys()
-            check("注册后自动开启：已开启、没有恢复码、本机已解锁并钉住公钥",
-                  r == .enabled && st.enabled && !st.hasRecovery && E2E.status(st, localKeys: keysR1) == .unlocked
-                  && ringR.pinned == pub1, "\(r)")
-
-            // 补加密：长轮询变更里出现 kind "sealed"，GET /v1/messages/{id} 拿到 sealed: "server" 的加密消息
-            var sealedSeen = false
-            for _ in 0..<40 where !sealedSeen {
-                let d = try await apiR.call("GET", "/v1/messages", query: [URLQueryItem(name: "since", value: String(plainID)),
-                                                                          URLQueryItem(name: "changes_since", value: String(cursor))])
-                let changes = ((try JSONSerialization.jsonObject(with: d) as? [String: Any])?["changes"] as? [[String: Any]]) ?? []
-                sealedSeen = changes.contains { $0["kind"] as? String == "sealed" && ($0["id"] as? NSNumber)?.int64Value == plainID }
-                if !sealedSeen { try await Task.sleep(nanoseconds: 100_000_000) }
-            }
-            check("开启后服务器补加密历史明文，变更里出现 kind \"sealed\"", sealedSeen, "")
-            let one = try JSONSerialization.jsonObject(with: try await apiR.call("GET", "/v1/messages/\(plainID)")) as? [String: Any]
-            let msg = one?["message"] as? [String: Any] ?? [:]
-            let newAtt = ((msg["attachments"] as? [[String: Any]])?.first?["id"] as? String) ?? ""
-            let opened = E2E.open(envelope: msg["e2e"] as? String ?? "", keys: try ringR.accountKeys(), serverAttachments: newAtt.isEmpty ? [] : [newAtt])
-            var sameText = false
-            if case .ok(let o) = opened { sameText = o.text == "开启前的明文" && o.desp == "**旧正文**" && o.atts.first?.name == "旧附件.bin" }
-            check("GET /v1/messages/{id}：sealed=\"server\" 的加密消息，附件换了新 id，本机解开后和原文一致",
-                  msg["sealed"] as? String == "server" && !newAtt.isEmpty && newAtt != oldAtt && sameText, "\(opened)")
-            let gone = try await transport(reg.token).e2eSend("GET", "/v1/att/\(oldAtt)", query: [], body: nil)
-            let g = E2E.gone(gone.data)
-            check("用旧附件 id 下载：410 reason=sealed，带消息 id（重新拉取，不是附件丢失）",
-                  gone.status == 410 && g.sealed && g.messageID == plainID, "\(gone.status) \(g)")
-            do {
-                let miss = try await transport(reg.token).e2eSend("GET", "/v1/att/a_not_exist_\(plainID)", query: [], body: nil)
-                if miss.status == 410 { check("其他 410 是附件丢失", !E2E.gone(miss.data).sealed, "") }
-            }
-
-            // 服务器代加密：开启后用普通 pushkey 发明文
-            try await push(server: server, fields: ["pushkey": pk, "text": "代加密的标题", "desp": "正文 *b*"], file: nil)
-            if let m = try await messages(apiR, since: plainID).last {
+            try await push(server: server, fields: ["pushkey": pk, "text": "代加密的标题", "desp": "正文 *b*"], file: (name: "明文附件.bin", data: fileData))
+            if let m = try await messages(apiR, since: 0).last {
                 var ok = false
-                if case .ok(let o) = E2E.open(envelope: m["e2e"] as? String ?? "", keys: try ringR.accountKeys(), serverAttachments: []) {
-                    ok = o.text == "代加密的标题" && o.desp == "正文 *b*"
+                let ids = ((m["attachments"] as? [[String: Any]]) ?? []).compactMap { $0["id"] as? String }
+                if case .ok(let o) = E2E.open(envelope: m["e2e"] as? String ?? "", keys: try ringR.accountKeys(), serverAttachments: ids) {
+                    ok = o.text == "代加密的标题" && o.desp == "正文 *b*" && o.atts.first?.name == "明文附件.bin"
                 }
-                check("开启后普通 pushkey 发的明文：服务器立即加密（sealed=\"server\"），本机解开一致", m["sealed"] as? String == "server" && ok, "")
+                check("普通 pushkey 发的明文：服务器立即加密（sealed=\"server\"，接收端标「明文发送」），本机解开一致",
+                      m["sealed"] as? String == "server" && m["type"] as? String == "e2e" && ok, "")
             } else { check("代加密的消息", false, "") }
 
             // 另一台设备用密码登录：自动解锁并钉住第一把公钥
@@ -1151,36 +1355,6 @@ enum E2ESelfTest {
                                                     server: sid, username: username, password: password, marks: marks)
             let stR3 = try await apiR.state()
             check("之后设置恢复码：成功，状态里恢复码已设置", !code.isEmpty && stR3.hasRecovery, "")
-            // 从没开启过才能用 setup
-            do {
-                _ = try await E2E.setup(apiR, ring: ring(aid), server: sid, username: username, currentPassword: password, newPassword: nil, marks: marks)
-                check("重置后再 setup", false, "")
-            } catch { check("开启过的账号不能再 setup（409），换钥匙用 reset", (error as? E2E.Failure)?.kind == .conflict, error.localizedDescription) }
-
-            // T67（§11.1 末尾）：已经登录、内存里没有密码的设备——用户输入一次当前密码再开启
-            let userB = username + "-b"
-            let regB = try await E2E.login(server: transport(nil), authed: transport, serverID: sid, username: userB, password: password,
-                                           device: dev("T67"), register: true, marks: marks, secrets: E2E.MemorySecrets())
-            guard let aidB = regB.accountID else { check("T67 账号", false, ""); return }
-            let apiB = E2E.API(transport(regB.token))
-            let ringB = ring(aidB)
-            let stB0 = try await apiB.state()
-            check("T67 提示条的条件：账号没开启、server_seal 为 true", !stB0.enabled && stB0.server_seal, "")
-            let wrongKeys = try await E2E.keysForPassword(apiB, server: sid, username: userB, password: password + "x", marks: marks)
-            do {
-                _ = try await E2E.autoSetup(apiB, ring: ringB, server: sid, username: userB, keys: wrongKeys, marks: marks)
-                check("T67 输错密码", false, "居然开启了")
-            } catch {
-                check("T67 输错密码：服务端核对当前凭证拒绝（T3），不留进行中的开启",
-                      error.localizedDescription == E2E.T.t3 && (try? ringB.pendingSetup()) == nil, error.localizedDescription)
-            }
-            let kB = try await E2E.keysForPassword(apiB, server: sid, username: userB, password: password, marks: marks)
-            let rB = try await E2E.autoSetup(apiB, ring: ringB, server: sid, username: userB, keys: kB, marks: marks)
-            let stB = try await apiB.state()
-            let keysB = try ringB.accountKeys()
-            check("T67 输入正确密码：开启成功（没有恢复码），本机解锁并钉住，提示条条件不再成立",
-                  rB == .enabled && stB.enabled && !stB.hasRecovery && E2E.status(stB, localKeys: keysB) == .unlocked
-                  && ringB.pinned == stB.activeKey?.pub, "\(rB)")
         } catch {
             check("默认自动加密联网流程", false, "\(error)")
         }
@@ -1188,15 +1362,13 @@ enum E2ESelfTest {
 
     // MARK: 联网
 
-    /// 对一个 0.7.0 以上的服务端跑完整流程。tokenA：账号里一台已登录设备（会在它上面开启加密）；
-    /// password：账号当前密码（旧方式设置的，PBKDF2）；pushkey：账号的一把 pushkey。
-    /// transport(token) 创建传输（token 为 nil 时不带凭证）。结束时 password 已改成返回的新密码
+    /// 对一个 0.9.0 以上的服务端跑完整流程（账号只能注册产生，注册即开启加密）。invite：可用多次的邀请码；
+    /// username / password：要注册的新账号。transport(token) 创建传输（token 为 nil 时不带凭证）。结束时密码已改成返回的新密码
     @discardableResult
     static func online(_ check: Check, server: URL, transport: @escaping (String?) -> E2ETransport,
-                       tokenA: String, username: String, password: String, pushkey: String) async -> String? {
+                       invite: String, username: String, password: String) async -> String? {
         let sid = server.absoluteString
         let marks = freshMarks("io.github.hongyile.huijian.e2e-selftest-online")
-        let apiA = E2E.API(transport(tokenA))
         let open = E2E.API(transport(nil))
         func fp() -> String { (0..<32).map { _ in String(format: "%02x", Int.random(in: 0...255)) }.joined() }
         func dev(_ n: String) -> E2E.Device { .init(name: n, platform: "macos", fingerprint: fp()) }
@@ -1205,44 +1377,54 @@ enum E2ESelfTest {
         var pinCount = 0
         /// 每台测试设备一份独立的偏好设置（钉住的公钥按设备记）
         func devDefaults() -> UserDefaults { pinCount += 1; return freshMarks(pinSuite + "-\(pinCount)").defaults }
-        let newPW = "Hj-selftest-\(Int.random(in: 100000...999999))-Strong"
+        let newPW = password
         do {
-            guard let aidA = await E2E.accountID(apiA) else { check("取账号 id", false, ""); return nil }
-            let ringA = E2E.KeyRing(secrets: E2E.MemorySecrets(), scope: E2E.scope(server: sid, accountID: aidA), defaults: freshMarks(pinSuite + "-A").defaults)
+            // 1. 邀请码：没带 / 不对都是 403，说明原样给用户；什么都不建
+            for code in [nil, "ZZZZZZZZZZ"] as [String?] {
+                do {
+                    _ = try await E2E.login(server: transport(nil), authed: transport, serverID: sid, username: username, password: password,
+                                            device: dev("没邀请码"), register: true, marks: freshMarks("io.github.hongyile.huijian.e2e-selftest-online-x"),
+                                            secrets: E2E.MemorySecrets(), inviteCode: code)
+                    check("注册没带对邀请码", false, "居然成功了")
+                } catch {
+                    check("注册\(code == nil ? "没带" : "带错")邀请码：403，显示服务端说明（\(err(error))）",
+                          (error as? E2E.Failure)?.status == 403 && !err(error).isEmpty, "")
+                }
+            }
 
-            // 1. PBKDF2 登录后自动升级
-            let p0 = try await E2E.prelogin(open, username: username)
-            check("prelogin：旧账号返回 pbkdf2-sha256（\(p0?.kdf ?? "无")）", p0?.kdf == "pbkdf2-sha256", "")
-            let l1 = try await E2E.login(server: transport(nil), authed: transport, serverID: sid, username: username, password: password,
-                                         device: dev("升级测试"), register: false, marks: marks, secrets: E2E.MemorySecrets())
+            // 2. 注册即开启加密：钥匙随注册提交，本机已解锁、钉住本机生成的公钥，没有恢复码
+            let secretsA = E2E.MemorySecrets()
+            let regA = try await E2E.login(server: transport(nil), authed: transport, serverID: sid, username: username, password: password,
+                                           device: dev("设备 A"), register: true, marks: marks, secrets: secretsA, inviteCode: invite)
+            guard let aidA = regA.accountID else { check("注册后取账号 id", false, ""); return nil }
+            let apiA = E2E.API(transport(regA.token))
+            let ringA = E2E.KeyRing(secrets: secretsA, scope: E2E.scope(server: sid, accountID: aidA), defaults: marks.defaults)
+            var st = try await apiA.state()
+            let keysA = try ringA.accountKeys()
+            check("注册即开启加密：服务端已开启（有用密码锁住的副本、没有恢复码），本机已解锁并钉住",
+                  regA.unlocked && st.enabled && st.auth_key && st.has_password_wrap && !st.hasRecovery && st.server_seal
+                  && E2E.status(st, localKeys: keysA) == .unlocked && ringA.pinned == st.activeKey?.pub, "")
             let p1 = try await E2E.prelogin(open, username: username)
-            check("PBKDF2 登录后自动升级：标记已升级，之后 prelogin 是 argon2id",
-                  l1.upgradedNow && marks.isUpgraded(server: sid, username: username) && p1?.kdf == "argon2id", "")
+            check("注册后 prelogin 是 argon2id，本机记为已升级", p1?.kdf == "argon2id" && marks.isUpgraded(server: sid, username: username), "")
             do {
                 _ = try await E2E.login(server: transport(nil), authed: transport, serverID: sid, username: username, password: password + "x",
                                         device: dev("错密码"), register: false, marks: marks, secrets: E2E.MemorySecrets())
                 check("错密码被拒绝", false, "")
             } catch { check("Argon2id 登录：错密码被拒绝（\(err(error))）", (error as? E2E.Failure)?.status == 403, "") }
-
-            // 2. 开启加密
             do {
-                _ = try await E2E.setup(apiA, ring: ringA, server: sid, username: username, currentPassword: password + "x", newPassword: newPW, marks: marks)
-                check("开启加密：当前密码错误", false, "")
-            } catch { check("开启加密：当前密码错误 → T3", err(error) == E2E.T.t3, err(error)) }
-            check("开启加密失败时没有留下钥匙", ((try? ringA.accountKeys()) ?? ["x"]).isEmpty, "")
-            let code = try await E2E.setup(apiA, ring: ringA, server: sid, username: username, currentPassword: password, newPassword: newPW, marks: marks)
-            var st = try await apiA.state()
-            let keysA = try ringA.accountKeys()
-            check("开启加密：服务端已开启、有恢复码副本，本机已解锁", st.enabled && st.hasRecovery && st.auth_key && st.has_password_wrap
-                  && E2E.status(st, localKeys: keysA) == .unlocked, "")
-            check("恢复码格式 XXXXX-XXXXX-XXXXX-XXXXX-XXXXXX", code.count == 30 && code.split(separator: "-").count == 5, "")
-            check("开启成功：进行中的开启（含同一个恢复码）留在钥匙串，直到点「完成」", (try? ringA.pendingSetup())?.code == code, "")
-            try ringA.deletePendingSetup()      // 相当于用户点了「完成」
-            do {
-                _ = try await E2E.setup(apiA, ring: ringA, server: sid, username: username, currentPassword: newPW, newPassword: nil, marks: marks)
-                check("重复开启返回 409", false, "")
-            } catch { check("已开启时再开启：409（\(err(error))）", (error as? E2E.Failure)?.kind == .conflict, "") }
-            guard let skA = E2E.usableKey(st, localKeys: try ringA.accountKeys()) else { check("A 的私钥", false, ""); return nil }
+                _ = try await E2E.setup(apiA, ring: ringA, server: sid, username: username, currentPassword: password, newPassword: nil, marks: marks)
+                check("注册后再 setup", false, "")
+            } catch { check("注册即开启后不能再 setup（409）", (error as? E2E.Failure)?.kind == .conflict, err(error)) }
+            guard let skA = E2E.usableKey(st, localKeys: keysA) else { check("A 的私钥", false, ""); return nil }
+            // 恢复码可选：注册时不生成，之后设置（PUT /v1/e2e/recovery，带 kid）
+            let code = try await E2E.rotateRecovery(apiA, ring: ringA, sk: skA, server: sid, username: username, password: password, marks: marks)
+            E2E.finishRotation(ring: ringA)      // 相当于用户点了「完成」
+            st = try await apiA.state()
+            check("之后设置恢复码：成功，格式 XXXXX-XXXXX-XXXXX-XXXXX-XXXXXX", st.hasRecovery && code.count == 30
+                  && code.split(separator: "-").count == 5, "")
+            // pushkey 由账号自己新建（管理后台不再管 pushkey）
+            struct K: Decodable { let key: String }
+            let pushkey = try JSONDecoder().decode(K.self, from: try await apiA.call("POST", "/v1/keys", body: ["name": "e2e"])).key
 
             // 3. 账号密码登录自动解锁
             let ringB = E2E.MemorySecrets()
@@ -1391,14 +1573,7 @@ enum E2ESelfTest {
             check("锁定设备收到同一条：T60（解锁后可以重新解开）",
                   E2E.open(envelope: em["e2e"] as! String, keys: [], serverAttachments: eIDs) == .locked, "")
 
-            // 9. 只接受加密消息
-            try await E2E.setE2EOnly(apiA, true)
-            do {
-                try await push(server: server, fields: ["pushkey": pushkey, "text": "明文", "topic": "e2e"], file: nil)
-                check("只接受加密消息时明文被拒", false, "")
-            } catch { check("「只接受加密消息」打开后明文发送被拒（\(err(error))）", (error as? E2E.Failure)?.status == 403, "") }
-            try await E2E.setE2EOnly(apiA, false)
-            check("「只接受加密消息」可以关闭", !(try await apiA.state()).e2e_only, "")
+            // 9.（0.9.0 起取消「只接受加密消息」：普通 pushkey 的消息一律由服务器代加密）
 
             // 10. 更换恢复码：旧的立即失效
             let code2 = try await E2E.rotateRecovery(apiA, ring: ringA, sk: skA, server: sid, username: username, password: newPW, marks: marks)
@@ -1428,22 +1603,7 @@ enum E2ESelfTest {
                                          device: dev("改密码后"), register: false, marks: marks, secrets: E2E.MemorySecrets())
             check("改密码后用新密码登录并自动解锁", lh.unlocked, "")
 
-            // 12. 删除服务器上的明文消息：另一台设备拉变更收到 purge（不是 delete），据此保留本地副本（§7.4）
-            struct MS: Decodable { let changes_next: Int64 }
-            let cursor = try JSONDecoder().decode(MS.self, from: try await apiC.call("GET", "/v1/messages/state")).changes_next
-            let plainIDs = Set(try await messages(apiC, since: 0).filter { ($0["e2e"] as? String ?? "").isEmpty }
-                .compactMap { ($0["id"] as? NSNumber)?.int64Value })
-            let n = try await E2E.deletePlain(apiA)
-            let left = try await messages(apiA, since: 0)
-            // 0.8.0 起服务器代加密 + 补加密，开启后服务器上通常已经没有明文：删掉的条数等于删除前剩的明文条数
-            check("删除明文消息 \(n) 条（删除前服务器上有 \(plainIDs.count) 条明文），加密消息保留",
-                  n == plainIDs.count && !left.isEmpty && left.allSatisfy { ($0["e2e"] as? String)?.isEmpty == false }, "")
-            let page = try JSONSerialization.jsonObject(with: try await apiC.call("GET", "/v1/messages", query: [
-                URLQueryItem(name: "since", value: String(Int64.max / 2)), URLQueryItem(name: "changes_since", value: String(cursor))])) as? [String: Any]
-            let changes = (page?["changes"] as? [[String: Any]]) ?? []
-            let purged = Set(changes.filter { $0["kind"] as? String == "purge" }.compactMap { ($0["id"] as? NSNumber)?.int64Value })
-            check("另一台设备拉变更：删掉的明文消息记为 purge（\(purged.count) 条），没有 delete",
-                  purged.count == n && purged == plainIDs && !changes.contains { $0["kind"] as? String == "delete" }, "purge=\(purged.count) plain=\(plainIDs.count)")
+            // 12.（0.9.0 起取消「删除服务器上的明文消息」：服务器上已经没有明文）
 
             // 13. 退出登录：删除本机全部私钥
             try ringE.removeAll()

@@ -41,11 +41,11 @@ enum E2E {
         static let t3 = "密码不对"
         static let t10 = "🔒 加密消息已锁定：点这里解锁"
         static let t20Title = "开启端到端加密"
-        static let t20 = "开启后，新消息的标题、正文和附件只有你登录过的设备能解开，服务器和备份里只有密文。发送端要换成「加密发送密钥」才会加密。旧消息保持原样。"
+        static let t20 = "开启后，新消息的标题、正文和附件只有你登录过的设备能解开，服务器和备份里只有密文。服务器上已有的旧消息也会被加密；用普通 pushkey 发来的消息由服务器收到后立即加密，想让服务器完全看不到内容，发送端请改用「加密发送密钥」。"
         static let t21Title = "保存恢复码"
         static let t21 = "忘记密码、又没有其他设备可以批准时，只能用它解锁加密消息。恢复码只显示这一次，请抄下来或存进密码管理器。"
         static let t21Check = "我已把恢复码保存好"
-        static let t22 = "已开启端到端加密。到「Pushkey」页复制「加密发送密钥」，换掉脚本里原来的 pushkey，新消息就会加密。"
+        static let t22 = "已开启端到端加密。用普通 pushkey 发来的消息由服务器收到后立即加密；想让服务器也看不到内容，到「Pushkey」页复制「加密发送密钥」，换掉脚本里原来的 pushkey。"
         static let t30Title = "请另一台设备批准"
         static let t30 = "在另一台已解锁的设备上打开回笺，它会提示有设备请求解锁。"
         static func t31(_ code: String) -> String { "核对码 \(formatCode(code))：确认和另一台设备上显示的一样，再在那台设备上点「一致，批准」。" }
@@ -66,17 +66,18 @@ enum E2E {
         static let t60 = "🔒 加密消息（解锁后查看）"
         static let t61 = "🔒 用别的钥匙加密的消息，这台设备解不开"
         static let t62 = "🔒 加密消息已损坏，无法解开"
-        static let t63 = "未加密：发送端用的是普通 pushkey"
+        /// 只用于开启加密以前收到、只留在本机的旧明文消息（0.9.0 起服务器上没有明文）
+        static let t63 = "未加密：开启加密以前收到、只留在本机的旧消息"
         static let t70 = "发送端用它代替 pushkey，消息会在发送端加密，只有你的设备能解开。它只能加密、不能解密，泄露了也看不到你的消息。"
-        static let t71 = "打开后，服务器拒收没有加密的消息，防止有脚本忘了换成加密发送密钥。"
         static let t73 = "本机解锁一次后才显示（防止被冒充的服务器换掉公钥）。"
-        static let t72 = "删除服务器上本账号的全部明文消息？加密消息不受影响，本机已同步的消息保留。服务器以前做的备份里仍有这些消息。"
         // §11.7（服务端 0.8.0 起：默认自动加密）
         static let t23 = "还没有设置恢复码。忘记密码、又没有其他设备时，只能靠恢复码找回加密消息。"
         static let t24 = "你的密码比较弱，加密钥匙是用密码保护的，建议换一个更长的密码。"
-        static let t45 = "重置后会换一把新的加密钥匙：以前的加密消息只有还留着旧钥匙的设备能看，其他设备上会显示「用别的钥匙加密的消息」。发送端要换成新的加密发送密钥。确定重置吗？"
+        static let t45 = "这会换一把新的加密钥匙：以前的加密消息只有还留着旧钥匙的设备能看，其他设备上会显示「用别的钥匙加密的消息」。发送端要换成新的加密发送密钥。确定继续吗？"
         static let t46 = "账号的加密钥匙已经更换（可能在别的设备上重置过）。请用密码或恢复码解锁，确认新钥匙。"
-        static let t64 = "🔐 服务器加密：发送端没有加密，服务器收到后立即加密保存。"
+        /// 普通 pushkey 发来、服务器代加密的消息（sealed == "server"）：详情元信息行；列表里显示小标签 plainSentTag（§11.5）
+        static let t64 = "明文发送：发送端用的是普通 pushkey，没有加密，服务器收到时能看到内容；之后加密保存，数据库和备份里没有明文。想让服务器也看不到，请改用加密发送密钥。"
+        static let plainSentTag = "明文发送"
         static let t65 = "用普通 pushkey 发来的消息，服务器收到后立即用你的公钥加密再保存，数据库和备份里没有明文。服务器在收到的那一刻能看到内容；想让服务器完全看不到，请改用加密发送密钥。"
         static let t66 = "普通 pushkey 适合 curl 等无法加密的发送端，消息由服务器收到后立即代为加密。"
         static let t67 = "输入一次密码，开启端到端加密：之后服务器上只保存密文。"
@@ -91,6 +92,14 @@ enum E2E {
         static let autoSetupFailed = "自动开启加密暂时没有成功，下次刷新或用密码登录时会自动重试；也可以在下面手动开启。"
         /// 重置加密 / 更换加密钥匙成功后的提示（带「去 Pushkey 页」跳转）
         static let resetDone = "加密钥匙已更换，请到 Pushkey 页复制新的加密发送密钥，替换脚本里的旧密钥。"
+        /// 注册请求网络出错 / 超时（服务端可能已经建号）
+        static let registerUncertain = "注册结果不确定：可能已经注册成功，请先用这个用户名和密码登录"
+        /// 上次注册结果不确定，这次注册又被拒（用户名已被使用 409、邀请码已用完等 403）：多半上次已经成功，改去登录
+        static let registerTryLogin = "上次注册可能已经成功，请改用登录，用这个用户名和密码登录"
+        /// 取不到服务器信息（/v1/info）：不猜是新是旧，不提交注册
+        static let serverUnreachable = "连不上服务器，请检查地址或网络后重试"
+        /// 注册一律不发密码原文：服务端没有新登录协议（没有 prelogin，0.6 及以前）
+        static let registerServerTooOld = "服务器版本太旧，请先升级回笺服务端"
         static let resetUncertain = "网络出错，暂时无法确认是否已经重置。新钥匙已保存在本机，确认重置成功后会自动换上；24 小时内没有换上就按没有成功处理。也可以现在放弃这次重置，或者再试一次。"
         static let recoveryUncertain = "网络出错，暂时无法确认恢复码是否已经更换。新恢复码已保存在本机，确认更换成功后会自动显示；如果一直没有显示，说明没换成，旧恢复码仍然有效，可以稍后再换一次。"
         static let noRecovery = "这个账号没有设置恢复码，请用密码或另一台设备解锁"
@@ -113,13 +122,14 @@ enum E2E {
             case wrongPassword      // T3
             case weakPassword       // 新密码不合格（原因在 message 里）
             case keyMismatch        // T43
-        case keyChanged         // T46：账号的钥匙已经更换（别的设备重置过加密），本机拿的是旧钥匙
+            case keyChanged         // T46：账号的钥匙已经更换（别的设备重置过加密），本机拿的是旧钥匙
             case conflict           // 409：状态变了（别的设备刚开启过、请求被接手……）
             case server             // 其他 HTTP 错误，message 是服务端的说明
             case unsupported        // 服务端没有这个接口（旧版本）
             case locked             // 本机没有可用的私钥
             case badRecovery        // 恢复码格式不对 / T41
             case denied             // T32 / T52
+            case uncertain          // 注册结果不确定（registerUncertain）：之后再注册被拒时提示改去登录（registerAfterUncertain）
             case storage            // 钥匙串读写失败
             case core               // 核心库报错
         }
@@ -256,6 +266,7 @@ enum E2E {
     struct State: Codable, Equatable {
         var enabled = false
         var keys: [Key] = []
+        /// 旧服务端的「只接受加密消息」：0.9.0 起取消，只为兼容解码保留
         var e2e_only = false
         /// 账号是否已升级到新登录协议
         var auth_key = false
@@ -672,6 +683,28 @@ enum E2E {
         }
     }
 
+    /// 上次注册结果不确定（Failure.uncertain），这次同一个用户名再注册又被拒（409 用户名已被使用、403 邀请码已用完等）：
+    /// 多半上次已经成功，提示改去登录（T.registerTryLogin）；其他错误返回 nil，照常显示
+    static func registerAfterUncertain(_ error: Error) -> String? {
+        guard let f = error as? Failure, f.status == 409 || f.status == 403 else { return nil }
+        var m = f.message
+        while m.hasSuffix("。") || m.hasSuffix(".") { m.removeLast() }
+        return m + "。" + T.registerTryLogin
+    }
+
+    /// GET /v1/info 的功能清单里有没有这个功能。没有 /v1/info 的旧服务端算没有；
+    /// 取不到（网络出错、超时、响应不对）时不猜，抛 T.serverUnreachable（三端一致：不能把新服务端当成旧的）
+    static func supports(_ api: API, feature: String) async throws -> Bool {
+        struct Info: Decodable { struct F: Decodable { let id: String }; let features: [F] }
+        do {
+            return try await api.get(Info.self, "/v1/info").features.contains { $0.id == feature }
+        } catch let f as Failure where f.kind == .unsupported {
+            return false
+        } catch {
+            throw Failure(.server, T.serverUnreachable)
+        }
+    }
+
     /// GET /v1/prelogin；nil = 服务端没有新登录协议（旧服务端，纯文本 404）
     static func prelogin(_ api: API, username: String) async throws -> Prelogin? {
         do {
@@ -744,33 +777,80 @@ enum E2E {
 
     /// 账号密码登录 / 注册（§2.1、§2.2）。server：没有 token 的传输；authed：用新 token 创建传输（取账号 id、自动升级用）。
     /// 解锁得到的私钥核对后存进 secrets（需要账号 id）。
+    /// alive：保存钥匙用的「账号还活着」标记（调用方的 KeyRing 用同一个；期间退出登录 / 换账号时不再写入，审查 L3）
+    /// inviteCode：注册时的邀请码（服务端 0.9.0 起 /v1/info 的 register 为 "invite" 时必填；邀请码不对时服务端 403，说明原样显示）
     static func login(server: E2ETransport, authed: (String) -> E2ETransport, serverID: String,
                       username: String, password: String, device: Device, register: Bool,
-                      marks: UpgradeMarks, secrets: E2ESecrets) async throws -> LoginResult {
+                      marks: UpgradeMarks, secrets: E2ESecrets, inviteCode: String? = nil,
+                      alive: AliveFlag = AliveFlag()) async throws -> LoginResult {
         let api = API(server)
         let upgraded = marks.isUpgraded(server: serverID, username: username)
         var body: [String: Any] = ["username": username, "name": device.name, "platform": device.platform, "fingerprint": device.fingerprint]
+        if register, let c = inviteCode?.trimmingCharacters(in: .whitespacesAndNewlines), !c.isEmpty { body["invite_code"] = c }
         let p = try await prelogin(api, username: username)
 
         var registerUnlock: String?
+        /// 注册即开启加密（服务端 0.9.0，功能 register.e2e）：本机生成的账号钥匙，随注册一起提交
+        var registerKey: (sk: String, pub: String)?
         if register {
             if let problem = Core.passwordProblem(password, username: username) { throw Failure(.weakPassword, problem) }
             if p == nil {
-                if upgraded { throw Failure(.downgrade, T.t1) }
-                body["password"] = password              // 旧服务端、从未升级：只能用原文注册
+                // 注册一律不发密码原文（三端一致）：没有新登录协议的旧服务端不能注册
+                throw Failure(.unsupported, T.registerServerTooOld)
             } else {
                 let salt = try coreCall { try Core.newSalt() }
                 let k = try await passwordKeys(password, salt: salt)
                 body["auth_key"] = k.authKey
                 body["auth_salt"] = salt
                 registerUnlock = k.unlockKey
+                // 格式同 POST /v1/e2e/setup（pub + 用解锁钥匙锁住的私钥）；不生成恢复码（注册后再建议设置，§11.2）。
+                // 0.8 及以前的服务端没有这个功能：照旧只注册，之后由调用方用 passwordKeys 自动开启（§11.1）
+                if try await supports(api, feature: "register.e2e") {
+                    let kp = try coreCall { try Core.keypair() }
+                    body["pub"] = kp.pub
+                    body["password_wrap"] = try coreCall { try Core.wrap("hjp1", key: k.unlockKey, data: kp.sk) }
+                    registerKey = (kp.sk, kp.pub)
+                }
             }
-            let data = try await api.call("POST", "/v1/register", body: body)
+            let data: Data
+            do {
+                data = try await api.call("POST", "/v1/register", body: body)
+            } catch let f as Failure where f.status == 500 || (400...499).contains(f.status) {
+                throw f                                   // 服务端明确拒绝或明确失败（同一事务，不留数据）
+            } catch {
+                // 网络出错、超时、网关 5xx：服务端可能已经建号
+                throw Failure(.uncertain, T.registerUncertain, status: (error as? Failure)?.status ?? 0)
+            }
             if p != nil { marks.mark(server: serverID, username: username) }
-            let token = try tokenOf(data)
-            var out = LoginResult(response: data, token: token, accountID: await accountID(API(authed(token))), upgradedNow: p != nil)
+            // 拿到 200 以后：账号已经建好（邀请码已扣），之后的失败都按「结果不确定」处理，提示先去登录
+            guard let token = try? tokenOf(data) else { throw Failure(.uncertain, T.registerUncertain) }
+            let authedAPI = API(authed(token))
+            var aid = await accountID(authedAPI)
+            for _ in 0..<2 where aid == nil && registerKey != nil {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                aid = await accountID(authedAPI)
+            }
+            var out = LoginResult(response: data, token: token, accountID: aid, upgradedNow: p != nil)
             if let salt = body["auth_salt"] as? String, let auth = body["auth_key"] as? String, let unlock = registerUnlock {
                 out.passwordKeys = PasswordKeys(salt: salt, authKey: auth, unlockKey: unlock)
+            }
+            // 注册即开启：响应里的 e2e 有这把公钥 → 本机生成的钥匙，保存并钉住（§11.4 本机生成，可以替换钉住的）。
+            // 响应里没有 e2e（不该发生）：当作没开启，调用方照旧自动开启
+            struct Wrap: Decodable { let e2e: LoginInfo? }
+            if let kp = registerKey, let info = (try? JSONDecoder().decode(Wrap.self, from: data))?.e2e, info.enabled {
+                do {
+                    if let aid {
+                        try acceptOwnKey(kp.sk, keys: info.keys, ring: KeyRing(secrets: secrets, scope: scope(server: serverID, accountID: aid),
+                                                                              defaults: marks.defaults, alive: alive))
+                        out.unlocked = true
+                    } else {
+                        // 取不到账号 id：先核对，留在内存里，之后再保存（同登录）
+                        try verify(sk: kp.sk, keys: info.keys, pinned: nil)
+                        out.pendingKey = (kp.sk, info.keys)
+                    }
+                } catch let f as Failure where f.kind == .keyMismatch || f.kind == .storage {
+                    out.note = f.message      // 私钥已用密码锁在服务器上：之后用密码解锁照样能取回
+                } catch {}
             }
             return out
         }
@@ -809,7 +889,7 @@ enum E2E {
                     if let aid {
                         // 用密码解开的：服务器伪造不了（hjp1 用只有本机知道的 unlock_key 锁住），可以替换钉住的公钥（§11.4）
                         try acceptOwnKey(sk, keys: info.keys, ring: KeyRing(secrets: secrets, scope: scope(server: serverID, accountID: aid),
-                                                                             defaults: marks.defaults))
+                                                                             defaults: marks.defaults, alive: alive))
                         out.unlocked = true
                     } else {
                         // 取不到账号 id：先核对（还不知道钉住的公钥，保存时再核对一次），留在内存里，之后再保存
@@ -1356,15 +1436,8 @@ enum E2E {
         try? ring.deletePendingRecovery()
     }
 
-    static func setE2EOnly(_ api: API, _ on: Bool) async throws {
-        try await api.call("PATCH", "/v1/e2e", body: ["e2e_only": on])
-    }
-
-    /// 删除服务器上的明文消息，返回删除条数
-    static func deletePlain(_ api: API) async throws -> Int {
-        struct R: Decodable { let deleted: Int }
-        return try JSONDecoder().decode(R.self, from: try await api.call("POST", "/v1/e2e/delete-plain", body: ["confirm": true])).deleted
-    }
+    // 「只接受加密消息」（PATCH /v1/e2e e2e_only）和「删除服务器上的明文消息」（POST /v1/e2e/delete-plain）：
+    // 0.9.0 起取消（§7 第 2、4 项）。所有消息都加密，普通 pushkey 的消息由服务器代加密；purge 变更的处理保留（兼容旧服务端）
 
     // MARK: - 请另一台设备批准：新设备一侧（§4.3）
 

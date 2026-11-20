@@ -16,8 +16,13 @@ import java.io.IOException
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
-/** oldServer：服务端没有这个接口（路由层的纯文本 404 / 405），说明服务端版本较旧 */
-class ApiException(val status: Int, message: String, val oldServer: Boolean = false) : IOException(message)
+/**
+ * oldServer：服务端没有这个接口（路由层的纯文本 404 / 405），说明服务端版本较旧。
+ * reason / messageId：错误响应里的 reason、message_id（附件 410：reason "sealed" = 已被服务器补加密、要重新拉这条消息；
+ * "missing" = 文件丢失，§11.5）
+ */
+class ApiException(val status: Int, message: String, val oldServer: Boolean = false,
+                   val reason: String? = null, val messageId: Long = 0) : IOException(message)
 
 /** token 失效（设备被移除、退出登录）：停止同步，回到登录页 */
 class UnauthorizedException : IOException("登录已失效，请重新登录")
@@ -40,9 +45,27 @@ class Api(val server: String, private val token: String?) : E2ENet {
     @Volatile var inFlight: Call? = null
     @Volatile private var cancelled = false
 
-    /** 取消正在进行的请求，并让之后的请求都直接失败（同步循环重启时，旧循环不会再拉后面的分页） */
-    fun cancelAll() { cancelled = true; inFlight?.cancel() }
+    /** 并发请求用的子实例（各自记自己的进行中请求）：cancelAll 时一起取消 */
+    private val children: MutableSet<Api> = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
+
+    /** 取消正在进行的请求（包括子实例的），并让之后的请求都直接失败（同步循环重启时，旧循环不会再拉后面的分页） */
+    fun cancelAll() { cancelled = true; inFlight?.cancel(); children.forEach { it.cancelAll() } }
     val wasCancelled get() = cancelled
+
+    /**
+     * 用一个子实例发一次请求（补加密等并发场景：inFlight 只有一个槽，共用一个实例时 cancelAll 只能取消最后一个）。
+     * 子实例先登记再检查取消标记，不会漏掉中途的 cancelAll
+     */
+    fun <T> withChild(block: (Api) -> T): T {
+        val c = Api(server, token)
+        children += c
+        try {
+            if (cancelled) c.cancelAll()
+            return block(c)
+        } finally {
+            children -= c
+        }
+    }
 
     private fun req(path: String) = req((server + path).toHttpUrl())
 
@@ -67,9 +90,11 @@ class Api(val server: String, private val token: String?) : E2ENet {
         if (!resp.isSuccessful) {
             val body = resp.body?.string().orEmpty()
             resp.close()
-            val err = runCatching { JSONObject(body).optString("error") }.getOrNull()?.takeIf { it.isNotBlank() }
+            val o = runCatching { JSONObject(body) }.getOrNull()
+            val err = o?.optString("error")?.takeIf { it.isNotBlank() }
             val old = err == null && (resp.code == 404 || resp.code == 405)
-            throw ApiException(resp.code, err ?: if (old) OLD_SERVER else "HTTP ${resp.code}", old)
+            throw ApiException(resp.code, err ?: if (old) OLD_SERVER else "HTTP ${resp.code}", old,
+                o?.optString("reason")?.takeIf { it.isNotBlank() }, o?.optLong("message_id") ?: 0)
         }
         return resp
     }
@@ -109,14 +134,12 @@ class Api(val server: String, private val token: String?) : E2ENet {
             .apply { if (commit != null) put("commit", commit) }.toString().toRequestBody(JSON)).build())
     override fun e2eChallenge(deviceId: String, nonce: String) { json(post("/v1/e2e/challenge", JSONObject().put("device_id", deviceId).put("nonce", nonce))) }
     override fun e2eReveal(nonce: String) { json(post("/v1/e2e/reveal", JSONObject().put("nonce", nonce))) }
-    override fun e2eGrant(deviceId: String, pub: String, grant: String) {
-        json(post("/v1/e2e/grant", JSONObject().put("device_id", deviceId).put("pub", pub).put("grant", grant)))
+    override fun e2eGrant(deviceId: String, pub: String, grant: String, kid: String) {
+        json(post("/v1/e2e/grant", JSONObject().put("device_id", deviceId).put("pub", pub).put("grant", grant).put("kid", kid)))
     }
+    override fun e2eReset(body: JSONObject): JSONObject = json(post("/v1/e2e/reset", body))
     override fun e2eDeny(deviceId: String) { json(post("/v1/e2e/deny", JSONObject().put("device_id", deviceId))) }
     override fun e2eRecovery(body: JSONObject) { json(req("/v1/e2e/recovery").put(body.toString().toRequestBody(JSON)).build()) }
-    override fun e2eSetOnly(only: Boolean): JSONObject =
-        json(req("/v1/e2e").patch(JSONObject().put("e2e_only", only).toString().toRequestBody(JSON)).build())
-    override fun e2eDeletePlain(): Int = json(post("/v1/e2e/delete-plain", JSONObject().put("confirm", true)), readTimeoutSec = 120).optInt("deleted")
     override fun accountAuth(body: JSONObject): JSONObject = json(req("/v1/account/auth").put(body.toString().toRequestBody(JSON)).build())
     override fun credentials(body: JSONObject): JSONObject = json(post("/v1/account/credentials", body))
 
@@ -133,7 +156,7 @@ class Api(val server: String, private val token: String?) : E2ENet {
 
     fun account(): AccountDetail = Manage.accountDetail(json(req("/v1/account").build()))
 
-    /** 设置 / 修改用户名和密码：password 为空只改用户名；已有密码时需要当前密码（「允许管理」的设备可以不填） */
+    /** 设置 / 修改用户名和密码：password 为空只改用户名；没有密码时本账号任何设备都能设置初始密码，已有密码时需要当前密码 */
     fun setCredentials(username: String, password: String, current: String): AccountInfo =
         Manage.account(json(post("/v1/account/credentials", JSONObject().put("username", username)
             .put("password", password).put("current_password", current))).optJSONObject("account") ?: JSONObject())
@@ -183,6 +206,9 @@ class Api(val server: String, private val token: String?) : E2ENet {
             )
         }
     }
+
+    /** 单条消息（服务端 0.8.0 起，§11.5）：被服务器补加密（变更 kind "sealed"）后重新拉取。不存在时 ApiException(404) */
+    fun message(id: Long): Message = Message.fromServer(json(req("/v1/messages/$id").build()).getJSONObject("message"))
 
     /** 对账：本账号全部消息的归档状态、变更游标、服务端数据纪元（服务端 0.5.4 起） */
     fun messageStates(): MessageStates = Changes.parseStates(json(req("/v1/messages/state").build(), readTimeoutSec = 60))

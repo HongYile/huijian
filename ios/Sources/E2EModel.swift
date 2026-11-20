@@ -22,7 +22,7 @@ extension AppModel {
     var e2eStatus: E2E.Status? { e2eState.map { E2E.status($0, localKeys: e2eKeys) } }
     var e2eLocked: Bool { e2eStatus == .locked }
 
-    /// 账号开启了加密（离线时用上次的结果）：明文消息标「未加密」
+    /// 账号开启了加密（离线时用上次的结果）：本机保留的旧明文消息（开启加密以前收到的）标「未加密」（T63）
     var e2eAccountEnabled: Bool { e2eState?.enabled ?? settings.e2eEnabled }
 
     /// 本机对应账号有效钥匙的私钥
@@ -284,6 +284,19 @@ extension AppModel {
             if newValue { list.append(scope) }
             if list != settings.e2eWeakAccounts { settings.e2eWeakAccounts = list }
         }
+    }
+
+    /// 已解锁、账号还没有恢复码、用户没点过「以后再说」：首页顶部显示一条不打断的建议（T23，§11.2）。
+    /// 注册即开启加密时不生成恢复码，靠它提醒；「以后再说」按「服务器#账号 id」记在偏好设置里（和 Mac 一致）
+    var e2eSuggestRecovery: Bool {
+        guard e2eStatus == .unlocked, e2eState?.hasRecovery == false, let ring = e2eRing else { return false }
+        return !settings.e2eRecoveryHintDismissed.contains(ring.scope)
+    }
+
+    func e2eDismissRecoveryHint() {
+        guard let scope = e2eRing?.scope else { return }
+        objectWillChange.send()
+        settings.e2eRecoveryHintDismissed = settings.e2eRecoveryHintDismissed.filter { $0 != scope } + [scope]
     }
 
     /// T67 提示条（§11.1 末尾）：账号还没开启加密、服务端支持自动开启（server_seal 为 true）时，首页顶部一直显示，不能关闭。
@@ -676,13 +689,7 @@ extension AppModel {
         e2eApprovalPhases[deviceID] = nil
     }
 
-    // MARK: 设置项（§7）
-
-    func e2eSetOnly(_ on: Bool) async throws {
-        guard let api = e2eAPI else { return }
-        try await E2E.setE2EOnly(api, on)
-        await refreshE2E()
-    }
+    // MARK: 设置项（§7；0.9.0 起取消「只接受加密消息」和「删除服务器上的明文消息」）
 
     /// 更换恢复码（§7 第 3 项）。新恢复码发请求前先存进钥匙串，成功后放在 e2eRecovery，点「完成」才都删掉；
     /// 结果不确定时提示 T.recoveryUncertain，之后刷新状态确认成功会自动显示
@@ -704,12 +711,6 @@ extension AppModel {
         e2eRecoveryNote = nil
         e2eRecovery = E2ERecoveryShow(code: code, fromSetup: false)
         await refreshE2E()
-    }
-
-    /// 删除服务器上的明文消息。本机已同步的副本保留：服务端发来 purge 变更时记为「仅本机保留」（见 AppModel.applyChanges）
-    func e2eDeletePlain() async throws -> Int {
-        guard let api = e2eAPI else { return 0 }
-        return try await E2E.deletePlain(api)
     }
 
     /// 某把 pushkey 的加密发送密钥：只用本机钉住的账号公钥（§7 第 1 项）

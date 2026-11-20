@@ -38,6 +38,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
@@ -80,6 +81,8 @@ fun KeysScreen(back: () -> Unit) {
     var revoke by remember { mutableStateOf<PushKey?>(null) }
     var delete by remember { mutableStateOf<PushKey?>(null) }
     var example by remember { mutableStateOf<PushKey?>(null) }
+    /** 刚新建的 key：弹出结果页（§11.6 优先显示加密发送密钥） */
+    var created by remember { mutableStateOf<PushKey?>(null) }
     var saving by remember { mutableStateOf(false) }
     val server = Hub.store.server
 
@@ -176,7 +179,7 @@ fun KeysScreen(back: () -> Unit) {
                         KeyEdit.Create -> {
                             val k = api { it.createKey(name, key) }
                             keys = keys.orEmpty() + k
-                            say("已新建「${k.name}」")
+                            created = k
                         }
                         is KeyEdit.Rename -> { replace(api { it.updateKey(e.k.id, name, "") }); say("已改名") }
                         is KeyEdit.Replace -> { replace(api { it.updateKey(e.k.id, "", key) }); say("已更换，旧 key 已失效") }
@@ -210,6 +213,11 @@ fun KeysScreen(back: () -> Unit) {
         }
     }
     example?.let { k -> ExampleDialog(k, server, { example = null }, ::say) }
+    created?.let { k ->
+        CreatedDialog(k, if (e2eState?.enabled == true) E2EHub.sendKey(k.key) else null,
+            onCopySendKey = { copyText(ctx, "加密发送密钥", it, sensitive = true) },
+            onCopy = { copyText(ctx, "pushkey", k.key, sensitive = true) }, onDismiss = { created = null })
+    }
 }
 
 @Composable
@@ -230,7 +238,7 @@ private fun KeyRow(
                 IconButton({ menu = true }) { Icon(Icons.Default.MoreVert, "更多操作") }
                 DropdownMenu(menu, { menu = false }) {
                     if (!k.revoked) {
-                        DropdownMenuItem({ Text("复制 key") }, { menu = false; onCopy() })
+                        DropdownMenuItem({ Text(if (sendKey?.key != null) "复制普通 pushkey" else "复制 key") }, { menu = false; onCopy() })
                         DropdownMenuItem({ Text("发送示例与测试") }, { menu = false; onExample() })
                         DropdownMenuItem({ Text("改名") }, { menu = false; onRename() })
                         DropdownMenuItem({ Text("更换 key") }, { menu = false; onReplace() })
@@ -241,11 +249,12 @@ private fun KeyRow(
                 }
             }
         }
-        SelectionContainer {
+        val encrypted = if (k.revoked) null else sendKey?.key
+        if (encrypted == null) SelectionContainer {
             Text(k.key, fontFamily = FontFamily.Monospace, fontSize = 13.sp,
                 color = if (k.revoked) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
                 textDecoration = if (k.revoked) TextDecoration.LineThrough else null)
-        }
+        } else SendKeyBox(encrypted, onCopySendKey)
         Text(
             listOfNotNull(
                 rfcText(k.lastUsed)?.let { "最近使用 $it" } ?: if (!k.revoked) "从未使用" else null,
@@ -254,32 +263,83 @@ private fun KeyRow(
             fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         if (!k.revoked) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            TextButton(onCopy, contentPadding = ZeroPadding) { Text("复制") }
+            // 有加密发送密钥时只在它的框里复制（§11.6，卡片上只留一个「复制」）；还没有时复制普通 pushkey
+            if (encrypted == null) TextButton(onCopy, contentPadding = ZeroPadding, modifier = Modifier.testTag("copyKey")) { Text("复制") }
             if (mode != null) {
                 Box(Modifier.weight(1f))
                 ModePicker(mode, onMode)
             }
         }
-        if (sendKey != null) {
-            // 只显示本机钉住的公钥（e2ee-client.md §7 第 1 项）：没钉住显示 T73，和服务器的不同显示 T43
+        if (encrypted != null) PlainKeyFold(k.key, onCopy)
+        else if (sendKey != null && !k.revoked) {
+            // 只显示本机钉住的公钥（e2ee-client.md §7 第 1 项）：没钉住显示 T73，和服务器的不同显示 T46
             Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)) {
                 Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    val key = sendKey.key
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("🔒 加密发送密钥", Modifier.weight(1f), fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                        if (key != null) TextButton({ onCopySendKey(key) }, contentPadding = ZeroPadding) { Text("复制") }
-                    }
-                    if (key != null) {
-                        SelectionContainer { Text(key, fontFamily = FontFamily.Monospace, fontSize = 12.sp) }
-                        Text(E2EText.T70, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    } else {
-                        Text(sendKey.note.orEmpty(), fontSize = 12.sp,
-                            color = if (sendKey.note == E2EText.T43) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                    Text("🔒 加密发送密钥", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    Text(sendKey.note.orEmpty(), fontSize = 12.sp,
+                        color = if (sendKey.note == E2EText.T43 || sendKey.note == E2EText.T46) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
     }
+}
+
+/** 加密发送密钥（§7 第 1 项、§11.6：放在最前面，默认复制它） */
+@Composable
+private fun SendKeyBox(key: String, onCopy: (String) -> Unit) {
+    Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)) {
+        Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("🔒 加密发送密钥", Modifier.weight(1f), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                TextButton({ onCopy(key) }, contentPadding = ZeroPadding, modifier = Modifier.testTag("copyKey")) { Text("复制") }
+            }
+            SelectionContainer { Text(key, Modifier.testTag("sendKey"), fontFamily = FontFamily.Monospace, fontSize = 12.sp) }
+            Text(E2EText.T70, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/** 普通 pushkey 收进「显示普通 pushkey」折叠项，配说明 T66（§11.6） */
+@Composable
+private fun PlainKeyFold(key: String, onCopy: () -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        TextButton({ open = !open }, contentPadding = ZeroPadding, modifier = Modifier.testTag("showPlainKey")) {
+            Text(if (open) "隐藏普通 pushkey ▴" else "显示普通 pushkey ▾", fontSize = 13.sp)
+        }
+        if (open) {
+            Text(E2EText.T66, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                SelectionContainer(Modifier.weight(1f)) { Text(key, Modifier.testTag("plainKey"), fontFamily = FontFamily.Monospace, fontSize = 13.sp) }
+                TextButton(onCopy, contentPadding = ZeroPadding) { Text("复制") }
+            }
+        }
+    }
+}
+
+/** 新建 pushkey 的结果：优先显示加密发送密钥（§11.6），普通 key 折叠 */
+@Composable
+private fun CreatedDialog(k: PushKey, sendKey: io.github.hongyile.huijian.SendKey?, onCopySendKey: (String) -> Unit, onCopy: () -> Unit,
+                          onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("已新建「${k.name}」") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                val encrypted = sendKey?.key
+                if (encrypted != null) {
+                    SendKeyBox(encrypted, onCopySendKey)
+                    PlainKeyFold(k.key, onCopy)
+                } else {
+                    CodeBox(k.key)
+                    TextButton(onCopy, contentPadding = ZeroPadding) { Text("复制 pushkey") }
+                    sendKey?.note?.let { Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                }
+            }
+        },
+        confirmButton = { TextButton(onDismiss) { Text("完成") } },
+    )
 }
 
 private val MODES = listOf("notify" to "提醒", "silent" to "静默", "off" to "不接收")

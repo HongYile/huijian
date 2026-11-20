@@ -98,6 +98,7 @@ class MainActivity : ComponentActivity() {
                             open = { screen = Screen.Detail(it) },
                             openSettings = { screen = Screen.Settings },
                             openE2E = { screen = Screen.E2E },
+                            openAccount = { screen = Screen.Account },
                         )
                         is Screen.Detail -> {
                             val back = { screen = s.from?.let { Screen.Detail(it) } ?: Screen.Home }

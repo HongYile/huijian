@@ -116,7 +116,7 @@ object Hub {
     }
 
     /**
-     * 服务器上已删除、本机保留的消息（变更 kind purge，「删除服务器上的明文消息」）：本地有的记为「仅本机保留」，
+     * 服务器上已删除、本机保留的消息（变更 kind purge（0.8 以前的「删除服务器上的明文消息」，0.9.0 起客户端没有这个入口；服务端可能还会发，保留兼容））：本地有的记为「仅本机保留」，
      * 对账时不当作被删除（e2ee-client.md §7.4）
      */
     @Synchronized
@@ -203,6 +203,62 @@ object Hub {
             if (dropped.isNotEmpty()) scope.launch { store.deleteAttachmentFiles(dropped); AttDownloads.forget(dropped) }
         }
         return fresh
+    }
+
+    /**
+     * §11.5：被服务器补加密的消息（变更 kind sealed、下载附件返回 410 reason sealed）GET /v1/messages/{id}，
+     * 按加密消息解密后替换本地记录、丢弃旧附件缓存。本地没有的、本地已经是加密的跳过；404（已被删除）保留本地；
+     * 不是「本地明文 → 服务器代加密」的丢弃。返回替换了几条
+     */
+    fun refetchSealed(ids: Collection<Long>, a: Api, session: Long): Int = resealBatch(ids, a, session).first
+
+    /**
+     * 批量处理被补加密的消息（最多 4 条并发，每条用 Api 的子实例，同步循环重启时一起取消）：返回（替换了几条，处理结果）。
+     * 本地已经是加密的不再拉；单条失败不影响其他条；登录失效照常抛出
+     */
+    fun resealBatch(ids: Collection<Long>, a: Api, session: Long): Pair<Int, Changes.ResealResult> {
+        if (ids.isEmpty() || session != this.session) return 0 to Changes.ResealResult(emptyList(), emptySet(), emptySet(), skipped = ids.toSet())
+        val r = Changes.fetchResealed(ids, _messages.value.associateBy { it.id }, fatal = { it is UnauthorizedException },
+            cancelled = { a.wasCancelled || session != this.session }) { id ->
+            a.withChild { c -> try { c.message(id) } catch (e: ApiException) { if (e.status == 404) null else throw e } }
+        }
+        val n = if (r.accepted.isEmpty()) 0 else replaceMessages(E2EHub.decrypt(r.accepted), session)
+        return n to r
+    }
+
+    /**
+     * 被服务器补加密的消息（变更 kind sealed，§11.5）：用重新拉到、已解密的版本替换本地记录（本地没有的不加），
+     * 归档状态用服务端的；旧附件（换了新 id）的缓存文件和下载状态丢掉。返回实际替换的条数
+     */
+    fun replaceMessages(updated: List<Message>, session: Long): Int {
+        val oldAtts = synchronized(this) {
+            if (updated.isEmpty() || session != this.session) return 0
+            val byId = updated.associateBy { it.id }
+            val dropped = ArrayList<String>()
+            var n = 0
+            val next = _messages.value.map { m ->
+                val u = byId[m.id] ?: return@map m
+                if (u == m) return@map m
+                n++
+                val keep = u.attachments.mapTo(HashSet()) { it.id }
+                m.attachments.forEach { if (it.id !in keep) dropped += it.id }
+                u
+            }
+            if (n == 0) return 0
+            _messages.value = next
+            // 服务器上又有了（加密后的）这条消息：不再算「仅本机保留」
+            val keep = store.keepLocal
+            if (keep.any { it in byId }) store.keepLocal = keep - byId.keys
+            version++
+            scheduleSave()
+            dropped to n
+        }
+        val (dropped, n) = oldAtts
+        if (dropped.isNotEmpty()) {
+            AttDownloads.forget(dropped)
+            scope.launch { store.deleteAttachmentFiles(dropped) }
+        }
+        return n
     }
 
     /**

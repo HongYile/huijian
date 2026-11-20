@@ -3,7 +3,7 @@ import UIKit
 import UniformTypeIdentifiers
 
 // 设置 →「管理」：Pushkey、账户与设备、频道。和 Mac 客户端的「Pushkey」「账户」页、侧栏频道菜单对齐。
-// 权限以服务端为准：操作失败时直接显示服务端返回的说明（例如没有「允许管理」时不能设置初始密码、不能移除有管理权限的设备）；
+// 权限以服务端为准：操作失败时直接显示服务端返回的说明。客户端没有任何服务器管理入口（服务端 0.9.0 起管理后台只能在服务器上进入）；
 // 旧服务端没有某个接口时显示「需要服务端 x 以上」。危险操作（吊销、删除、移除设备）都要二次确认。
 
 /// 操作结果提示（页面顶部）
@@ -400,7 +400,7 @@ struct KeyDetailView: View {
         let ex = ManageRules.sendExamples(server: model.settings.server, key: key.key)
         Form {
             if gone {
-                Section { Label("这把 key 已在其他设备或管理后台删除", systemImage: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning) }
+                Section { Label("这把 key 已在其他设备上删除", systemImage: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning) }
             } else if key.isRevoked {
                 Section { Label("这把 key 已吊销，不能再发送", systemImage: "nosign").foregroundStyle(Theme.danger) }
             }
@@ -458,7 +458,8 @@ struct KeyDetailView: View {
                     .disabled(testing)
                 }
             } header: { Text("发送示例") } footer: {
-                Text("参数见文档：text 标题、desp 正文（回笺 Markdown）、priority 0–5、topic 频道，也可以带附件。")
+                Text("参数见文档：text 标题、desp 正文（回笺 Markdown）、priority 0–5、topic 频道，也可以带附件。"
+                     + (model.e2eAccountEnabled ? "用普通 pushkey 发来的消息，服务器收到后立即加密保存；想让服务器完全看不到内容，发送端请改用加密发送密钥。" : ""))
             }
             if !key.isRevoked && !gone {
                 Section {
@@ -646,7 +647,8 @@ struct AccountManageView: View {
                     ProgressView()
                 }
                 .accessibilityLabel("正在读取账号信息")
-            } else if hasPassword == true || model.canAdmin != false {
+            } else {
+                // 没有密码的账号：本账号的任何设备都能设置初始密码（服务端 0.9.0 起不再要求管理权限）
                 NavigationLink {
                     CredentialsView(hasPassword: hasPassword == true, initialName: name) { a in
                         notice = .init(text: "已保存")
@@ -660,8 +662,8 @@ struct AccountManageView: View {
         } header: {
             Text("账号")
         } footer: {
-            if hasPassword == false && model.canAdmin == false {
-                Text("这个账号还没有密码。为了安全，初始密码只能在开启了「允许管理」的设备上设置，或由管理员在管理网页的「账号」页设置。")
+            if hasPassword == false {
+                Text("这个账号还没有密码。设置用户名和密码后，就能在新设备上登录，并自动开启端到端加密。")
             } else {
                 Text("用户名和密码用来在新设备上登录，pushkey 和历史消息都在账号里。")
             }
@@ -690,7 +692,7 @@ struct AccountManageView: View {
         } header: {
             Text("我的设备")
         } footer: {
-            Text("同一台设备重新配对或登录时沿用原来的记录，不会重复出现。左滑可以移除其他设备；没有「允许管理」的设备不能移除有管理权限的设备。")
+            Text("同一台设备重新配对或登录时沿用原来的记录，不会重复出现。左滑可以移除其他设备。")
         }
     }
 
@@ -707,18 +709,11 @@ struct AccountManageView: View {
             LabeledContent("设备 ID") {
                 Text(model.settings.deviceID).font(.footnote.monospaced()).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
             }
-            LabeledContent("允许管理服务器") {
-                switch model.canAdmin {
-                case .some(true): Label("已开启", systemImage: "checkmark.circle.fill").foregroundStyle(Theme.success)
-                case .some(false): Text("未开启").foregroundStyle(Theme.text2)
-                case .none: Text("未知").foregroundStyle(Theme.text3)
-                }
-            }
         } header: {
             Text("本机")
         } footer: {
             Text(model.supports("me.rename") == false ? "修改名称需要服务端 0.4.2 以上。"
-                 : "名称可以随时修改、可以重名。「允许管理」是服务器级权限，在管理网页的「设备」页开启；管理自己账号的 pushkey、频道不需要它。")
+                 : "名称可以随时修改、可以重名。")
         }
     }
 
@@ -756,7 +751,7 @@ struct AccountManageView: View {
         do {
             try await model.renameDevice(nameDraft)
             nameDraft = model.settings.deviceName
-            notice = .init(text: "本机名称已保存，其他设备和管理后台里也会显示新名称")
+            notice = .init(text: "本机名称已保存，其他设备里也会显示新名称")
             await load()
         } catch {
             notice = .failed("保存失败", error)
@@ -937,7 +932,7 @@ struct CredentialsView: View {
             onSaved(a)
             dismiss()
         } catch {
-            // 服务端的说明直接显示：当前密码不对、用户名已被使用、没有管理权限不能设置初始密码……
+            // 服务端的说明直接显示：当前密码不对、用户名已被使用……
             self.error = shortError(error)
         }
     }
@@ -994,7 +989,7 @@ private struct PairCodeSection: View {
         } header: {
             Text("添加设备到这个账号")
         } footer: {
-            Text("新设备在登录页选「配对码」输入这 6 位数字，直接进入这个账号（3 分钟内有效，只能用一次，新设备没有服务器管理权限）。重新生成后，之前的配对码立即作废。")
+            Text("新设备在登录页选「配对码」输入这 6 位数字，直接进入这个账号（3 分钟内有效，只能用一次）。重新生成后，之前的配对码立即作废。")
         }
         .task(id: code) { await watch() }
         .task {

@@ -90,7 +90,7 @@ class ApiIntegrationTest {
             val saved = api.setCredentials(a.username.ifBlank { "it-user" }, if (a.hasPassword) "" else "it-password-1", "")
             assertTrue(saved.username.isNotBlank())
         } catch (e: ApiException) {
-            // 没有「允许管理」的设备不能给没有密码的账号设密码；已有密码时要当前密码：服务端给出说明
+            // 已有密码时要当前密码；0.9.0 以前的服务端上，没有「允许管理」的设备也不能设初始密码（0.9.0 起本账号任何设备都能设）：服务端给出说明
             assertEquals(403, e.status); assertFalse(me.optBoolean("can_admin") && !a.hasPassword); assertTrue(e.message!!.isNotBlank())
         }
         // 用户名太短：有权限时 400；没权限时服务端先报权限（403），两种都带说明

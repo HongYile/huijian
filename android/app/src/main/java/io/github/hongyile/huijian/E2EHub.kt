@@ -58,8 +58,28 @@ object E2EHub {
      */
     val pendingRecovery: StateFlow<Pair<String, Boolean>?> = _pendingRecovery.asStateFlow()
     private val _setupPending = MutableStateFlow(false)
-    /** 本机存着进行中的开启（服务器上还没开启）：加密页提示重试 */
+    /** 本机存着进行中的开启（服务器上还没开启）或重置：加密页提示重试 */
     val setupPending: StateFlow<Boolean> = _setupPending.asStateFlow()
+    private val _keyChanged = MutableStateFlow(false)
+    /** 钉住的公钥不是服务器启用中的钥匙（别的设备重置过加密，§11.3、§11.4）：加密页显示 T46，引导用密码或恢复码解锁 */
+    val keyChanged: StateFlow<Boolean> = _keyChanged.asStateFlow()
+    private val _weakPassword = MutableStateFlow(false)
+    /** 自动开启加密时密码偏弱（§11.1 第 5 步）：加密页显示 T24 */
+    val weakPassword: StateFlow<Boolean> = _weakPassword.asStateFlow()
+    private val _autoState = MutableStateFlow(AutoState.IDLE)
+    /** 自动开启加密的进度（§11.1）：加密页显示「正在开启加密…」或失败说明，并保留手动开启入口 */
+    val autoState: StateFlow<AutoState> = _autoState.asStateFlow()
+
+    enum class AutoState { IDLE, RUNNING, FAILED }
+    private val _autoPrompt = MutableStateFlow(false)
+    /** 首页提示条 T67（§11.1 末尾）：账号还没开启加密、服务端支持自动开启，本机内存里却没有密码凭证 */
+    val autoPrompt: StateFlow<Boolean> = _autoPrompt.asStateFlow()
+    private val _setPasswordRequested = MutableStateFlow(false)
+    /** 点了提示条 T67、账号还没有密码：账户页打开后直接弹出「设置用户名和密码」（一次性） */
+    val setPasswordRequested: StateFlow<Boolean> = _setPasswordRequested.asStateFlow()
+    fun requestSetPassword(on: Boolean) { _setPasswordRequested.value = on }
+
+    private fun updatePrompt() { _autoPrompt.value = logic.autoPrompt(_state.value, autoCreds != null) }
     private val _tick = MutableStateFlow(0)
     /** 每次刷新完加一（包括长轮询收到 kind "e2e" 的变更）：等待核对的页面看到它变了立即再查一次 */
     val tick: StateFlow<Int> = _tick.asStateFlow()
@@ -96,13 +116,14 @@ object E2EHub {
         }
         val memOnly = if (c != null && cacheOwner == null) c else null
         val merged = if (memOnly == null) stored else Store.E2EVault(
-            stored.keys + pinCheck(o, memOnly.keys).filter { k -> stored.keys.none { it.kid == k.kid } },
+            stored.keys + pinCheck(o, memOnly.keys, memTrusted).filter { k -> stored.keys.none { it.kid == k.kid } },
             memOnly.device ?: stored.device,
             memOnly.setup ?: stored.setup,
             memOnly.recovery ?: stored.recovery,
             memOnly.rotation ?: stored.rotation,
         )
         cache = merged; cacheOwner = o
+        memTrusted = null
         if (merged != stored) persist(o, merged)
         mirror(merged)
         return merged
@@ -111,12 +132,27 @@ object E2EHub {
     /** 把保存的「进行中的开启」「还没点完成的恢复码」同步到界面状态（App 重启后回到恢复码页） */
     private fun mirror(v: Store.E2EVault) {
         if (v.recovery != null) _pendingRecovery.value = v.recovery
-        _setupPending.value = v.setup != null && _state.value?.enabled != true
+        _setupPending.value = setupVisible(v)
     }
 
-    /** 和钉住的公钥核对：对不上的丢弃并提示 T43；还没钉住时钉住第一把 */
-    private fun pinCheck(owner: String, keys: List<LocalKey>): List<LocalKey> {
+    /** 进行中的开启（服务器上还没开启时）、进行中的重置：加密页提示重试 / 正在核对 */
+    private fun setupVisible(v: Store.E2EVault): Boolean {
+        val p = v.setup ?: return false
+        return p.mode == SetupMode.RESET || _state.value?.enabled != true
+    }
+
+    /**
+     * 还不知道账号 id 时保存在内存里、来自可信来源（密码登录时解开、本机生成、密码 / 恢复码解锁）的公钥：
+     * 拿到账号 id 后用它替换钉住的公钥（§11.4）
+     */
+    @Volatile private var memTrusted: String? = null
+
+    /**
+     * 和钉住的公钥核对：trusted（可信来源的那把）直接替换钉住的公钥（§11.4）；其余对不上的丢弃并提示 T43；还没钉住时钉住第一把
+     */
+    private fun pinCheck(owner: String, keys: List<LocalKey>, trusted: String? = null): List<LocalKey> {
         if (keys.isEmpty()) return keys
+        if (trusted != null && keys.any { it.pub == trusted }) Hub.store.repin(owner, trusted)
         val pin = Hub.store.pinnedPub(owner)
         if (pin == null) { Hub.store.pin(owner, keys.first().pub); return keys }
         val ok = keys.filter { it.pub == pin }
@@ -138,37 +174,56 @@ object E2EHub {
         val o = owner()
         cache = v; cacheOwner = o        // 写盘失败（或还不知道账号 id）时这次运行里仍然可用
         if (o != null) persist(o, v)
-        _setupPending.value = v.setup != null && _state.value?.enabled != true
+        _setupPending.value = setupVisible(v)
     }
 
     // ---------- 进行中的开启、恢复码（§4.1） ----------
 
-    /** 开启加密时生成了新钥匙对和恢复码（发请求之前）：先存起来 */
+    /**
+     * 开启加密时生成了新钥匙对和恢复码（发请求之前）：先存起来。session：发起时的会话编号，
+     * 期间已经退出登录 / 换了账号时不写 Keystore，抛错中止这次请求
+     */
     @Synchronized
-    fun setupGenerated(p: SetupResult) = saveVault(vault().copy(setup = p))
+    fun setupGenerated(p: SetupResult, session: Long = Hub.session) {
+        if (session != Hub.session) throw IOException("已退出登录")
+        saveVault(vault().copy(setup = p))
+    }
 
-    /** 开启加密确认失败（4xx、确认没开启、别的设备开启了）：删除进行中的开启 */
+    /** 开启加密确认失败（4xx、确认没开启、别的设备开启了）：删除进行中的开启。mode 不为 null 时只删这种的（自动开启不能删手动开启留下的） */
     @Synchronized
-    fun dropSetup() { vault().takeIf { it.setup != null }?.let { saveVault(it.copy(setup = null)) } }
+    fun dropSetup(mode: SetupMode? = null) {
+        vault().takeIf { v -> v.setup != null && (mode == null || v.setup.mode == mode) }?.let { saveVault(it.copy(setup = null)) }
+    }
+
+    /** 进行中的开启 / 重置「还没生效」的核对（连续两次、间隔 30 秒以上才删，§4.1） */
+    private val pendingCheck = E2ELogic.PendingCheck()
+
+    /** 加密页「放弃这次开启 / 重置」：删掉这条进行中记录（本机生成的新钥匙和恢复码一起丢掉） */
+    fun abandonSetup(mode: SetupMode) { pendingCheck.clear(); dropSetup(mode) }
 
     /** 本机存着的进行中的开启（重试时先核对它） */
     fun pendingSetup(): SetupResult? = vault().setup
 
     /**
-     * 开启成功（本机发起的请求成功、或刷新状态时发现 active 公钥就是这把）：恢复码先存好、放进 App 状态，再保存私钥并钉住公钥。
-     * 已经完成过（刷新和开启页同时发现）时什么都不做。钉住的公钥对不上时丢弃（T43）
+     * 开启 / 重置成功（本机发起的请求成功、或刷新状态时发现 active 公钥就是这把）：恢复码先存好、放进 App 状态，再保存私钥。
+     * 本机生成的钥匙总是替换钉住的公钥（§11.4）；重置时旧私钥保留（解旧消息用）。
+     * 只有手动开启有恢复码、显示恢复码页；自动开启、重置没有（§11.1、§11.3）。已经完成过（刷新和开启页同时发现）时什么都不做
      */
-    fun finishSetup(p: SetupResult, st: E2EState? = null) {
+    fun finishSetup(p: SetupResult, st: E2EState? = null, session: Long = Hub.session, confirmed: Boolean = false) {
         synchronized(this) {
+            if (session != Hub.session) return       // 期间已经退出登录 / 换了账号：丢弃，不写 Keystore
             val v = vault()
-            if (v.setup?.key?.pub != p.key.pub) return
+            val mine = v.setup?.key?.pub == p.key.pub
+            // confirmed：服务器刚接受了这把（请求成功）。即使进行中的槽被另一次开启覆盖了，也照样保存私钥，不能静默丢掉
+            if (!mine && !confirmed) return
+            if (!mine && v.keys.any { it.kid == p.key.kid }) return      // 已经保存过
             val o = owner()
-            val pin = o?.let { Hub.store.pinnedPub(it) }
-            if (pin != null && pin != p.key.pub) { notice.value = E2EText.T43; saveVault(v.copy(setup = null)); return }
-            if (o != null && pin == null) Hub.store.pin(o, p.key.pub)
-            val r = p.recoveryCode to true
-            saveVault(v.copy(keys = v.keys.filter { it.kid != p.key.kid } + p.key, setup = null, recovery = r))
-            _pendingRecovery.value = r
+            if (o != null) Hub.store.repin(o, p.key.pub) else memTrusted = p.key.pub
+            val r = if (p.mode == SetupMode.MANUAL && p.recoveryCode.isNotEmpty()) p.recoveryCode to true else null
+            pendingCheck.clear()
+            saveVault(v.copy(keys = v.keys.filter { it.kid != p.key.kid } + p.key, setup = if (mine) null else v.setup, recovery = r ?: v.recovery))
+            if (r != null) _pendingRecovery.value = r
+            _autoState.value = AutoState.IDLE
         }
         st?.let { _state.value = it }
         recompute()
@@ -229,7 +284,11 @@ object E2EHub {
     fun activeSk(): String? = if (_status.value == E2EStatus.UNLOCKED) accountKey()?.sk else null
 
     private fun recompute() {
-        _status.value = if (unsupported) E2EStatus.UNSUPPORTED else logic.status(_state.value, vault().keys, pinned())
+        val pin = pinned()
+        _status.value = if (unsupported) E2EStatus.UNSUPPORTED else logic.status(_state.value, vault().keys, pin)
+        _keyChanged.value = !unsupported && logic.pinStale(_state.value, pin)
+        _weakPassword.value = owner()?.let { Hub.store.weakPassword(it) } ?: false
+        updatePrompt()
         healLocked()
     }
 
@@ -271,18 +330,23 @@ object E2EHub {
     }
 
     /**
-     * 保存一把核对过的私钥（§4.5 的服务器 keys 核对已在 E2ELogic.verify 里做过），再和钉住的公钥核对（对不上 → T43，不保存）；
-     * 还没钉住时钉住它。重新计算状态，并把还没解开的消息重新解密。返回是否保存了
+     * 保存一把核对过的私钥（§4.5 的服务器 keys 核对已在 E2ELogic.verify 里做过）。
+     * trusted（密码登录时解开、密码解锁、恢复码解锁，§11.4）：替换钉住的公钥；
+     * 否则（设备批准拿到的）和钉住的公钥核对（对不上 → T43，不保存），还没钉住时钉住它。
+     * 重新计算状态，并把还没解开的消息重新解密。返回是否保存了
      */
-    fun adopt(key: LocalKey, st: E2EState? = null, dropDevice: Boolean = false): Boolean {
+    fun adopt(key: LocalKey, st: E2EState? = null, dropDevice: Boolean = false, trusted: Boolean = false): Boolean {
         synchronized(this) {
             val v = vault()
             val o = owner()
             if (o != null) {
                 val pin = Hub.store.pinnedPub(o)
-                if (pin != null && pin != key.pub) { notice.value = E2EText.T43; return false }
-                if (pin == null) Hub.store.pin(o, key.pub)
-            }
+                if (trusted) Hub.store.repin(o, key.pub)
+                else {
+                    if (pin != null && pin != key.pub) { notice.value = E2EText.T43; return false }
+                    if (pin == null) Hub.store.pin(o, key.pub)
+                }
+            } else if (trusted) memTrusted = key.pub
             saveVault(v.copy(keys = v.keys.filter { it.kid != key.kid } + key, device = if (dropDevice) null else v.device))
         }
         st?.let { _state.value = it }
@@ -296,9 +360,176 @@ object E2EHub {
      * /v1/me 失败时私钥留在内存里，下次刷新拿到账号 id 后保存，不会丢
      */
     fun afterLogin(o: LoginOutcome, api: Api?) {
-        if (api != null) runCatching { ensureAccount(api) }
-        o.keys.forEach { adopt(it) }
+        // 有刚解开 / 刚生成的私钥时，尽量在进程被杀之前拿到账号 id、把私钥写进 Keystore：/v1/me 失败短退避重试 2 次
+        // （仍失败时私钥留在内存里，下次刷新再存；就算丢了，之后也能用密码解锁）
+        if (api != null) {
+            val tries = if (o.keys.isEmpty()) 1 else 3
+            for (i in 0 until tries) {
+                if (runCatching { ensureAccount(api) }.getOrDefault(0L) > 0) break
+                if (i < tries - 1) Thread.sleep(if (i == 0) 500L else 1500L)
+            }
+        }
+        o.keys.forEach { adopt(it, trusted = true) }      // 用这次的密码解开的：可以替换钉住的公钥（§11.4）
         if (o.notice != null) notice.value = o.notice
+        // 登录时已经解开了钥匙（账号早已开启）：凭证用完即弃，不留在内存里；否则留给自动开启
+        if (o.keys.isEmpty()) notePasswordKeys(Hub.store.loginUsername, o.pre, o.weak)
+        else { owner()?.let { Hub.store.setWeakPassword(it, o.weak) }; _weakPassword.value = o.weak }
+    }
+
+    // ---------- 默认自动加密（§11.1） ----------
+
+    /** 这次用密码登录 / 注册 / 设置初始密码算出的 salt、auth、unlock（只在内存里，属于哪个会话）。配对码登录的设备没有，不自动开启 */
+    private class AutoCreds(val session: Long, val username: String, val pre: PreKeys, val weak: Boolean)
+    @Volatile private var autoCreds: AutoCreds? = null
+        set(v) { field = v; updatePrompt() }
+    private val autoLock = Any()
+    private var autoRunning = false
+    /** 连续失败次数和下一次自动重试的时间（elapsedRealtime 毫秒，AutoRetry 退避） */
+    @Volatile private var autoFails = 0
+    @Volatile private var autoNextAt = 0L
+    private fun nowMs() = android.os.SystemClock.elapsedRealtime()
+
+    /**
+     * 登录 / 注册 / 设置初始密码之后（Hub.signedIn 之后）：记下这次的凭证，下次刷新时账号还没开启加密就在后台开启；
+     * 顺带记下密码是否偏弱（T24，知道账号 id 时）
+     */
+    fun notePasswordKeys(username: String, pre: PreKeys?, weak: Boolean) {
+        if (pre == null || username.isBlank()) return
+        autoFails = 0; autoNextAt = 0L          // 新输入了密码：立即重试
+        autoCreds = AutoCreds(Hub.session, username, pre, weak)
+        owner()?.let { Hub.store.setWeakPassword(it, weak) }
+        _weakPassword.value = weak
+    }
+
+    /**
+     * 后台自动开启加密（§11.1）：不生成恢复码、不换密码，复用这次的凭证。409（别的设备刚开启了）→ 用这次的凭证解锁。
+     * 本机有手动开启留下的进行中记录（带恢复码）时跳过，先按 §4.1 核对完成，自动开启不能删掉它。
+     * 失败不影响登录：凭证留在内存里，按 AutoRetry 退避重试；403 / 429 停止自动重试、丢掉凭证，等下次输入密码。
+     * 期间退出登录：结果丢弃，不写 Keystore。返回状态是否变了（开启了 / 解锁了），调用方再刷新一次。
+     * rethrow：提示条 T67 的小窗里调用，失败照常抛出
+     */
+    private fun autoEnable(api: Api, a: AutoCreds, rethrow: Boolean = false): Boolean {
+        if (setupInFlight || vault().setup?.let { it.mode != SetupMode.AUTO } == true) {
+            // 手动开启 / 重置正在进行，或者留下了结果还没确认的记录：自动开启不动它，凭证也不留（用完即弃）
+            if (autoCreds === a) autoCreds = null
+            if (rethrow) throw E2EError(if (setupInFlight) E2EText.AUTO_RUNNING else E2EText.AUTO_PENDING)
+            return false
+        }
+        synchronized(autoLock) {
+            if (autoRunning) { if (rethrow) throw E2EError(E2EText.AUTO_RUNNING); return false }
+            autoRunning = true
+        }
+        _autoState.value = AutoState.RUNNING
+        try {
+            val r = logic.setup(api, Hub.store.server, a.username, "", null,
+                pending = vault().setup?.takeIf { it.mode == SetupMode.AUTO },
+                onGenerated = { setupGenerated(it, a.session) }, mode = SetupMode.AUTO, pre = a.pre)
+            if (a.session != Hub.session) return false
+            finishSetup(r, session = a.session, confirmed = true)
+            done(a)
+            return true
+        } catch (e: UnauthorizedException) {
+            _autoState.value = AutoState.IDLE
+            throw e
+        } catch (e: Exception) {
+            if (a.session != Hub.session) return false
+            if (e is E2EError && e.kind == E2EError.Kind.CONFLICT) {
+                dropSetup(SetupMode.AUTO)
+                try {
+                    val key = logic.unlockWithKeys(api, a.pre.auth, a.pre.unlock)
+                    if (a.session != Hub.session) return false
+                    adopt(key, trusted = true)
+                    done(a)
+                    return true
+                } catch (x: UnauthorizedException) {
+                    _autoState.value = AutoState.IDLE
+                    throw x
+                } catch (x: Exception) {
+                    failed(a, x)
+                    if (rethrow) throw x
+                    return false
+                }
+            }
+            // 结果不明：留着进行中的开启，下次刷新时核对；确定失败（4xx、确认没开启）：删掉自己留下的
+            val unsure = e is E2EError && e.kind == E2EError.Kind.SETUP_UNSURE
+            val definite = e is E2EError || (e is ApiException && e.status in 400..499)
+            if (!unsure && definite) dropSetup(SetupMode.AUTO)
+            failed(a, e)
+            if (rethrow) throw e
+            return false
+        } finally {
+            synchronized(autoLock) { autoRunning = false }
+        }
+    }
+
+    /** 自动开启失败：退避；密码不对 / 太频繁时停止自动重试（丢掉凭证，首页出现提示条 T67） */
+    private fun failed(a: AutoCreds, e: Throwable) {
+        autoFails++
+        autoNextAt = nowMs() + AutoRetry.delayMs(autoFails)
+        if (AutoRetry.stops(e) && autoCreds === a) autoCreds = null
+        _autoState.value = AutoState.FAILED
+    }
+
+    private fun done(a: AutoCreds) {
+        if (autoCreds === a) autoCreds = null       // 开启 / 解锁成功后不再留着凭证（用完即弃）
+        autoFails = 0; autoNextAt = 0L
+        owner()?.let { Hub.store.setWeakPassword(it, a.weak) }
+        _autoState.value = AutoState.IDLE
+        recompute()
+    }
+
+    /**
+     * 重置加密 / 更换加密钥匙（§11.3，T45 确认之后，在 work 里调用）：不换密码、不生成恢复码。新钥匙对先存进 Keystore；
+     * 结果不明时留着（SETUP_UNSURE），刷新时核对。成功后新公钥替换钉住的，本机旧私钥保留（解旧消息用）；
+     * 本机进行中的批准请求一并取消。管理员重设过密码（账号回到旧登录方式）时也能用
+     */
+    fun reset(net: Api, username: String, password: String) {
+        val session = Hub.session
+        setupInFlight = true
+        val r = try {
+            logic.setup(net, Hub.store.server, username, password, null, pending = vault().setup?.takeIf { it.mode == SetupMode.RESET },
+                onGenerated = { setupGenerated(it, session) }, mode = SetupMode.RESET, allowLegacy = true)
+        } catch (e: E2EError) {
+            if (e.kind != E2EError.Kind.SETUP_UNSURE && session == Hub.session) dropSetup(SetupMode.RESET)
+            throw e
+        } catch (e: ApiException) {
+            if (session == Hub.session) dropSetup(SetupMode.RESET)
+            throw e
+        } finally {
+            setupInFlight = false
+        }
+        if (session != Hub.session) throw IOException("已退出登录")       // 期间退出登录：结果丢弃，不写 Keystore
+        finishSetup(r, session = session, confirmed = true)
+        passwordChanged(weak = logic.weakPassword(password, username))
+        request?.let { req -> runCatching { req.cancel(net) }; if (request === req) { request = null; _requestStep.value = null } }
+        runCatching { refresh(net) }
+    }
+
+    /**
+     * 提示条 T67 点开后输入了当前密码（§11.1 末尾，在 work 里调用）：按 §2.4 算出凭证，走自动开启（第 1–6 步）。
+     * 密码不对（T3）等失败照常抛出，小窗里显示；成功后刷新，提示条消失
+     */
+    fun enableWithPassword(api: Api, username: String, password: String) {
+        val st = E2EState.parse(api.e2eState())
+        setState(st)
+        if (st.enabled) return       // 别的设备刚开启了：提示条消失，本机转为「已锁定」
+        // 有手动开启留下的、结果还没确认的记录：不算凭证、不存，提示条保留
+        if (setupInFlight || vault().setup?.let { it.mode != SetupMode.AUTO } == true) throw E2EError(E2EText.AUTO_PENDING)
+        val pre = logic.autoKeys(api, Hub.store.server, username, password)
+        val a = AutoCreds(Hub.session, username, pre, logic.weakPassword(password, username))
+        autoFails = 0; autoNextAt = 0L
+        autoCreds = a
+        autoEnable(api, a, rethrow = true)
+        runCatching { refresh(api) }
+    }
+
+    /** 本机又输入了一次这个账号的密码（解锁等）：按这次的密码重新判断 T24（别的设备改了密码时本机无法知道，只能等下次输入） */
+    fun notePasswordStrength(password: String, username: String) = passwordChanged(weak = logic.weakPassword(password, username))
+
+    /** 改了密码（新密码通过了强度检查）：去掉「密码偏弱」提示（T24） */
+    fun passwordChanged(weak: Boolean = false) {
+        owner()?.let { Hub.store.setWeakPassword(it, weak) }
+        _weakPassword.value = weak
     }
 
     /** 界面拿到新状态（开启加密、解锁、改设置之后） */
@@ -329,6 +560,13 @@ object E2EHub {
         _approvalStages.value = emptyMap()
         _pendingRecovery.value = null
         _setupPending.value = false
+        _keyChanged.value = false
+        _weakPassword.value = false
+        _autoState.value = AutoState.IDLE
+        autoCreds = null
+        _autoPrompt.value = false
+        _setPasswordRequested.value = false
+        memTrusted = null
         _state.value = null
         unsupported = false
         _status.value = E2EStatus.UNKNOWN
@@ -356,7 +594,7 @@ object E2EHub {
             } else E2EState.parse(api.e2eState())
         } catch (e: ApiException) {
             if (!e.oldServer) throw e
-            if (session == Hub.session) { unsupported = true; _state.value = null; recompute() }
+            if (session == Hub.session) { unsupported = true; _state.value = null; autoCreds = null; recompute() }
             return null
         } catch (e: E2EError) {
             // 重新开始时账号公钥对不上（T43）等：这次请求结束，等待页显示原因和「重新请求」
@@ -373,14 +611,19 @@ object E2EHub {
             .forEach { Hub.store.upgradeFlags.markUpgraded(Hub.store.server, it) }
         // 进行中的开启（§4.1）：每次刷新都核对，不等用户再点「开启」（开启成功后那个按钮就不显示了）
         vault().setup?.let { p ->
-            when (logic.pendingSetup(st, p)) {
+            val busy = setupInFlight || synchronized(autoLock) { autoRunning }
+            when (logic.pendingSetup(st, p, inFlight = busy)) {
                 E2ELogic.PendingSetup.COMPLETE -> {
                     listOf(Hub.store.loginUsername, Hub.store.username).filter { it.isNotBlank() }.distinct()
                         .forEach { Hub.store.upgradeFlags.markUpgraded(Hub.store.server, it) }
                     finishSetup(p)
                 }
-                E2ELogic.PendingSetup.DROP -> dropSetup()
-                E2ELogic.PendingSetup.KEEP -> {}
+                E2ELogic.PendingSetup.DROP -> { pendingCheck.clear(); dropSetup() }
+                // 还没生效。自动开启留下的：同一把连续两次（间隔 30 秒以上）都这样才算确定失败（请求可能超时了、服务器还在处理），
+                // 删掉后用内存里的凭证重新开启。手动开启（带恢复码）、重置的：不自动删，只在确定失败（第三把钥匙、明确 4xx）、
+                // 用户点「放弃」、或重置超过 24 小时（pendingSetup 返回 DROP）时删
+                E2ELogic.PendingSetup.KEEP ->
+                    if (p.mode == SetupMode.AUTO && !busy && pendingCheck.notYet(p.key.pub, nowMs())) { pendingCheck.clear(); dropSetup(SetupMode.AUTO) }
             }
         }
         // 进行中的更换恢复码（§7 第 3 项）：recovery_wrap 就是这次上传的 → 成功，显示新恢复码；
@@ -389,7 +632,7 @@ object E2EHub {
             if (logic.rotationDone(st, rot)) finishRotation(rot) else if (!rotating) dropRotation(rot)
         }
         recompute()
-        _setupPending.value = vault().setup != null && !st.enabled
+        _setupPending.value = setupVisible(vault())
         // §4.5 末尾：本机有私钥、却还没钉住公钥（钉住功能之前保存的等）：用私钥重新算出公钥，是 active 的就补钉
         if (_status.value == E2EStatus.UNLOCKED && pinned() == null) owner()?.let { o ->
             accountKey()?.let { k ->
@@ -399,8 +642,32 @@ object E2EHub {
         pruneApprovals(st)
         notifyRequests(st)
         _tick.update { it + 1 }
+        // §11.1：账号还没开启加密、服务端支持（server_seal）、内存里有这次登录的凭证 → 后台自动开启，成功后再刷新一次
+        // 凭证只在「还没开启、要重试」时保留，其余情况用完即弃（§2.1）
+        val a = autoCreds
+        if (st.enabled) {
+            if (a != null) {
+                // 账号已经开启（别的设备开启的、或手动 / 重置的进行中记录刚核对完成）、本机还锁着：先用这次的凭证解锁，再清掉
+                if (_status.value == E2EStatus.LOCKED && a.session == session) runCatching {
+                    val key = logic.unlockWithKeys(api, a.pre.auth, a.pre.unlock)
+                    if (a.session == Hub.session) adopt(key, trusted = true)
+                }
+                autoCreds = null
+            }
+            if (_autoState.value != AutoState.IDLE) _autoState.value = AutoState.IDLE
+        } else if (a != null) {
+            when {
+                !st.serverSeal -> autoCreds = null        // 0.7 服务端：不自动开启，凭证不留
+                // 有手动开启留下的进行中记录：上面已经核对过（还没生效），自动开启不能动它，凭证不留
+                vault().setup?.let { it.mode != SetupMode.AUTO } == true -> autoCreds = null
+                a.session == session && !setupInFlight && nowMs() >= autoNextAt -> if (autoEnable(api, a)) return refresh(api)
+            }
+        }
         return st
     }
+
+    /** 本机正在发开启 / 重置加密的请求（加密页）：这期间刷新看到的旧状态不算失败，也不自动开启 */
+    @Volatile var setupInFlight = false
 
     fun refreshAsync() {
         if (!Hub.loggedIn) return
@@ -517,7 +784,12 @@ object E2EHub {
         val sk = activeSk() ?: throw E2EError("本机还没有解锁，不能批准其他设备")
         val api = Hub.api() ?: throw IOException("未登录")
         val session = Hub.session
-        try { a.approve(api, sk) } finally { if (live(a, session)) publish(a) }
+        try {
+            a.approve(api, sk)
+        } catch (e: E2EError) {
+            if (e.kind == E2EError.Kind.STALE_KEY) runCatching { refresh(api) }     // 本机钥匙已停用（T46）：刷新状态
+            throw e
+        } finally { if (live(a, session)) publish(a) }
         runCatching { refresh(api) }
     }
 

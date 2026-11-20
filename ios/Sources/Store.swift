@@ -174,7 +174,7 @@ struct Settings {
         get { (d.object(forKey: "accountID") as? NSNumber)?.int64Value }
         nonmutating set { if let newValue { d.set(NSNumber(value: newValue), forKey: "accountID") } else { d.removeObject(forKey: "accountID") } }
     }
-    /// 账号开启了端到端加密（上次 GET /v1/e2e 的结果）：离线时明文消息也能标「未加密」
+    /// 账号开启了端到端加密（上次 GET /v1/e2e 的结果）：离线时本机保留的旧明文消息也能标「未加密」
     var e2eEnabled: Bool {
         get { d.bool(forKey: "e2eEnabled") }
         nonmutating set { if newValue { d.set(true, forKey: "e2eEnabled") } else { d.removeObject(forKey: "e2eEnabled") } }
@@ -210,6 +210,11 @@ struct Settings {
     var e2eWeakAccounts: [String] {
         get { d.stringArray(forKey: "e2eWeakAccounts") ?? [] }
         nonmutating set { if newValue.isEmpty { d.removeObject(forKey: "e2eWeakAccounts") } else { d.set(Array(newValue.suffix(20)), forKey: "e2eWeakAccounts") } }
+    }
+    /// 首页「设置恢复码」建议（T23，§11.2）点过「以后再说」的账号（「服务器#账号 id」）。退出登录不清，同一账号再登录不再提示
+    var e2eRecoveryHintDismissed: [String] {
+        get { d.stringArray(forKey: "e2eRecoveryHintDismissed") ?? [] }
+        nonmutating set { if newValue.isEmpty { d.removeObject(forKey: "e2eRecoveryHintDismissed") } else { d.set(Array(newValue.suffix(20)), forKey: "e2eRecoveryHintDismissed") } }
     }
     /// 已经通知过的设备批准请求（T50，同一个请求只通知一次）
     var e2eNotified: [String] {

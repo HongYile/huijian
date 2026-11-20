@@ -72,12 +72,17 @@ class Store(private val ctx: Context) {
         set(v) = prefs.edit().putLong("lastContact", v).apply()
 
     /**
-     * 「仅本机保留」的消息 id：服务器上已被「删除服务器上的明文消息」删掉（变更 kind purge），本机副本保留，
+     * 「仅本机保留」的消息 id：服务器上删掉的明文消息（变更 kind purge（0.8 以前的「删除服务器上的明文消息」，0.9.0 起客户端没有这个入口；服务端可能还会发，保留兼容）），本机副本保留，
      * 对账时不当作被删除（e2ee-client.md §7.4）。之后普通删除时移出。换账号、退出登录时清掉
      */
     var keepLocal: Set<Long>
         get() = prefs.getString("keepLocal", "").orEmpty().split(',').mapNotNullTo(HashSet()) { it.toLongOrNull() }
         set(v) = prefs.edit().putString("keepLocal", v.joinToString(",")).apply()
+
+    /** 被服务器补加密、还没拉成的消息 id → 连续失败次数（变更 kind sealed，§11.5）：变更游标照常前进，这些留着下次同步时重试 */
+    var sealedRetry: Map<Long, Int>
+        get() = Changes.decodeRetry(prefs.getString("sealedRetry", "").orEmpty())
+        set(v) = prefs.edit().putString("sealedRetry", Changes.encodeRetry(v)).apply()
 
     @Volatile private var tokenCache: String? = null
     val hasToken get() = tokenCache != null || prefs.contains("tokenEnc")
@@ -145,7 +150,7 @@ class Store(private val ctx: Context) {
     fun clearMessages() {
         file.delete()
         File(ctx.cacheDir, "att").deleteRecursively()     // 附件缓存：换账号后不能留着上一个账号的文件
-        prefs.edit().remove("cursor").remove("initialSyncDone").remove("changesCursor").remove("changesEpoch").remove("keepLocal").remove("accountId").commit()
+        prefs.edit().remove("cursor").remove("initialSyncDone").remove("changesCursor").remove("changesEpoch").remove("keepLocal").remove("sealedRetry").remove("accountId").commit()
     }
 
     /** 删除这些附件已下载的文件（消息被其他设备删除、或超过 3000 条被淘汰时） */
@@ -203,8 +208,10 @@ class Store(private val ctx: Context) {
             .map { LocalKey(it.optString("kid"), it.optString("pub"), it.optString("sk")) }.filter { it.sk.isNotEmpty() }
         val d = o.optJSONObject("device")?.let { Core.KeyPair(it.optString("sk"), it.optString("pub"), it.optString("kid")) }
         val setup = o.optJSONObject("setup")?.let {
-            SetupResult(LocalKey(it.optString("kid"), it.optString("pub"), it.optString("sk")), it.optString("code"))
-        }?.takeIf { it.key.sk.isNotEmpty() && it.recoveryCode.isNotEmpty() }
+            val mode = runCatching { SetupMode.valueOf(it.optString("mode")) }.getOrDefault(SetupMode.MANUAL)
+            SetupResult(LocalKey(it.optString("kid"), it.optString("pub"), it.optString("sk")), it.optString("code"), mode, it.optString("replaces"),
+                it.optLong("created_at").takeIf { t -> t > 0 } ?: System.currentTimeMillis())
+        }?.takeIf { it.key.sk.isNotEmpty() && (it.mode != SetupMode.MANUAL || it.recoveryCode.isNotEmpty()) }   // 自动开启、重置没有恢复码
         val rec = o.optJSONObject("recovery")?.let { it.optString("code") to it.optBoolean("enabled") }?.takeIf { it.first.isNotEmpty() }
         val rot = o.optJSONObject("rotation")?.let { RecoveryRotation(it.optString("code"), it.optString("wrap")) }
             ?.takeIf { it.code.isNotEmpty() && it.wrap.isNotEmpty() }
@@ -217,7 +224,8 @@ class Store(private val ctx: Context) {
         val o = JSONObject().put("owner", owner)
             .put("keys", JSONArray().apply { v.keys.forEach { put(JSONObject().put("kid", it.kid).put("pub", it.pub).put("sk", it.sk)) } })
         v.device?.let { o.put("device", JSONObject().put("sk", it.sk).put("pub", it.pub).put("kid", it.kid)) }
-        v.setup?.let { o.put("setup", JSONObject().put("sk", it.key.sk).put("pub", it.key.pub).put("kid", it.key.kid).put("code", it.recoveryCode)) }
+        v.setup?.let { o.put("setup", JSONObject().put("sk", it.key.sk).put("pub", it.key.pub).put("kid", it.key.kid).put("code", it.recoveryCode)
+            .put("mode", it.mode.name).put("replaces", it.replaces).put("created_at", it.createdAt)) }
         v.recovery?.let { o.put("recovery", JSONObject().put("code", it.first).put("enabled", it.second)) }
         v.rotation?.let { o.put("rotation", JSONObject().put("code", it.code).put("wrap", it.wrap)) }
         check(prefs.edit().putString("e2eEnc", encrypt(o.toString())).commit()) { "保存加密钥匙失败" }
@@ -242,6 +250,18 @@ class Store(private val ctx: Context) {
 
     fun pin(owner: String, pub: String) {
         if (pinnedPub(owner) == null) prefs.edit().putString("e2ePin:$owner", pub).commit()
+    }
+
+    /** 用可信来源（本机生成、密码解锁、恢复码解锁，§11.4）拿到的私钥替换钉住的公钥 */
+    fun repin(owner: String, pub: String) {
+        if (pinnedPub(owner) != pub) prefs.edit().putString("e2ePin:$owner", pub).commit()
+    }
+
+    /** 自动开启加密时密码偏弱（§11.1：加密页显示 T24）；按 owner 记，改密码后清除 */
+    fun weakPassword(owner: String): Boolean = prefs.getBoolean("e2eWeak:$owner", false)
+
+    fun setWeakPassword(owner: String, weak: Boolean) {
+        if (weak) prefs.edit().putBoolean("e2eWeak:$owner", true).apply() else prefs.edit().remove("e2eWeak:$owner").apply()
     }
 
     /** 「这个服务器上的这个账号已升级」（UpgradeFlags.key）：退出登录也不删 */

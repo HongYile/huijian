@@ -119,4 +119,73 @@ class ManageTest {
         assertEquals(listOf("a", "b"), Manage.moved(listOf("a", "b"), 0, 5))
         assertFalse(Manage.moved(listOf(1, 2), 0, 1) === listOf(1, 2))
     }
+
+    /** /v1/info 的注册方式：register 字段优先；旧服务端看 register_open；认不出的按关闭 */
+    @Test fun registerMode() {
+        assertEquals(RegisterMode.OPEN, Manage.registerMode(JSONObject().put("register", "open")))
+        assertEquals(RegisterMode.INVITE, Manage.registerMode(JSONObject().put("register", "invite").put("register_open", false)))
+        assertEquals(RegisterMode.CLOSED, Manage.registerMode(JSONObject().put("register", "closed").put("register_open", true)))
+        assertEquals(RegisterMode.CLOSED, Manage.registerMode(JSONObject().put("register", "vip-only")))
+        assertEquals(RegisterMode.OPEN, Manage.registerMode(JSONObject().put("register_open", true)))
+        assertEquals(RegisterMode.CLOSED, Manage.registerMode(JSONObject().put("register_open", false)))
+        assertEquals(RegisterMode.CLOSED, Manage.registerMode(JSONObject()))
+        // 要邀请码时必填，只有空白也算没填；其他方式不要
+        assertEquals("请填写邀请码", Manage.inviteProblem(RegisterMode.INVITE, ""))
+        assertEquals("请填写邀请码", Manage.inviteProblem(RegisterMode.INVITE, "  "))
+        assertNull(Manage.inviteProblem(RegisterMode.INVITE, "HJ-1"))
+        assertNull(Manage.inviteProblem(RegisterMode.OPEN, ""))
+    }
+
+    /** 注册即开启加密（register.e2e）：看 /v1/info 的 features（对象数组，也兼容字符串数组） */
+    @Test fun registerWithKeysFeature() {
+        val info = JSONObject("""{"features":[{"id":"register.invite"},{"id":"register.e2e","title":"注册即开启加密","since":"0.9.0"}]}""")
+        assertTrue(Manage.registerWithKeys(info)); assertTrue(Manage.hasFeature(info, "register.invite"))
+        assertFalse(Manage.registerWithKeys(JSONObject("""{"features":[{"id":"e2e.auto"}]}""")))
+        assertFalse(Manage.registerWithKeys(JSONObject()))
+        assertTrue(Manage.registerWithKeys(JSONObject("""{"features":["register.e2e"]}""")))
+    }
+
+    /** 登录页注册相关的显示：正在读 / 读不到 /v1/info / closed / invite / open */
+    @Test fun registerUi() {
+        val tog = RegisterUi.EntryTap.TOGGLE; val fetch = RegisterUi.EntryTap.FETCH_INFO
+        val login = RegisterUi.SubmitPlan.LOGIN; val reg = RegisterUi.SubmitPlan.REGISTER; val need = RegisterUi.SubmitPlan.NEED_INFO
+        // 正在读（或地址还没填好）：什么都不显示；之前点过注册时注册表单照样显示，提交前先读
+        val loading = Manage.registerUi(null)
+        assertFalse(loading.showEntry); assertNull(loading.closedNote); assertFalse(loading.withKeys)
+        assertFalse(loading.entryVisible(false)); assertTrue(loading.entryVisible(true))
+        assertEquals(login, loading.submitPlan(false, false))
+        assertTrue(loading.registering(true, false)); assertFalse(loading.needInvite(true))
+        assertEquals(need, loading.submitPlan(true, false))
+        // 读不到（连不上、地址不对）：给注册入口，点了先重新读；不说「没开放」；注册提交前要先读到
+        val failed = Manage.registerUi(null, failed = true)
+        assertTrue(failed.showEntry); assertNull(failed.closedNote)
+        assertEquals(fetch, failed.onEntryTap(false))
+        assertEquals("已经在注册时点入口是退回登录", tog, failed.onEntryTap(true))
+        assertEquals(need, failed.submitPlan(true, false))
+        assertEquals("配对码登录不受影响", login, failed.submitPlan(true, usePair = true))
+        assertEquals("连不上服务器，请检查地址或网络后重试", Manage.INFO_UNREACHABLE)
+        // closed：没有注册入口，显示关闭说明；之前点过「注册」也不再处于注册状态，提交按登录
+        val closed = Manage.registerUi(JSONObject("""{"register":"closed","features":[{"id":"register.e2e"}]}"""))
+        assertFalse(closed.showEntry); assertEquals(Manage.REGISTER_CLOSED, closed.closedNote)
+        assertFalse(closed.registering(true, false)); assertEquals(login, closed.submitPlan(true, false))
+        assertTrue("正在注册时仍能点「已有账号？直接登录」退回", closed.entryVisible(true))
+        // invite：有注册入口；注册时显示必填邀请码框；带钥匙注册
+        val invite = Manage.registerUi(JSONObject("""{"register":"invite","register_open":false,"features":[{"id":"register.invite"},{"id":"register.e2e"}]}"""))
+        assertTrue(invite.showEntry); assertNull(invite.closedNote); assertTrue(invite.withKeys)
+        assertEquals(tog, invite.onEntryTap(false))
+        assertTrue(invite.registering(true, false)); assertTrue(invite.needInvite(true)); assertEquals(reg, invite.submitPlan(true, false))
+        assertFalse("没点注册时不显示邀请码框", invite.needInvite(invite.registering(false, false)))
+        assertFalse("配对码登录时不在注册", invite.registering(true, usePair = true))
+        // open：有注册入口，不要邀请码；没有 register.e2e 的旧服务端走旧流程
+        val open = Manage.registerUi(JSONObject("""{"register":"open"}"""))
+        assertTrue(open.showEntry); assertNull(open.closedNote); assertFalse(open.withKeys)
+        assertTrue(open.registering(true, false)); assertFalse(open.needInvite(true))
+        // 0.8 以前：只有 register_open
+        assertTrue(Manage.registerUi(JSONObject("""{"register_open":true}""")).showEntry)
+        assertEquals(Manage.REGISTER_CLOSED, Manage.registerUi(JSONObject("""{"register_open":false}""")).closedNote)
+        // 注册被拒 403 后重新读 /v1/info；其他错误不读
+        assertTrue(Manage.refetchInfoAfter(ApiException(403, "邀请码已用完")))
+        assertFalse(Manage.refetchInfoAfter(ApiException(409, "这个用户名已被使用")))
+        assertFalse(Manage.refetchInfoAfter(java.io.IOException("timeout")))
+    }
 }

@@ -2,13 +2,33 @@
 # 临时数据目录、127.0.0.1:28790（公网 API）/ 28791（管理后台），账号 me / demo-pass-1，
 # 4 把 pushkey、十几条演示消息（含图片、PDF、压缩包附件；一条覆盖全部回笺 Markdown 语法的报告，tests/markdown_demo.md），频道设置（train 改名「训练」并置顶、infra 静音、debug 隐藏），
 # 外加一个模拟 Bark 服务器（127.0.0.1:28799，请求记录在 $T/bark.log）。
-# 另有一个只给端到端加密联网自检用的账号 e2etest（管理后台创建，旧方式的密码；自检会开启加密、改掉它的密码）。
-# 导出：PUB ADM DEMO_USER DEMO_PASS E2E_USER E2E_PASS BARK_URL T HUB BARK_PID
+# 服务端 0.9.0 起账号只能注册产生、注册即开启加密：演示账号用 huijian invite new + huijian register 建（不设恢复码），
+# 它的第一台设备「我的 MacBook」的 token 只写进 $T/demo.token，用来建 pushkey、改频道设置。演示消息用普通 pushkey 发，
+# 服务器代加密保存（sealed: "server"，客户端标「明文发送」）。
+# 另给端到端加密联网自检一个可用多次的邀请码（$T/e2e.invite）和一个还没注册的账号名 / 密码，由自检自己注册。
+# 邀请码、token 只写文件，不打印。
+# 测试数据目录：$T（默认 ios/test-run）、$DEMO（默认 /tmp/huijian-ios-test），可用 HUIJIAN_TEST_DIR / HUIJIAN_TEST_DATA 改到别处。
+# 导出：PUB ADM J DEMO DEMO_USER DEMO_PASS DT E2E_USER E2E_PASS E2E_INVITE BARK_URL T HUB BARK_PID
 set -u
+# rm -rf 的保护：只删 /tmp 下、名为 test-run 的目录，或者 hub.sh 自己建的测试目录（里面有 .huijian-test-dir 标记）。
+# 防止 HUIJIAN_TEST_DIR / HUIJIAN_TEST_DATA 被误设成真实的数据目录
+wipe(){ local d
+  for d in "$@"; do
+    case "$d" in ""|/|*..*) echo "❌ 测试目录不安全：「$d」"; exit 1;; esac
+    [ -e "$d" ] || continue
+    case "$d" in
+      /tmp/?*|/private/tmp/?*|test-run|*/test-run) ;;
+      *) [ -f "$d/.huijian-test-dir" ] || { echo "❌ 拒绝删除 $d：不在 /tmp 下、不叫 test-run，也不是 hub.sh 建的测试目录（没有 .huijian-test-dir）"; exit 1; };;
+    esac
+  done
+  rm -rf "$@"; }
 B=../server/bin/huijian
 (cd ../server && GOTOOLCHAIN=local go build -o bin/huijian .) || { echo "❌ 服务端编译失败"; exit 1; }
-T=test-run; F=$T/files
-DEMO=/tmp/huijian-ios-test; rm -rf "$DEMO" "$T"; mkdir -p "$DEMO/data" "$F"
+# 测试 hub 的数据、邀请码、token 都只给自己读写；结尾恢复调用方原来的 umask（本文件被 source）
+HUB_UMASK=$(umask); umask 077
+T=${HUIJIAN_TEST_DIR:-test-run}; F=$T/files
+DEMO=${HUIJIAN_TEST_DATA:-/tmp/huijian-ios-test}; wipe "$DEMO" "$T"; mkdir -p "$DEMO/data" "$F"
+touch "$DEMO/.huijian-test-dir" "$T/.huijian-test-dir"
 python3 ../server/tests/make_fixtures.py $F
 cp $F/loss.png $F/confusion.png; head -c 48000 /dev/urandom > $F/metrics.xlsx
 head -c 3200000 /dev/urandom > $F/ckpt-exp42.zip; seq 1 4000 | sed 's/^/step /' > $F/train.log
@@ -22,14 +42,27 @@ BARK_URL=http://127.0.0.1:28799/hyTestKey123
 trap 'kill $HUB $BARK_PID 2>/dev/null' EXIT
 for i in $(seq 1 50); do curl -sf $PUB/healthz >/dev/null && break; sleep 0.2; done
 curl -sf $PUB/healthz >/dev/null || { echo "❌ hub 没起来"; cat $T/hub.log; exit 1; }
+# 管理后台登录（sim_shots.sh 用它切换注册方式、发布测试版本）
 J=$T/cookies
 curl -s -c $J -o /dev/null -d "token=$(cat $DEMO/data/admin.token)" $ADM/login
-key(){ curl -s -b $J -o /dev/null -w '%{redirect_url}' -H "Origin: $ADM" --data-urlencode "name=$1" $ADM/pushkeys \
-  | python3 -c "import sys,urllib.parse as u;print(u.parse_qs(u.urlparse(sys.stdin.read()).query)['key'][0])"; }
+# 新部署默认邀请制（register = invite）。邀请码只写文件
+inv(){ HUIJIAN_DATA=$DEMO/data HUIJIAN_ADMIN_ADDR=127.0.0.1:28791 $B invite new -note "$1" -uses "$2" > "$3" 2>> $T/invite.log \
+  || { echo "❌ 生成邀请码失败"; cat $T/invite.log; exit 1; }; }
+inv "iOS 演示账号" 1 $T/demo.invite
+# 注册演示账号：注册即开启加密，本机（CLI）作为第一台设备「我的 MacBook」，token 写进 $T/demo.token
+printf '%s\n' "$DEMO_PASS" | $B register -u $PUB -invite "$(cat $T/demo.invite)" -platform macos -name "我的 MacBook" \
+  -token-out $T/demo.token $DEMO_USER > $T/register.log 2>&1 || { echo "❌ 注册演示账号失败"; cat $T/register.log; exit 1; }
+DT=$(cat $T/demo.token)
+# 端到端加密联网自检：自检用这个邀请码注册 $E2E_USER（可用多次：注册失败重试、以后加用例都够用）
+E2E_USER=e2etest; E2E_PASS='Hj-E2e-Selftest-7q!'
+inv "iOS 加密自检" 10 $T/e2e.invite
+E2E_INVITE=$(cat $T/e2e.invite)
+# pushkey 用演示账号自己的设备 token 建（POST /v1/keys）。JSON 先用 python 拼好放进变量（bash 3.2 不拆花括号）
+key(){ local body; body=$(python3 -c 'import json,sys;print(json.dumps({"name":sys.argv[1]}))' "$1")
+  curl -s -X POST -H "Authorization: Bearer $DT" -H 'Content-Type: application/json' -d "$body" $PUB/v1/keys \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["key"])'; }
 K_TRAIN=$(key "训练脚本"); K_MON=$(key "服务器监控"); K_REP=$(key "周报机器人"); K_JOB=$(key "数据采集")
-curl -s -b $J -o /dev/null -H "Origin: $ADM" --data-urlencode "username=$DEMO_USER" -d password=$DEMO_PASS $ADM/accounts/1/credentials
-E2E_USER=e2etest; E2E_PASS=e2e-old-pass-1
-curl -s -b $J -o /dev/null -H "Origin: $ADM" --data-urlencode "username=$E2E_USER" -d password=$E2E_PASS $ADM/accounts
+[ -n "$K_TRAIN" ] && [ -n "$K_MON" ] && [ -n "$K_REP" ] && [ -n "$K_JOB" ] || { echo "❌ 建 pushkey 失败"; exit 1; }
 p(){ $B push -u $PUB "$@" >/dev/null; }
 p -k $K_REP -p 3 -topic report -d "本周实验周报已生成" "周报已生成（10/06–10/12）"
 p -k $K_MON -p 2 -topic infra "nightly backup ok · 1.9 GB → NAS"
@@ -46,8 +79,8 @@ p -k $K_TRAIN -p 1 -topic debug "debug: dataloader worker 4 restarted"
 p -k $K_TRAIN -p 4 -topic train -thread exp42 -d $'## 结果\n- best val_loss **0.198** @ epoch 87\n- top-1 acc **93.4%**，比 baseline 高 1.7 个点\n- 训练用时 6.2 小时\n\n加载最佳权重：\n\n```python\nmodel.load_state_dict(torch.load("best.pt"))\nmodel.eval()\n```\n\n> 附件里有曲线、评估报告和 checkpoint。详见 [实验记录](https://example.com/exp42)。' \
   -f $F/loss.png -f $F/report.pdf -f $F/ckpt-exp42.zip -f $F/train.log "exp42 完成"
 # 覆盖全部回笺 Markdown 语法的演示消息（服务端 0.6.0 解析成 doc）：正文里用 attachment: 引用图片和 PDF，
-# huijian://message/<id> 指向上面的「exp42 完成」
-E42=$(python3 -c "import sqlite3,sys;print(sqlite3.connect(sys.argv[1]).execute(\"select id from messages where text='exp42 完成'\").fetchone()[0])" $DEMO/data/huijian.db)
+# huijian://message/<id> 指向上面的「exp42 完成」（服务器代加密后库里的标题是密文，取刚发的最后一条的 id）
+E42=$(python3 -c "import sqlite3,sys;print(sqlite3.connect(sys.argv[1]).execute('select max(id) from messages').fetchone()[0])" $DEMO/data/huijian.db)
 p -k $K_TRAIN -p 3 -topic train -thread exp43 -d "$(sed "s/E42_ID/$E42/" tests/markdown_demo.md)" -f $F/loss.png -f $F/report.pdf "exp43 训练报告"
 # 把时间铺开（只改测试库）：几分钟到几小时前
 python3 - $DEMO/data/huijian.db <<'PY'
@@ -58,9 +91,8 @@ ids=[r[0] for r in c.execute("select id from messages order by id")]
 for i,a in zip(ids,ago): c.execute("update messages set created_at=? where id=?",(now-a*60,i))
 c.commit()
 PY
-# 频道设置：用一台临时设备的 token 调 /v1/channels
-CODE=$(curl -s -b $J -o /dev/null -w '%{redirect_url}' -H "Origin: $ADM" -d can_admin=on $ADM/pair | sed -E 's/.*code=([0-9]+).*/\1/')
-DT=$(curl -s -X POST $PUB/v1/pair -H 'Content-Type: application/json' -d "{\"code\":\"$CODE\",\"name\":\"我的 MacBook\",\"platform\":\"macos\"}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+# 频道设置：用演示账号「我的 MacBook」的 token 调 /v1/channels
 chan(){ curl -s -o /dev/null -X PATCH -H "Authorization: Bearer $DT" -H 'Content-Type: application/json' -d "$1" $PUB/v1/channels; }
 chan '{"topic":"train","alias":"训练","pinned":true}'; chan '{"topic":"infra","muted":true}'; chan '{"topic":"debug","hidden":true}'
+umask $HUB_UMASK
 echo "hub 已就绪：${PUB}（账号 ${DEMO_USER}），模拟 Bark：${BARK_URL}"

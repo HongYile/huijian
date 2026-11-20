@@ -45,7 +45,6 @@ struct E2ESettings: View {
                     }
                     E2ESetupCard()
                 case .locked:
-                    if model.e2eKeyChanged { E2ENote(text: E2E.T.t46) }
                     E2EUnlockCards()
                     E2EResetCard(locked: true)
                 case .unlocked:
@@ -281,7 +280,9 @@ struct E2EUnlockCards: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            E2ENote(text: "这个账号已开启端到端加密，这台设备还没有解锁，加密消息暂时只显示「\(E2E.T.t60)」。任选一种方式解锁：")
+            // 钥匙已更换（别的设备重置过，§11.4）：说明换成 T46，不说「还没有解锁」
+            E2ENote(text: model.e2eKeyChanged ? E2E.T.t46
+                    : "这个账号已开启端到端加密，这台设备还没有解锁，加密消息暂时只显示「\(E2E.T.t60)」。任选一种方式解锁：")
             SettingsCard(title: "用密码解锁", footer: "输入账号密码，在本机解开服务器上用密码锁住的钥匙（密码不会发给服务器）。") {
                 FormBlock {
                     HStack(spacing: 10) {
@@ -441,7 +442,7 @@ struct E2EStatusCard: View {
             if st?.server_seal == true {
                 // §11.5：服务器代加密始终开启，没有开关，只读说明 T65
                 SettingsRow(label: "服务器代加密", divider: false) {
-                    Text((st?.plain_messages ?? 0) > 0 ? "始终开启 · 服务器上还有 \(st?.plain_messages ?? 0) 条明文" : "始终开启")
+                    Text("始终开启")
                         .font(.system(size: 13.5)).foregroundStyle(Theme.text2)
                 }
                 Text(E2E.T.t65).font(.system(size: 12)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
@@ -670,7 +671,7 @@ struct E2ERequestsCard: View {
     }
 }
 
-// MARK: 设置项（§7.2–§7.4）
+// MARK: 设置项（§7.3）
 
 struct E2EOptionsCard: View {
     @EnvironmentObject var model: AppModel
@@ -678,22 +679,11 @@ struct E2EOptionsCard: View {
     @State private var password = ""
     @State private var busy = false
     @State private var message: String?
-    @State private var confirmDelete = false
 
+    // 0.9.0 起没有「只接受加密消息」和「删除服务器上的明文消息」（所有消息都加密，§7 第 2、4 项）
     var body: some View {
         SettingsCard(title: "设置", footer: message ?? "改密码在「账户」页：已开启加密时，新密码会重新锁住本机的钥匙。") {
-            SettingsRow(label: "只接受加密消息") {
-                Toggle("", isOn: Binding(get: { model.e2eState?.e2e_only ?? false }, set: { v in
-                    Task {
-                        do { try await model.e2eSetOnly(v) } catch { message = "保存失败：\(describe(error))" }
-                    }
-                }))
-                .toggleStyle(.switch).labelsHidden()
-            }
-            Text(E2E.T.t71).font(.system(size: 12)).foregroundStyle(Theme.text3)
-                .frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 10)
-                .overlay(alignment: .bottom) { Rectangle().fill(Theme.border.opacity(0.7)).frame(height: 1) }
-            SettingsRow(label: model.e2eState?.hasRecovery == false ? "设置恢复码" : "更换恢复码") {
+            SettingsRow(label: model.e2eState?.hasRecovery == false ? "设置恢复码" : "更换恢复码", divider: rotating) {
                 if !rotating {
                     Button("更换…") { rotating = true; message = nil }.buttonStyle(SoftButtonStyle())
                 }
@@ -706,14 +696,7 @@ struct E2EOptionsCard: View {
                         .buttonStyle(SoftButtonStyle()).disabled(busy || password.isEmpty)
                 }
                 .padding(.bottom, 12)
-                .overlay(alignment: .bottom) { Rectangle().fill(Theme.border.opacity(0.7)).frame(height: 1) }
             }
-            SettingsRow(label: "删除服务器上的明文消息", divider: false) {
-                Button("删除…") { confirmDelete = true }.buttonStyle(SoftButtonStyle(destructive: true)).disabled(busy)
-            }
-        }
-        .confirmationDialog(E2E.T.t72, isPresented: $confirmDelete) {
-            Button("删除", role: .destructive) { Task { await deletePlain() } }
         }
     }
 
@@ -725,14 +708,5 @@ struct E2EOptionsCard: View {
             password = ""
             rotating = false
         } catch { message = describe(error) }
-    }
-
-    func deletePlain() async {
-        busy = true
-        defer { busy = false }
-        do {
-            let n = try await model.e2eDeletePlain()
-            message = "已删除服务器上的 \(n) 条明文消息（本机已同步的保留）。"
-        } catch { message = "删除失败：\(describe(error))" }
     }
 }

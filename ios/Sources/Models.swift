@@ -197,10 +197,20 @@ struct ServerFeature: Codable, Hashable {
 struct ServerInfo: Codable {
     let version: String?
     let features: [ServerFeature]?
-    /// 服务端开放了注册（登录页显示「注册新账号」）
+    /// 旧服务端：开放了注册（登录页显示「注册新账号」）。0.9.0 起看 register
     var register_open: Bool? = nil
+    /// 0.9.0 起（功能 register.invite）：注册方式 closed / invite（必须填邀请码）/ open
+    var register: String? = nil
     /// 长轮询最长等待秒数（0.6.4 起，功能 poll.long）
     var long_poll_max: Int? = nil
+}
+
+extension ServerInfo {
+    /// 注册方式：closed 不显示注册入口；invite 注册要填邀请码；open 直接注册。旧服务端按 register_open 推断
+    var registerMode: String {
+        if let r = register, ["closed", "invite", "open"].contains(r) { return r }
+        return register_open == true ? "open" : "closed"
+    }
 }
 
 struct UpdateInfo: Codable, Hashable {

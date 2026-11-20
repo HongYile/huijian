@@ -24,7 +24,7 @@ S=screenshots; mkdir -p $S; rm -f $S/*.png
 xcrun simctl terminate "$UDID" $BID 2>/dev/null
 xcrun simctl uninstall "$UDID" $BID 2>/dev/null
 xcrun simctl install "$UDID" build/sim/Huijian.app
-DEMO=(-demoServer $PUB -demoUser $DEMO_USER -demoPass $DEMO_PASS)
+DEMO_ARGS=(-demoServer $PUB -demoUser $DEMO_USER -demoPass $DEMO_PASS)
 shot(){ # 名称 外观 等待秒数 启动参数...
   local name=$1 look=$2 wait=$3; shift 3
   xcrun simctl ui "$UDID" appearance $look
@@ -36,37 +36,37 @@ shot login light 3
 # 服务端开放注册时，登录页多一个「注册」
 curl -s -b $J -o /dev/null -H "Origin: $ADM" -d on=1 $ADM/accounts/register
 shot login-register light 5 -demoLoginServer $PUB -demoLoginMode register
-shot home-light light 8 "${DEMO[@]}" -demoReset YES -demoUnread 5
-shot detail-markdown light 6 "${DEMO[@]}" -demoOpen "exp42 完成"
-shot detail-image light 7 "${DEMO[@]}" -demoOpen "阶段评估"
-shot settings-bark light 6 "${DEMO[@]}" -demoPage settings -demoSetBark https://api.day.app/DemoKey8xZ2 \
+shot home-light light 8 "${DEMO_ARGS[@]}" -demoReset YES -demoUnread 5
+shot detail-markdown light 6 "${DEMO_ARGS[@]}" -demoOpen "exp42 完成"
+shot detail-image light 7 "${DEMO_ARGS[@]}" -demoOpen "阶段评估"
+shot settings-bark light 6 "${DEMO_ARGS[@]}" -demoPage settings -demoSetBark https://api.day.app/DemoKey8xZ2 \
   -demoBarkKey Yq3vN8pL2xR7tK5mW9cH4bF6jD1sG0aZ -demoBarkIV Pe7Rk2Lm9Qx4Tz6V
-shot settings-connection light 6 "${DEMO[@]}" -demoPage settings -demoScroll connection
-shot home-dark dark 5 "${DEMO[@]}" -demoUnread 5
-shot detail-dark dark 6 "${DEMO[@]}" -demoOpen "exp42 完成"
+shot settings-connection light 6 "${DEMO_ARGS[@]}" -demoPage settings -demoScroll connection
+shot home-dark dark 5 "${DEMO_ARGS[@]}" -demoUnread 5
+shot detail-dark dark 6 "${DEMO_ARGS[@]}" -demoOpen "exp42 完成"
 # 回笺 Markdown（服务端 doc）：-demoScrollBlock 滚到某种块第一次出现的位置
-MD=("${DEMO[@]}" -demoOpen "exp43 训练报告")
+MD=("${DEMO_ARGS[@]}" -demoOpen "exp43 训练报告")
 shot detail-md-blocks light 7 "${MD[@]}" -demoScrollBlock progress
 shot detail-md-image light 8 "${MD[@]}" -demoScrollBlock image
 shot detail-md-more light 7 "${MD[@]}" -demoScrollBlock rule
 shot detail-md-blocks-dark dark 7 "${MD[@]}" -demoScrollBlock progress
 shot detail-md-image-dark dark 8 "${MD[@]}" -demoScrollBlock image
 # 管理：设置页入口、Pushkey、账户与设备（自动生成一个配对码）、频道
-shot settings-manage light 6 "${DEMO[@]}" -demoPage settings -demoScroll manage
-shot manage-keys light 6 "${DEMO[@]}" -demoPage keys
-shot manage-account light 7 "${DEMO[@]}" -demoPage account -demoPairCode YES
-shot manage-channels light 6 "${DEMO[@]}" -demoPage channels
-shot manage-keys-dark dark 6 "${DEMO[@]}" -demoPage keys
+shot settings-manage light 6 "${DEMO_ARGS[@]}" -demoPage settings -demoScroll manage
+shot manage-keys light 6 "${DEMO_ARGS[@]}" -demoPage keys
+shot manage-account light 7 "${DEMO_ARGS[@]}" -demoPage account -demoPairCode YES
+shot manage-channels light 6 "${DEMO_ARGS[@]}" -demoPage channels
+shot manage-keys-dark dark 6 "${DEMO_ARGS[@]}" -demoPage keys
 # 发布一个假的 iOS 新版本到测试 hub，截「有新版本」的提示（首页横幅、设置页关于）
 head -c 4096 /dev/urandom > $T/fake.ipa
 NEXT=$(( $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/sim/Huijian.app/Info.plist) + 1 ))
 # 演示的「新版本」= 当前版本的修订号 + 1
 NEXT_VER=$(awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}' VERSION)
-HUIJIAN_ADMIN_URL=$ADM HUIJIAN_ADMIN_TOKEN=$(cat /tmp/huijian-ios-test/data/admin.token) $B release -key "$TEST_UPDATE_KEY" -platform ios \
+HUIJIAN_ADMIN_URL=$ADM HUIJIAN_ADMIN_TOKEN=$(cat $DEMO/data/admin.token) $B release -key "$TEST_UPDATE_KEY" -platform ios \
   -version $NEXT_VER -build $NEXT -notes $'- 改进后台同步\n- 修复若干问题' $T/fake.ipa > $T/release.log 2>&1 \
   || { echo "❌ 发布测试版本失败"; cat $T/release.log; }
-shot home-update light 6 "${DEMO[@]}" -demoUnread 3
-shot settings-update light 6 "${DEMO[@]}" -demoPage settings -demoScroll about
+shot home-update light 6 "${DEMO_ARGS[@]}" -demoUnread 3
+shot settings-update light 6 "${DEMO_ARGS[@]}" -demoPage settings -demoScroll about
 # 深链（模拟点 Bark 通知）：App 没在运行、这条消息还没同步到本机 → 冷启动、补拉、直接打开详情
 xcrun simctl terminate "$UDID" $BID 2>/dev/null
 xcrun simctl ui "$UDID" appearance light

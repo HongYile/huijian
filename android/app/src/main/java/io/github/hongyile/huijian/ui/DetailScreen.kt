@@ -62,6 +62,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.hongyile.huijian.Attachment
 import io.github.hongyile.huijian.E2EHub
+import io.github.hongyile.huijian.E2EMessages
 import io.github.hongyile.huijian.E2EText
 import io.github.hongyile.huijian.Hub
 import io.github.hongyile.huijian.Markdown
@@ -131,12 +132,9 @@ fun DetailScreen(id: Long, back: () -> Unit, openMessage: (Long) -> Unit = {}) {
                 item { Text(m.title, Modifier.padding(top = 10.dp), fontSize = 22.sp, fontWeight = FontWeight.SemiBold) }
                 item {
                     DisableSelection {
-                        // 元信息行：加密消息「🔒 端到端加密」；账号开了加密、这条是明文时 T63（e2ee-client.md §6.3）
-                        val mark = when {
-                            m.encrypted -> E2EText.ENCRYPTED
-                            e2eState?.enabled == true -> E2EText.T63
-                            else -> ""
-                        }
+                        // 元信息行：发送端加密「🔒 端到端加密」；服务器代加密的（sealed: "server"）T64「明文发送：…」（§11.5）；
+                        // 账号开了加密、这条是明文（本机保留的旧消息）时 T63（e2ee-client.md §6.3）
+                        val mark = E2EMessages.detailMark(m, e2eState?.enabled == true)
                         Text(
                             listOf(m.source, fullTime(m.createdAt), "#${m.id}", mark).filter { it.isNotBlank() }.joinToString(" · "),
                             Modifier.padding(top = 10.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,

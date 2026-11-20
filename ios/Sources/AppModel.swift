@@ -104,8 +104,6 @@ final class AppModel: ObservableObject {
     /// 打开设置页时滚到哪一节（首页「可以更新了」横幅 → about）
     @Published var settingsAnchor: String?
     @Published private(set) var latestBuild = 0
-    /// 本机有没有服务器管理权限（GET /v1/me 的 can_admin）；nil = 还没拉到
-    @Published private(set) var canAdmin: Bool?
     /// 账号有没有设置密码（GET /v1/me 的 account.has_password）；nil = 还没拉到或旧服务端
     @Published private(set) var accountHasPassword: Bool?
     @Published private(set) var notifyAuth: UNAuthorizationStatus = .notDetermined
@@ -764,7 +762,6 @@ final class AppModel: ObservableObject {
         // 用户名以服务端为准（可能在别的设备上改过）；配对码登录、账号还没有用户名时为空
         if let u = m.account?.username, !u.isEmpty { settings.username = u }
         settings.deviceName = m.name
-        canAdmin = m.can_admin
         accountHasPassword = m.account?.has_password
         if let id = m.account?.id, id > 0 { noteAccountID(id) }
     }
@@ -1241,7 +1238,7 @@ final class AppModel: ObservableObject {
         return a
     }
 
-    /// 给本机改名（其他设备和管理后台的设备列表里显示）
+    /// 给本机改名（其他设备的设备列表里显示）
     func renameDevice(_ name: String) async throws {
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !n.isEmpty else { throw APIError.invalid("名称不能为空") }
@@ -1336,7 +1333,8 @@ final class AppModel: ObservableObject {
     }
 
     /// 注册新账号（服务端开放注册时）。成功后和登录一样进入
-    func register(server raw: String, username: String, password: String, name: String) async throws {
+    /// inviteCode：服务端只接受邀请注册（/v1/info 的 register == "invite"）时必填；服务端拒绝（403）时显示服务端的说明
+    func register(server raw: String, username: String, password: String, name: String, inviteCode: String? = nil) async throws {
         let s = API.normalize(raw)
         guard let url = URL(string: s), let host = url.host, !host.isEmpty else { throw APIError.invalid("服务器地址格式不对") }
         let u = ManageRules.normalizeUsername(username)
@@ -1345,7 +1343,16 @@ final class AppModel: ObservableObject {
         if password.isEmpty { throw APIError.invalid("请设置密码") }
         // 服务器拿不到密码，强度只能在本机检查（docs/e2ee-client.md §2.2）
         if let p = Core.passwordProblem(password, username: u) { throw APIError.invalid(p) }
-        try await passwordSignIn(server: s, url: url, username: u, password: password, name: name, register: true)
+        try await passwordSignIn(server: s, url: url, username: u, password: password, name: name, register: true, inviteCode: inviteCode)
+    }
+
+    /// 注册失败时登录页显示什么（纯函数，自检里测；和 Mac 登录窗一致）。返回（文字，这次结果是否不确定）。
+    /// 规则都在共用 E2E 里：注册请求网络出错 / 超时 → Failure(.uncertain)（T.registerUncertain）；上次不确定、这次又被拒
+    /// （409 用户名已被使用、403 邀请码已用完等）→ E2E.registerAfterUncertain（改去登录）；其他照常显示服务端说明
+    nonisolated static func registerMessage(_ e: Error, unsureBefore: Bool) -> (text: String, unsure: Bool) {
+        if (e as? E2E.Failure)?.kind == .uncertain { return (shortError(e), true) }
+        if unsureBefore, let hint = E2E.registerAfterUncertain(e) { return (hint, true) }
+        return (shortError(e), unsureBefore)
     }
 
     // MARK: 登录 / 退出
@@ -1363,19 +1370,27 @@ final class AppModel: ObservableObject {
 
     /// 账号密码登录 / 注册，新登录协议（docs/e2ee-client.md §2）：先取派生参数，在本机算凭证，从不发送密码原文
     /// （旧服务端、从未升级的账号除外）；旧账号登录后自动升级；登录响应里带了用密码锁住的私钥时解开、核对后存进钥匙串
-    private func passwordSignIn(server s: String, url: URL, username: String, password: String, name: String, register: Bool) async throws {
+    private func passwordSignIn(server s: String, url: URL, username: String, password: String, name: String, register: Bool,
+                                inviteCode: String? = nil) async throws {
         let r: E2E.LoginResult
         do {
             r = try await E2E.login(server: API(server: url, token: nil), authed: { API(server: url, token: $0) as E2ETransport },
                                     serverID: s, username: username, password: password,
                                     device: .init(name: name, platform: "ios", fingerprint: DeviceFingerprint.value),
-                                    register: register, marks: e2eMarks, secrets: e2eSecrets)
+                                    register: register, marks: e2eMarks, secrets: e2eSecrets, inviteCode: inviteCode, alive: e2eAlive)
         } catch let f as E2E.Failure where f.kind == .unsupported {
-            if register { throw APIError.unsupported }
+            // 注册一律不发密码原文：没有新登录协议（0.6 及以前）或没有注册接口的服务端，都请用户先升级服务端（三端一致）
+            if register { throw APIError.invalid(E2E.T.registerServerTooOld) }
             throw APIError.invalid("这个服务端版本较旧，还不支持账号登录（需要 0.5.0 以上），请用配对码配对")
         }
         let lr: LoginResult
-        do { lr = try JSONCoding.decoder.decode(LoginResult.self, from: r.response) } catch { throw APIError.invalid("服务器返回的数据格式不对") }
+        do { lr = try JSONCoding.decoder.decode(LoginResult.self, from: r.response) } catch {
+            // 注册已经成功（服务端 200）、本机却接不上：账号可能已经建好，按「结果不确定」提示先去登录（三端一致）
+            if register { throw E2E.Failure(.uncertain, E2E.T.registerUncertain) }
+            throw APIError.invalid("服务器返回的数据格式不对")
+        }
+        // 注册后设备 token 存不下（钥匙串和退路文件都失败）：同上，不进入登录状态
+        if register && !Keychain.save(lr.token, account: "device-token") { throw E2E.Failure(.uncertain, E2E.T.registerUncertain) }
         e2ePendingLoginKey = r.pendingKey
         signedIn(server: s, lr, username: username, accountID: r.accountID)
         e2eLoginNote = r.note
@@ -1468,7 +1483,6 @@ final class AppModel: ObservableObject {
         bark = nil
         update = nil
         resetUpdateDownload()
-        canAdmin = nil
         accountHasPassword = nil
         keys = nil
         keyModes = nil

@@ -61,12 +61,19 @@ struct DetailView: View {
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(m.priority >= 5 ? Theme.danger : Theme.text)
                     .textSelection(.enabled)
-                // 端到端加密标记（docs/e2ee-client.md §6.3、§11.5）：服务器代加密的显示 T64，发送端加密的「🔒 端到端加密」；账号开启了加密、这条却是明文时显示 T63
+                // 端到端加密标记（docs/e2ee-client.md §6.3、§11.5）：普通 pushkey 发来的（服务器代加密）写「明文发送」，下面单独一行完整的 T64；
+                // 发送端加密的「🔒 端到端加密」；账号开启了加密、这条却是明文（开启加密以前收到、只留在本机的旧消息）时显示 T63
                 Text(([m.source, TimeText.full(m.createdAt), "#\(m.id)"]
-                      + (m.isServerSealed ? [E2E.T.t64] : m.isE2E ? ["🔒 端到端加密"] : model.e2eAccountEnabled ? [E2E.T.t63] : []))
+                      + (m.isServerSealed ? [E2E.T.plainSentTag] : m.isE2E ? ["🔒 端到端加密"] : model.e2eAccountEnabled ? [E2E.T.t63] : []))
                     .filter { !$0.isEmpty }.joined(separator: " · "))
                     .font(.caption)
                     .foregroundStyle(Theme.text3)
+                if m.isServerSealed {
+                    Text(E2E.T.t64)
+                        .font(.caption)
+                        .foregroundStyle(Theme.text3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Divider()
                 if m.e2eUnreadable {
                     E2ELockedBody(message: m)

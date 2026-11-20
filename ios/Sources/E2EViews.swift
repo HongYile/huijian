@@ -53,8 +53,7 @@ struct E2EView: View {
                     }
                     E2ESetupSection()
                 case .locked:
-                    if model.e2eKeyChanged { E2EKeyChangedSection() }
-                    E2EUnlockSections()
+                    E2EUnlockSections()         // 钥匙已更换时说明就是 T46（不再另加一节）
                     E2EResetSection(locked: true) { notice = E2E.T.resetDone }
                 case .unlocked:
                     if model.e2eKeyChanged { E2EKeyChangedSection() }
@@ -281,8 +280,14 @@ struct E2EUnlockSections: View {
 
     var body: some View {
         Section {
-            Label("这个账号已开启端到端加密，这台设备还没有解锁，加密消息暂时只显示「\(E2E.T.t60)」。任选一种方式解锁：", systemImage: "lock.fill")
-                .font(.subheadline).foregroundStyle(Theme.text)
+            // 钥匙已更换（别的设备重置过加密）：说明用 T46，引导用密码或恢复码解锁新钥匙
+            if model.e2eKeyChanged {
+                Label(E2E.T.t46, systemImage: "key.fill")
+                    .font(.subheadline).foregroundStyle(Theme.warning)
+            } else {
+                Label("这个账号已开启端到端加密，这台设备还没有解锁，加密消息暂时只显示「\(E2E.T.t60)」。任选一种方式解锁：", systemImage: "lock.fill")
+                    .font(.subheadline).foregroundStyle(Theme.text)
+            }
         }
         Section {
             SecureField("账号密码", text: $password).textContentType(.password)
@@ -547,52 +552,19 @@ struct E2ERequestsSection: View {
     }
 }
 
-// MARK: 设置项（§7.2–§7.4）
+// MARK: 设置项
 
+/// 服务端 0.9.0 起所有消息都加密：没有「只接受加密消息」开关，也没有「删除服务器上的明文消息」（§7 第 2、4 项取消）。
+/// 普通 pushkey 是简单用法，服务器收到后立即代加密（§11.5），这里只显示说明 T65
 struct E2EOptionsSections: View {
-    @EnvironmentObject private var model: AppModel
-    @State private var busy = false
-    @State private var message: String?
-    @State private var confirmDelete = false
-
     var body: some View {
         Section {
-            Toggle("只接受加密消息", isOn: Binding(get: { model.e2eState?.e2e_only ?? false }, set: { v in
-                Task {
-                    do { try await model.e2eSetOnly(v) } catch { message = "保存失败：\(describe(error))" }
-                }
-            }))
-        } header: {
-            Text("设置")
-        } footer: {
-            Text(E2E.T.t71)
-        }
-        // 服务器代加密（§11.5）：始终开启、没有开关，只显示说明 T65
-        Section {
             LabeledContent("服务器代加密") { Text("始终开启").foregroundStyle(Theme.text2) }
+        } header: {
+            Text("普通 pushkey 发来的消息")
         } footer: {
-            Text(E2E.T.t65)
+            Text(E2E.T.t65 + "\n改密码在「账户与设备」→「修改用户名和密码」：新密码会重新锁住本机的钥匙。")
         }
-        Section {
-            Button("删除服务器上的明文消息…", role: .destructive) { confirmDelete = true }
-                .disabled(busy)
-                .confirmationDialog("删除服务器上的明文消息", isPresented: $confirmDelete, titleVisibility: .visible) {
-                    Button("删除", role: .destructive) { Task { await deletePlain() } }
-                } message: {
-                    Text(E2E.T.t72)
-                }
-        } footer: {
-            Text(message ?? "改密码在「账户与设备」→「修改用户名和密码」：已开启加密时，新密码会重新锁住本机的钥匙。")
-        }
-    }
-
-    private func deletePlain() async {
-        busy = true
-        defer { busy = false }
-        do {
-            let n = try await model.e2eDeletePlain()
-            message = "已删除服务器上的 \(n) 条明文消息（本机已同步的保留）。"
-        } catch { message = "删除失败：\(describe(error))" }
     }
 }
 
@@ -765,7 +737,10 @@ struct E2EEntrySection: View {
                 }
             }
         } footer: {
-            Text("开启后，新消息的标题、正文和附件只有你登录过的设备能解开，服务器和备份里只有密文。")
+            // 按状态说：还没开启时说「开启后」会怎样，已开启时说现在就是这样（别让人读成反的）
+            Text(model.e2eAccountEnabled
+                 ? "已开启：消息的标题、正文和附件只有你登录过的设备能解开，服务器和备份里只有密文。"
+                 : "开启后，消息的标题、正文和附件只有你登录过的设备能解开，服务器和备份里只有密文。")
         }
     }
 
@@ -803,6 +778,32 @@ struct E2ELockedBanner: View {
     }
 }
 
+/// 首页顶部：建议设置恢复码（T23，§11.2）。不打断：可以「以后再说」，设置好后自动消失（和 Mac 的 E2ERecoveryHintBanner 一致）
+struct E2ERecoveryHintBanner: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "key").font(.subheadline).foregroundStyle(Theme.accent)
+                Text(E2E.T.t23).font(.subheadline).foregroundStyle(Theme.text)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 16) {
+                Spacer(minLength: 0)
+                Button("以后再说") { model.e2eDismissRecoveryHint() }
+                    .buttonStyle(.borderless).font(.subheadline).foregroundStyle(Theme.text3)
+                Button("去设置") { model.openE2E() }
+                    .buttonStyle(.borderless).font(.subheadline.weight(.medium)).foregroundStyle(Theme.accent)
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.accent.opacity(0.08)))
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+    }
+}
+
 /// 首页顶部：账号还没开启加密、服务端支持自动开启（§11.1 末尾，T67），不能关闭。
 /// 账号有密码：弹出只输当前密码的小窗；没有密码：设置密码（成功后自动开启）。开启后（本机或别的设备）自动消失
 struct E2EEnableBanner: View {
@@ -818,10 +819,11 @@ struct E2EEnableBanner: View {
         Button {
             if model.accountHasPassword == true {
                 sheet = .password
-            } else if model.accountHasPassword == false && model.canAdmin != false {
+            } else if model.accountHasPassword == false {
+                // 没有密码：本账号的任何设备都能设置初始密码，设置后自动开启（服务端 0.9.0 起不再要求管理权限）
                 sheet = .setPassword
             } else {
-                // 还不知道有没有密码，或者这台设备不能设置初始密码：去「账户与设备」页（那里有说明和入口）
+                // 还不知道有没有密码：去「账户与设备」页（那里有入口）
                 model.path = [.settings, .account]
             }
         } label: {

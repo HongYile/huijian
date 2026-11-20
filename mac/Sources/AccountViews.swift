@@ -34,7 +34,6 @@ struct AccountSetupView: View {
     @State private var password2 = ""
     @State private var busy = false
     @State private var error: String?
-    @State private var refreshMsg: String?
     @State private var confirmLogout = false
     /// 这台设备加入的账号里已有的 pushkey 数和设备数（配对码加入的是已有账号，不是新建）
     @State private var existing: (keys: Int, devices: Int)?
@@ -61,11 +60,8 @@ struct AccountSetupView: View {
                     .font(.system(size: 13)).foregroundStyle(Theme.text2).multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true).padding(.top, 10)
 
-                if model.canAdmin == false {
-                    noPermission
-                } else {
-                    form
-                }
+                // 0.9.0 起本账号任何设备都能设置初始密码（不再要求「允许管理」的设备）
+                form
 
                 HStack {
                     Button("用其他账号登录") { confirmLogout = true }
@@ -86,7 +82,7 @@ struct AccountSetupView: View {
         .task { await loadExisting() }
         .onChange(of: model.accountRevision) { _, _ in Task { await loadExisting() } }
         .onChange(of: model.keysRevision) { _, _ in Task { await loadExisting() } }
-        // 账号可能在别的设备或管理网页上设置好：定时检查，设置好后自动进入
+        // 账号可能在别的设备上设置好：定时检查，设置好后自动进入
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(30))
@@ -145,34 +141,6 @@ struct AccountSetupView: View {
         .padding(.top, 22)
     }
 
-    var noPermission: some View {
-        VStack(spacing: 12) {
-            Label("这个账号还没有密码。为了安全，初始密码只能在开启了「允许管理」的设备上设置，或由管理员在管理网页「账号」页设置。",
-                  systemImage: "lock.shield")
-                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.warning.opacity(0.1)))
-            Button {
-                Task {
-                    busy = true
-                    let ok = await model.refreshMe()
-                    busy = false
-                    refreshMsg = ok ? "还没有设置好。设置好后这里会自动进入，不用一直点刷新。" : "连不上服务器，请检查网络后再试"
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    if busy { ProgressView().controlSize(.small) }
-                    Text("已经设置好了，刷新")
-                }
-            }
-            .buttonStyle(PrimaryButtonStyle())
-            if let refreshMsg {
-                Text(refreshMsg).font(.system(size: 12.5)).foregroundStyle(Theme.text2)
-            }
-        }
-        .padding(.top, 22)
-    }
 
     func field<C: View>(_ label: String, @ViewBuilder _ c: () -> C) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -257,7 +225,7 @@ enum AccountMenu {
             if !(await model.logout()) {
                 let b = NSAlert()
                 b.messageText = "已在本机退出"
-                b.informativeText = "服务端没有确认作废本机凭证（服务端版本较旧或连不上）。如需彻底作废，请在管理网页的「设备」页吊销这台设备。"
+                b.informativeText = "服务端没有确认作废本机凭证（服务端版本较旧或连不上）。如需彻底作废，请在本账号另一台设备的「账户」页移除这台设备。"
                 b.runModal()
             }
         }
@@ -316,7 +284,6 @@ struct AccountView: View {
                         devicesCard
                     }
                     thisDeviceCard
-                    adminCard
                     HStack {
                         Button("重新连接") { model.startSync() }.buttonStyle(SoftButtonStyle())
                         Spacer()
@@ -351,7 +318,7 @@ struct AccountView: View {
                     if !(await model.logout()) {
                         let a = NSAlert()
                         a.messageText = "已在本机退出"
-                        a.informativeText = "服务端没有确认作废本机凭证（服务端版本较旧或连不上）。如需彻底作废，请在管理网页的「设备」页吊销这台设备。"
+                        a.informativeText = "服务端没有确认作废本机凭证（服务端版本较旧或连不上）。如需彻底作废，请在本账号另一台设备的「账户」页移除这台设备。"
                         a.runModal()
                     }
                 }
@@ -377,17 +344,12 @@ struct AccountView: View {
                 if let a, !editing {
                     if a.has_password {
                         Button("修改用户名 / 密码") { username = a.username; editing = true }.buttonStyle(SoftButtonStyle())
-                    } else if model.canAdmin != false {
+                    } else {
                         Button("设置用户名和密码") { username = a.username; editing = true }.buttonStyle(SoftButtonStyle())
                     }
                 }
             }
             .padding(16)
-            if let a, !a.has_password, model.canAdmin == false, !editing {
-                Rectangle().fill(Theme.border.opacity(0.7)).frame(height: 1)
-                Text("这个账号还没有密码，需要在开启了「允许管理」的设备上或管理网页的「账号」页设置。")
-                    .font(.system(size: 12.5)).foregroundStyle(Theme.warning).padding(16)
-            }
             if editing {
                 Rectangle().fill(Theme.border.opacity(0.7)).frame(height: 1)
                 credentialForm.padding(16)
@@ -581,7 +543,7 @@ struct AccountView: View {
     var thisDeviceCard: some View {
         SettingsCard(title: "本机", footer: nameMsg ?? (model.support("me.rename") == .needsServerUpdate
                                                     ? "修改名称需要服务端 0.4.2 以上，更新服务端后可用。"
-                                                    : "名称可以随时修改、可以重名；设备 ID 是唯一的，在管理后台搜索或排查问题时用 ID。")) {
+                                                    : "名称可以随时修改、可以重名；设备 ID 是唯一的，排查问题时用。")) {
             SettingsRow(label: "设备名称") {
                 WarmField(placeholder: "设备名称", text: $nameDraft).frame(width: 220)
                 Button(savingName ? "保存中…" : "保存") { Task { await saveName() } }
@@ -613,34 +575,13 @@ struct AccountView: View {
         do {
             try await model.renameDevice(nameDraft)
             nameDraft = model.deviceName
-            nameMsg = "已保存，管理后台里也会显示新名称"
+            nameMsg = "已保存，本账号的其他设备上也会显示新名称"
             await load()
         } catch APIError.unsupported {
             model.noteUnsupported("me.rename")
             nameMsg = "修改名称需要服务端 0.4.2 以上，更新服务端后可用。"
         } catch {
             nameMsg = "保存失败：\(Updater.describe(error))"
-        }
-    }
-
-    // MARK: 服务器管理权限
-
-    var adminCard: some View {
-        SettingsCard(title: "服务器管理权限", footer: model.canAdmin == false
-                     ? "服务器级权限：一键登录管理后台、查看服务器存储与备份。需要时在管理网页的「设备」页为本机打开「允许管理」。管理自己账号的 Pushkey 不需要这个权限。"
-                     : "点「打开管理后台」时浏览器会用一次性链接自动登录，并记住这个浏览器一年。") {
-            SettingsRow(label: "允许管理服务器") {
-                switch model.canAdmin {
-                case .some(true): Label("已开启", systemImage: "checkmark.circle.fill").font(.system(size: 13.5)).foregroundStyle(Theme.success)
-                case .some(false): value("未开启")
-                case .none: value("未知")
-                }
-            }
-            SettingsRow(label: model.adminMessage ?? "", divider: false) {
-                Button("打开管理后台") { Task { await model.openAdmin() } }
-                    .buttonStyle(SoftButtonStyle())
-                    .disabled(model.canAdmin == false || model.token == nil)
-            }
         }
     }
 

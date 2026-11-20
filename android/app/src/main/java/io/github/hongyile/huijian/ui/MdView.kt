@@ -118,6 +118,7 @@ import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
@@ -165,21 +166,24 @@ class AttLoader(private val ctx: Context, private val scope: CoroutineScope) {
     fun loading(a: Attachment) = status[a.id] == LOADING
     fun error(a: Attachment) = status[a.id]?.takeIf { it != DONE && it != LOADING }
 
-    /** 开始下载（已在下载时等同一份）；then 在下载成功后调用，下载中重复点也会登记，不会丢 */
-    fun download(a: Attachment, then: (() -> Unit)? = null) {
-        val d = AttDownloads.download(a, file(a))
-        if (then != null) scope.launch { if (runCatching { d.await() }.isSuccess) then() }
+    /**
+     * 开始下载（已在下载时等同一份）；then 在下载成功后用最终的附件和文件调用（附件被补加密换了新 id 时是新附件），
+     * 下载中重复点也会登记，不会丢
+     */
+    fun download(a: Attachment, then: ((AttDownloads.Fetched) -> Unit)? = null) {
+        val d = AttDownloads.download(a, file(a), ::file)
+        if (then != null) scope.launch { runCatching { d.await() }.onSuccess { then(it) } }
     }
 
     fun open(ctx: Context, a: Attachment, showImage: (ImageBitmap) -> Unit) {
-        val go = {
-            val f = file(a)
-            if (a.isImage) scope.launch {
+        // 用最终下载的那个附件的 mime：补加密换了新 id 时是新附件的
+        val go = { att: Attachment, f: File ->
+            if (att.isImage) scope.launch {
                 val bmp = withContext(Dispatchers.IO) { decodeSampled(f)?.asImageBitmap() }
-                if (bmp != null) showImage(bmp) else openFile(ctx, f, a.mime)
-            } else openFile(ctx, f, a.mime)
+                if (bmp != null) showImage(bmp) else openFile(ctx, f, att.mime)
+            } else openFile(ctx, f, att.mime)
         }
-        if (have(a)) go() else download(a) { go() }
+        if (have(a)) go(a, file(a)) else download(a) { go(it.att, it.file) }
     }
 
     companion object {

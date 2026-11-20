@@ -163,7 +163,7 @@ extension API {
 
     func account() async throws -> AccountDetail { try await decode(AccountDetail.self, "/v1/account") }
 
-    /// 设置 / 修改用户名和密码。password 为空 = 只改用户名；已有密码时（没有「允许管理」的设备）需要当前密码
+    /// 设置 / 修改用户名和密码。password 为空 = 只改用户名；已有密码时需要当前密码
     func setCredentials(username: String, password: String, current: String) async throws -> AccountInfo {
         struct R: Decodable { let account: AccountInfo }
         return try await decode(R.self, "/v1/account/credentials", method: "POST",

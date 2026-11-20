@@ -50,6 +50,7 @@ import io.github.hongyile.huijian.E2EHub
 import io.github.hongyile.huijian.Hub
 import io.github.hongyile.huijian.LoginOutcome
 import io.github.hongyile.huijian.Manage
+import io.github.hongyile.huijian.RegisterUi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -62,8 +63,9 @@ fun LoginScreen(onSignedIn: () -> Unit) {
     var server by rememberSaveable { mutableStateOf(Hub.store.server.ifBlank { BuildConfig.DEFAULT_SERVER }) }
     var usePair by rememberSaveable { mutableStateOf(false) }
     var username by rememberSaveable { mutableStateOf(Hub.store.username) }
-    var password by rememberSaveable { mutableStateOf("") }
-    var code by rememberSaveable { mutableStateOf("") }
+    // 密码、配对码、邀请码只放在内存里（remember），不进 saved state Bundle（会被系统写到磁盘）
+    var password by remember { mutableStateOf("") }
+    var code by remember { mutableStateOf("") }
     val defaultName = remember(ctx) {
         Settings.Global.getString(ctx.contentResolver, Settings.Global.DEVICE_NAME)?.takeIf { it.isNotBlank() }
             ?: "${Build.MANUFACTURER} ${Build.MODEL}"
@@ -73,26 +75,53 @@ fun LoginScreen(onSignedIn: () -> Unit) {
     var error by rememberSaveable { mutableStateOf<String?>(null) }
     /** 密码强度不够（注册时核心库检查的结果）：显示在密码框下面 */
     var passwordError by rememberSaveable { mutableStateOf<String?>(null) }
-    // 注册新账号：服务端开放注册时才显示（填好服务器地址后查 /v1/info）
-    var registerOpen by remember { mutableStateOf(false) }
+    // 注册新账号：服务端开放注册或要邀请码时才显示（填好服务器地址后查 /v1/info 的 register）；关闭时没有注册入口。
+    // 读不到 /v1/info 时注册入口照样显示，点了（或提交注册前）重新读，读到后按结果显示（Manage.registerUi）
+    var reg by remember { mutableStateOf(Manage.registerUi(null)) }
     var register by rememberSaveable { mutableStateOf(false) }
-    var password2 by rememberSaveable { mutableStateOf("") }
+    var password2 by remember { mutableStateOf("") }
+    var invite by remember { mutableStateOf("") }
+    /** 上次注册结果不确定（网络断了 / 超时）时的「服务器|用户名」：同一个账号再注册被拒时提示去登录 */
+    var registerUnsureFor by remember { mutableStateOf<String?>(null) }
+    /** 读 /v1/info，更新注册相关的显示；返回是否读到。地址在读的期间变了就丢掉结果 */
+    suspend fun loadInfo(url: String): Boolean {
+        val info = runCatching { withContext(Dispatchers.IO) { Api(url, null).info() } }.getOrNull()
+        if (Api.normalize(server) != url) return false
+        reg = Manage.registerUi(info, failed = info == null)
+        return info != null
+    }
     LaunchedEffect(server) {
-        registerOpen = false
+        reg = Manage.registerUi(null)
         val url = Api.normalize(server)
         if (url.length < 8) return@LaunchedEffect
         delay(600)      // 输入停下来再查
-        registerOpen = runCatching { withContext(Dispatchers.IO) { Api(url, null).info().optBoolean("register_open") } }.getOrDefault(false)
+        loadInfo(url)
     }
-    val registering = register && registerOpen && !usePair
+    val registering = reg.registering(register, usePair)
+    val needInvite = reg.needInvite(registering)
 
     fun submit() {
         val url = Api.normalize(server)
+        // 现算（不用组合时算好的值）：读完 /v1/info 再提交时注册方式可能变了（例如要邀请码）
+        val registering = reg.registering(register, usePair)
+        val needInvite = reg.needInvite(registering)
         when {
             url.isBlank() -> { error = "请填写服务器地址"; return }
+            // 还不知道服务端的注册方式：先读 /v1/info，读不到不提交；读到后还是注册就接着提交（要邀请码时由下面的校验提示）
+            reg.submitPlan(register, usePair) == RegisterUi.SubmitPlan.NEED_INFO -> {
+                busy = true; error = null
+                scope.launch {
+                    val ok = loadInfo(url)
+                    busy = false
+                    if (!ok) error = Manage.INFO_UNREACHABLE
+                    else if (reg.submitPlan(register, usePair) == RegisterUi.SubmitPlan.REGISTER) submit()
+                }
+                return
+            }
             usePair && !code.trim().matches(Regex("\\d{6}")) -> { error = "配对码是 6 位数字"; return }
             !usePair && (username.isBlank() || password.isEmpty()) -> { error = "请填写用户名和密码"; return }
-            registering -> (Manage.usernameProblem(username) ?: Manage.passwordProblem(password, password2, required = true))?.let { error = it; return }
+            registering -> (Manage.usernameProblem(username) ?: Manage.passwordProblem(password, password2, required = true)
+                ?: Manage.inviteProblem(reg.mode, invite))?.let { error = it; return }
         }
         busy = true; error = null; passwordError = null
         scope.launch {
@@ -103,20 +132,32 @@ fun LoginScreen(onSignedIn: () -> Unit) {
                 // 账号密码登录、注册走新协议（e2ee-client.md §2）：在本机派生凭证，从不发送密码原文；Argon2id 在后台线程算
                 val o = if (usePair) withContext(Dispatchers.IO) { LoginOutcome(api.pair(code.trim(), dev, fp)) }
                 else E2EHub.work {
-                    if (registering) E2EHub.logic.register(api, url, Manage.normalizeUsername(username), password, dev, fp)
+                    // 邀请码只在要邀请码时带上；被拒（邀请码不对、用完了等）时服务端的 403 说明原样显示
+                    // 服务端有 register.e2e：注册时一起开启加密（本机生成钥匙），成功后本机直接已解锁
+                    if (registering) E2EHub.logic.register(api, url, Manage.normalizeUsername(username), password, dev, fp,
+                        inviteCode = if (needInvite) invite else "", withKeys = reg.withKeys)
                     else E2EHub.logic.login(api, url, username.trim(), password, dev, fp) { Api(url, it) }
                 }
                 withContext(Dispatchers.IO) {      // Keystore 加密、同步写入，不放主线程
                     Hub.signedIn(url, o.result, if (usePair) "" else if (registering) Manage.normalizeUsername(username) else username.trim())
                     E2EHub.afterLogin(o, Api(url, o.result.token))   // 取账号 id，保存登录时顺带解开的私钥（账号已开启加密时）
                 }
-                password = ""; password2 = ""; code = ""
+                password = ""; password2 = ""; code = ""; invite = ""; registerUnsureFor = null
                 onSignedIn()
                 Hub.setState(ConnState.Connecting)
             } catch (e: E2EError) {
+                // 本地检查没通过（密码太短等）：不动「上次注册结果不确定」的标记
                 if (e.kind == E2EError.Kind.WEAK_PASSWORD) passwordError = e.message else error = e.message
             } catch (e: Exception) {
-                error = when (e) {
+                if (registering) {
+                    // 注册请求可能已经到了服务器（超时、断网）：提示先登录；同一个账号上次不确定、这次被拒，多半是上次已经成功
+                    val key = url + "|" + Manage.normalizeUsername(username)
+                    val (msg, unsure) = E2EHub.logic.registerError(e, registerUnsureFor == key)
+                    registerUnsureFor = if (unsure) key else null
+                    error = msg ?: "注册失败"
+                    // 403（注册关闭、邀请码问题）：注册方式可能刚变了，重新读一次 /v1/info（读不到不提示，保留上面的说明）
+                    if (Manage.refetchInfoAfter(e)) launch { loadInfo(url) }
+                } else error = when (e) {
                     is java.net.UnknownHostException -> "找不到服务器，请检查地址"
                     is java.net.ConnectException -> "连不上服务器"
                     else -> e.message ?: "登录失败"
@@ -170,10 +211,32 @@ fun LoginScreen(onSignedIn: () -> Unit) {
                 password2, { password2 = it }, Modifier.fillMaxWidth().testTag("password2"),
                 label = { Text("再输入一次密码") }, singleLine = true, visualTransformation = PasswordVisualTransformation(),
                 supportingText = { Text("用户名 2–32 个字（中文、字母、数字、空格、_ . -）；密码至少 10 位，不要用常见密码") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = if (needInvite) ImeAction.Next else ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { submit() }),
             )
-            if (registerOpen) TextButton({ register = !register; error = null }, Modifier.testTag("toggleRegister")) {
+            if (needInvite) OutlinedTextField(
+                invite, { invite = it.take(64) }, Modifier.fillMaxWidth().testTag("inviteCode"),
+                label = { Text("邀请码") }, singleLine = true,
+                supportingText = { Text("这台服务器注册需要邀请码，向服务器管理员索取") },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { submit() }),
+            )
+            // 读到了服务端信息、注册已关闭：不给注册入口，说明一句（没读到时不显示，免得把连不上说成没开放）
+            reg.closedNote?.let { Text(it, Modifier.testTag("registerClosed"), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            if (reg.entryVisible(register)) TextButton({
+                when (reg.onEntryTap(register)) {
+                    RegisterUi.EntryTap.TOGGLE -> { register = !register; error = null }
+                    // 没读到 /v1/info：先重新读，读到且允许注册才切到注册；读不到提示连不上
+                    RegisterUi.EntryTap.FETCH_INFO -> {
+                        val url = Api.normalize(server)
+                        error = null
+                        scope.launch {
+                            if (!loadInfo(url)) error = Manage.INFO_UNREACHABLE
+                            else if (reg.showEntry) register = true
+                        }
+                    }
+                }
+            }, Modifier.testTag("toggleRegister")) {
                 Text(if (register) "已有账号？直接登录" else "没有账号？注册新账号")
             }
         }
