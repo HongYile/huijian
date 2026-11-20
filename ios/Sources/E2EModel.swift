@@ -81,7 +81,10 @@ extension AppModel {
         }
         do {
             let ks = try ring.accountKeys()
-            if ks != e2eKeys { e2eKeys = ks }
+            if ks != e2eKeys {
+                e2eKeys = ks
+                if supports("agent") == true { Task { await refreshAgent() } }   // 换了钥匙：重新核实会话证明
+            }
             e2eStorageError = nil
             // 已确认开启、用户还没在「保存恢复码」页点「完成」（例如切去密码管理器时 App 被系统终止）：不用联网，直接回到这一页（§4.1）
             if let a = E2E.confirmedSetup(ring: ring), !a.code.isEmpty { showSetupRecovery(a) }
@@ -444,7 +447,7 @@ extension AppModel {
     func prepareE2E(_ msgs: [Message]) async -> [Message] {
         let todo = msgs.filter { $0.isE2E && $0.e2eStatus == nil }
         guard !todo.isEmpty else { return msgs }
-        let results = await Self.openAll(todo, keys: e2eKeys)
+        let results = await Self.openAll(todo, keys: e2eKeys, agents: agentVerified)
         return msgs.map { m in
             guard let r = results[m.id] else { return m }
             var x = m
@@ -453,11 +456,15 @@ extension AppModel {
         }
     }
 
-    nonisolated static func openAll(_ msgs: [Message], keys: [String]) async -> [Int64: E2E.OpenResult] {
-        let items = msgs.map { ($0.id, $0.e2e ?? "", $0.attachments.map(\.id)) }
+    nonisolated static func openAll(_ msgs: [Message], keys: [String], agents: [String: Agent.Verified]) async -> [Int64: E2E.OpenResult] {
+        let items = msgs.map { ($0.id, $0.e2e ?? "", $0.attachments.map(\.id), $0.agentSession) }
         return (try? await E2E.background {
             var out: [Int64: E2E.OpenResult] = [:]
-            for (id, env, atts) in items { out[id] = E2E.open(envelope: env, keys: keys, serverAttachments: atts) }
+            for (id, env, atts, sid) in items {
+                // agent 消息（hje2）用核实过的会话公钥解开；普通消息（hje1）照旧
+                if let sid { out[id] = atts.isEmpty ? Agent.open(envelope: env, sessionID: sid, keys: keys, verified: agents) : .broken }
+                else { out[id] = E2E.open(envelope: env, keys: keys, serverAttachments: atts) }
+            }
             return out
         }) ?? [:]
     }
@@ -480,7 +487,7 @@ extension AppModel {
         let pending = messages.filter(\.e2eUnreadable)
         guard !pending.isEmpty else { return }
         let gen = session
-        let results = await Self.openAll(pending, keys: keys)
+        let results = await Self.openAll(pending, keys: keys, agents: agentVerified)
         guard gen == session else { return }
         var list = messages
         for i in list.indices where list[i].e2eUnreadable {

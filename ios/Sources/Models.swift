@@ -56,6 +56,12 @@ struct Message: Codable, Hashable, Identifiable {
     var preview = ""
     /// 0.7.0 起：端到端加密的信封（hje1.…）。保留原文，锁定期间收到的消息解锁后重新解密
     var e2e: String?
+    /// 0.10.0 起：agent 发来的消息（docs/agent-mcp.md）：会话 id、是否在等回复（服务器给的，只用来路由和排序）
+    var agentSession: String?
+    var ask = false
+    /// 本机解开 agent 消息后得到的：会话证明里的名称、快捷回复（只在本机产生，见 dropLocalFields）
+    var agentName: String?
+    var choices: [String] = []
     /// 本机解密结果：ok 已解开 / locked 本机没有私钥 / wrong_key 别的钥匙加密的 / format 已损坏；nil = 还没处理（或明文消息）
     var e2eStatus: String?
     /// 0.8.0 起：服务器代加密的消息为 "server"（发送端没加密，服务器收到后立即加密保存，docs/e2ee-client.md §11.5）；发送端加密的没有
@@ -83,6 +89,8 @@ struct Message: Codable, Hashable, Identifiable {
         text = o.text
         desp = o.desp
         type = o.type
+        agentName = o.agentName
+        choices = o.choices
         doc = o.doc.flatMap { try? JSONDecoder().decode(MDDoc.self, from: $0) }
         preview = o.preview
         attachments = attachments.map { a in
@@ -100,6 +108,8 @@ struct Message: Codable, Hashable, Identifiable {
     /// 否则被攻破的服务器可以带上 e2e_status=ok 和自己写的文字，冒充一条已解开的 🔒 消息
     mutating func dropLocalFields() {
         e2eStatus = nil
+        agentName = nil
+        choices = []
         if attachments.contains(where: { $0.key != nil }) {
             attachments = attachments.map { var a = $0; a.key = nil; return a }
         }
@@ -119,6 +129,10 @@ struct Message: Codable, Hashable, Identifiable {
         case e2eStatus = "e2e_status"
         case pushkeyID = "pushkey_id"
         case silentReason = "silent_reason"
+        case agentSession = "agent_session"
+        case ask
+        case agentName = "agent_name"
+        case choices
     }
 
     /// 可选字段用 try? decodeIfPresent：缺字段直接 nil、不构造错误；类型不对仍按没有处理（和 try? decode 结果一样）
@@ -146,7 +160,15 @@ struct Message: Codable, Hashable, Identifiable {
         e2eStatus = try? c.decodeIfPresent(String.self, forKey: .e2eStatus)
         sealed = try? c.decodeIfPresent(String.self, forKey: .sealed)
         if sealed?.isEmpty == true { sealed = nil }
+        agentSession = try? c.decodeIfPresent(String.self, forKey: .agentSession)
+        if agentSession?.isEmpty == true { agentSession = nil }
+        ask = (try? c.decodeIfPresent(Bool.self, forKey: .ask)) ?? false
+        agentName = try? c.decodeIfPresent(String.self, forKey: .agentName)
+        choices = (try? c.decodeIfPresent([String].self, forKey: .choices)) ?? []
     }
+
+    /// agent 发来的消息（可以回复，见 AgentReplySection）
+    var isAgent: Bool { agentSession != nil }
 }
 
 /// 共用规则（E2E.acceptResealed 等）直接判断本地消息

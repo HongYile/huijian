@@ -43,6 +43,8 @@ enum Route: Hashable {
     case channels
     /// 设置 → 账户 →「端到端加密」
     case e2e
+    /// 设置 → 账户 →「Agent」
+    case agent
 }
 
 enum AttState: Equatable {
@@ -129,6 +131,16 @@ final class AppModel: ObservableObject {
     /// 正在批准的其他设备（§5），按 device_id
     @Published var e2eApprovals: [String: E2E.Approval] = [:]
     @Published var e2eApprovalPhases: [String: E2E.Approval.Phase] = [:]
+    /// agent 双向（AgentModel.swift）：会话列表、核实过的会话、Agent key、正在批准的登录请求
+    @Published var agentSessions: [Agent.Session] = []
+    @Published var agentVerified: [String: Agent.Verified] = [:]
+    @Published var agentKeys: [Agent.KeyInfo] = []
+    @Published var agentApprovals: [String: Agent.Approval] = [:]
+    @Published var agentPhases: [String: Agent.Phase] = [:]
+    /// 收到 kind "agent" 变更（回复、回执、会话变化）时加一：打开着的消息详情重新拉回复状态
+    @Published var agentRevision = 0
+    var agentRefreshing = false
+    var agentRefreshAgain = false
     /// 正在显示的恢复码（开启加密或更换恢复码后只显示这一次）。放在 App 状态里：离开页面再回来还在，点「完成」才清除（§4.1）
     @Published var e2eRecovery: E2ERecoveryShow?
     /// 更换恢复码结果不确定（T.recoveryUncertain）：加密页顶部提示，确认成功后自动显示恢复码页
@@ -642,7 +654,7 @@ final class AppModel: ObservableObject {
     func applyChanges(_ changes: [MsgChange]) -> Bool {
         guard !changes.isEmpty else { return false }
         var del: [Int64] = [], purge: [Int64] = [], sealed: [Int64] = [], arch: [Int64: Int] = [:]
-        var channelsChanged = false, keysChanged = false, accountChanged = false, e2eChanged = false
+        var channelsChanged = false, keysChanged = false, accountChanged = false, e2eChanged = false, agentChanged = false
         for c in changes {
             switch c.kind {
             case "delete": del.append(c.id); arch[c.id] = nil
@@ -657,10 +669,13 @@ final class AppModel: ObservableObject {
             case "devices", "account": accountChanged = true
             // 开启加密、设备请求批准 / 已批准、只接受加密消息（服务端 0.7.0 起）
             case "e2e": e2eChanged = true
+            // agent 登录请求、会话变化、回复、回执（服务端 0.10.0 起）
+            case "agent": agentChanged = true
             default: break   // 不认识的 kind 忽略
             }
         }
         if e2eChanged { Task { await refreshE2E() } }
+        if agentChanged { Task { await refreshAgent() } }
         if !sealed.isEmpty { Task { await refetchSealed(sealed) } }
         if channelsChanged, let api = api() {
             let gen = session
@@ -755,6 +770,7 @@ final class AppModel: ObservableObject {
             settings.serverVersion = serverVersion
             // 功能清单到了才知道服务端有没有端到端加密
             if supports("e2e") == true { Task { await refreshE2E() } }
+            if supports("agent") == true { Task { await refreshAgent() } }
         }
         if c != nil && m != nil && i != nil { auxFetchedAt = Date() }
         await checkUpdate()
@@ -1529,6 +1545,7 @@ final class AppModel: ObservableObject {
         e2eRequestPhase = nil
         e2eApprovals = [:]
         e2eApprovalPhases = [:]
+        resetAgent()
         e2eRecovery = nil
         e2eRecoveryNote = nil
         e2eResetNote = nil
@@ -1771,6 +1788,12 @@ final class AppModel: ObservableObject {
     func openE2E() {
         guard loggedIn else { return }
         path = [.settings, .account, .e2e]
+    }
+
+    /// agent 请求登录的通知：打开「Agent」页核对后批准
+    func openAgent() {
+        guard loggedIn else { return }
+        path = [.settings, .account, .agent]
     }
 
     // MARK: 测试推送

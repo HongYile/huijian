@@ -592,6 +592,7 @@ struct AccountManageView: View {
                 NoticeSection(notice: notice)
                 accountSection
                 if model.loggedIn { E2EEntrySection() }
+                if model.loggedIn, model.supports("agent") == true { AgentEntrySection() }
                 PairCodeSection(onUsed: { Task { await load() } })
                 devicesSection
             }

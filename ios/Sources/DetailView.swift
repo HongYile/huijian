@@ -63,7 +63,7 @@ struct DetailView: View {
                     .textSelection(.enabled)
                 // 端到端加密标记（docs/e2ee-client.md §6.3、§11.5）：普通 pushkey 发来的（服务器代加密）写「明文发送」，下面单独一行完整的 T64；
                 // 发送端加密的「🔒 端到端加密」；账号开启了加密、这条却是明文（开启加密以前收到、只留在本机的旧消息）时显示 T63
-                Text(([m.source, TimeText.full(m.createdAt), "#\(m.id)"]
+                Text(([m.isAgent ? "agent · " + (m.agentName ?? "未核实") : m.source, TimeText.full(m.createdAt), "#\(m.id)"]
                       + (m.isServerSealed ? [E2E.T.plainSentTag] : m.isE2E ? ["🔒 端到端加密"] : model.e2eAccountEnabled ? [E2E.T.t63] : []))
                     .filter { !$0.isEmpty }.joined(separator: " · "))
                     .font(.caption)
@@ -85,6 +85,8 @@ struct DetailView: View {
                 } else if !m.desp.isEmpty {
                     MarkdownView(source: m.desp, plain: m.type == "text")
                 }
+                // agent 消息：回复区（快捷回复、回复框、送达状态）
+                if m.isAgent { AgentReplySection(message: m) }
                 // 还没解开的加密消息：附件是密文，没有钥匙，不显示也不下载
                 if !m.attachments.isEmpty && !m.e2eUnreadable {
                     Text("附件 \(m.attachments.count) 个").font(.footnote.weight(.medium)).foregroundStyle(Theme.text2)

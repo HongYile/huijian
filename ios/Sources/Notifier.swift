@@ -138,6 +138,19 @@ enum Notifier {
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "e2e-\(r.notifyKey)", content: c, trigger: nil))
     }
 
+    static let agentKey = "agent"
+
+    /// agent 请求登录：点开进入「Agent」页核对后批准
+    static func postAgentRequest(_ s: Agent.Session) {
+        let c = UNMutableNotificationContent()
+        c.title = "agent 请求登录"
+        c.body = "「\(s.name)」想用你的账号收发消息。打开回笺核对 6 位核对码后批准。"
+        c.sound = .default
+        c.interruptionLevel = .active
+        c.userInfo = [agentKey: true]
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "agent-\(s.id)", content: c, trigger: nil))
+    }
+
     /// 打开了某条消息：撤掉它的通知和汇总
     static func opened(_ id: Int64) {
         UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [identifier(id), summaryID])

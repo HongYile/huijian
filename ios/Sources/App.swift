@@ -29,8 +29,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         let info = response.notification.request.content.userInfo
         let id = (info[Notifier.messageIDKey] as? NSNumber)?.int64Value
         let e2e = info[Notifier.e2eKey] as? Bool == true
+        let agent = info[Notifier.agentKey] as? Bool == true
         Task { @MainActor in
-            if e2e { AppModel.shared.openE2E() } else if let id { AppModel.shared.openMessage(id) }
+            if e2e { AppModel.shared.openE2E() }
+            else if agent { AppModel.shared.openAgent() }
+            else if let id { AppModel.shared.openMessage(id) }
             completionHandler()
         }
     }
@@ -80,6 +83,7 @@ struct RootView: View {
                         case .account: AccountManageView()
                         case .channels: ChannelsView()
                         case .e2e: E2EView()
+                        case .agent: AgentView()
                         }
                     }
             }
