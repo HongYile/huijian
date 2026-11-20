@@ -156,7 +156,7 @@ curl -F pushkey=PK_xxx -F text="exp42 完成" -F desp="val_loss **0.231**" -F pr
 | `POST /v1/logout` | 本机 token 立即失效（设备记录保留） |
 | `GET /v1/account` | 账号信息和本账号全部设备：`{"account": {"id", "username", "has_password"}, "devices": [{…, "pair_count", "pairings": [{"at", "ip", "method", "client"}]}], "register_open"}` |
 | `POST /v1/account/credentials` | `{"username", "password", "current_password"}`：账号还没有密码时，本账号任一台设备都能设置初始密码（不用核对）；已有密码时必须带当前密码（错了 403），没有例外。`password` 为空表示只改用户名。已升级到新登录协议的账号：改密码要用 `PUT /v1/account/auth`（这里带 `password` 返回 426），只改用户名时用 `current_auth_key` 核对 |
-| `POST /v1/pair-codes` | 为本账号生成配对码（3 分钟有效、只能用一次）→ `{"code", "expires_in"}`。同一台设备再次生成时，它之前没用掉的配对码立即作废；每个账号最多 5 个未使用的配对码，超出返回 429 |
+| `POST /v1/pair-codes` | 为本账号生成配对码（3 分钟有效、只能用一次）→ `{"code", "expires_in"}`。同一台设备再次生成时，它之前没用掉的配对码立即作废；每个账号最多 5 个未使用的配对码，超出返回 429。0.10.0 起（功能 id `pair.key`）可带 `{"key_wrap": "hjc1.…"}`：已解锁的设备把账号私钥用一次性钥匙锁住交给服务器暂存，新设备用长配对码登录后直接解锁，见 [e2ee-client.md](e2ee-client.md) §12 |
 | `GET /v1/pair-codes/{code}` | 配对码状态（0.5.6 起，功能 id `pair.status`）：`{"state": "waiting" \| "used" \| "expired", "expires_in", "used_by", "used_at"}`，`used` 时带使用它的设备名。只能查本账号的配对码；已用或过期的配对码保留一小时 |
 | `POST /v1/devices/{id}/revoke` | 移除本账号的另一台设备（同账号的设备之间都能互相移除）。已经移除过的返回 200 |
 
@@ -190,6 +190,7 @@ curl -F pushkey=PK_xxx -F text="exp42 完成" -F desp="val_loss **0.231**" -F pr
 ```json
 {"device_id": "d_…", "name": "我的 MacBook", "token": "DT_…", "reused": false}
 ```
+生成配对码时带了 `key_wrap`（0.10.0 起）的，响应里多一个 `"key_wrap": "hjc1.…"`，服务器随即清空它。一次性钥匙不发给服务器，`code` 只填 6 位数字。
 token 只返回这一次，请妥善保存（Mac 客户端存放在钥匙串里）。
 
 ### `GET /v1/me`
