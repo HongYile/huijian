@@ -539,10 +539,16 @@ final class SelfTest {
                   shown && !model.e2eSuggestRecovery && model.settings.e2eRecoveryHintDismissed.contains(scope))
             model.settings.e2eRecoveryHintDismissed = saved
         }
-        // 普通 pushkey 发的演示消息：服务器代加密（sealed == "server"），列表和详情标「明文发送」
+        // 演示消息（tests/hub.sh）：大部分用加密发送密钥在发送端加密（🔒），「数据采集」和一条备份通知用普通 pushkey 发，
+        // 服务器代加密（sealed == "server"），列表和详情标「明文发送」。全部是密文，本机都已解开
         let sealed = first.filter(\.isServerSealed)
-        check("普通 pushkey 的演示消息都是服务器代加密（标「明文发送」），本机已解开",
-              !first.isEmpty && sealed.count == first.count && !first.contains(where: \.e2eUnreadable), "\(sealed.count)/\(first.count)")
+        let senderE2E = first.filter { $0.isE2E && !$0.isServerSealed }
+        check("演示消息：发送端加密 \(senderE2E.count) 条（🔒）、服务器代加密 \(sealed.count) 条（明文发送），全部是密文、本机已解开",
+              !first.isEmpty && !sealed.isEmpty && senderE2E.count > sealed.count && first.allSatisfy(\.isE2E)
+              && !first.contains(where: \.e2eUnreadable)
+              && first.first { $0.title.hasPrefix("今日采集完成") }?.isServerSealed == true
+              && first.first { $0.title == "exp42 完成" }.map { $0.isE2E && !$0.isServerSealed } == true,
+              "\(senderE2E.count)/\(sealed.count)/\(first.count)")
         check("频道显示名（train → 训练）", model.channelName("train") == "训练", model.channelName("train"))
         check("频道设置已落盘（后台冷启动可用）", model.settings.channels.contains { $0.topic == "train" && $0.alias == "训练" }
               && model.settings.channels.contains { $0.topic == "debug" && $0.hidden })

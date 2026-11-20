@@ -5,10 +5,17 @@ import UserNotifications
 @main
 enum Entry {
     static func main() {
+        // 最先检查：演示构建没带 --demo、正式构建带了 --demo、--demo 参数不完整，都直接退出，
+        // 绝不退回正常模式去读写真实的回笺数据（DemoMode.swift）
+        DemoMode.exitIfInvalid()
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--selftest") {
             SelfTest.launch(Array(args[(i + 1)...]))
             return
+        }
+        if DemoMode.requested {
+            // 演示模式的网络响应只缓存在内存里，不写 ~/Library/Caches/<Bundle ID>
+            URLCache.shared = URLCache(memoryCapacity: 16 << 20, diskCapacity: 0, directory: nil)
         }
         HuijianApp.main()
     }
@@ -61,12 +68,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // 上次查看外部图片留下的临时文件
-        MDExternalImage.clearTempFiles()
+        // 上次查看外部图片留下的临时文件（演示模式不清：那是正在运行的正式 App 的文件）
+        if !DemoMode.requested { MDExternalImage.clearTempFiles() }
         AppDelegate.shared = self
         launchedAtLogin = detectLaunchedAtLogin()
         NSApp.setActivationPolicy(.accessory)
-        UNUserNotificationCenter.current().delegate = self
+        // 演示模式不接管通知中心的回调（也不发、不撤通知，见 Notifier）
+        if !DemoMode.requested { UNUserNotificationCenter.current().delegate = self }
         let model = AppModel.shared
         let env = ProcessInfo.processInfo.environment
         if model.isDemo, env["HUIJIAN_DEMO_DARK"] != nil { NSApp.appearance = NSAppearance(named: .darkAqua) }
@@ -75,11 +83,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         model.start()
         if model.isDemo {
             NSApp.setActivationPolicy(.regular)
-            // 截图用：反复激活并前置窗口，避免被台前调度收进侧边缩略图
+            // 截图用：反复前置窗口（不激活 App，不抢键盘焦点；截图按窗口 id 截，不需要在最前）。
+            // HUIJIAN_DEMO_ACTIVATE=1 时才激活（右键菜单之类需要 App 在前台的截图）
             for i in 1...8 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.7) {
-                    NSApp.activate(ignoringOtherApps: true)
-                    for w in NSApp.windows where w.isVisible && w.level == .normal { w.orderFrontRegardless() }
+                    if Self.demoActivate { NSApp.activate(ignoringOtherApps: true) }
+                    for w in NSApp.windows where w.isVisible && (w.level == .normal || w.level == .floating) { w.orderFrontRegardless() }
                 }
             }
             switch env["HUIJIAN_DEMO_SHOW"] ?? "main" {
@@ -110,9 +119,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         }
     }
 
+    /// 演示模式默认不激活 App（截图期间用户可能在别处打字，不能把键盘焦点抢过来）
+    static var demoActivate: Bool { ProcessInfo.processInfo.environment["HUIJIAN_DEMO_ACTIVATE"] == "1" }
+
     private func activate() {
         NSApp.setActivationPolicy(.regular)
+        if AppModel.shared.isDemo && !Self.demoActivate { return }
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// 前置窗口。演示模式不激活 App 时：窗口放到浮动层并强制前置（不成为当前输入的窗口）
+    private func bringFront(_ w: NSWindow?) {
+        guard let w else { return }
+        if AppModel.shared.isDemo && !Self.demoActivate {
+            w.level = .floating
+            w.orderFrontRegardless()
+        } else {
+            w.makeKeyAndOrderFront(nil)
+        }
     }
 
     func showMainWindow(select id: Int64?) {
@@ -132,7 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         }
         if let id { AppModel.shared.select(id) }
         activate()
-        window?.makeKeyAndOrderFront(nil)
+        bringFront(window)
     }
 
     /// 统一的「账户与设置」窗口。tab 为 nil 时保持当前页（新开时是「账户」）；指定 tab 时即使窗口已打开也切过去
@@ -164,7 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
             w.contentView = NSHostingView(rootView: SettingsView(tab: .account).environmentObject(AppModel.shared))
         }
         activate()
-        settingsWindow?.makeKeyAndOrderFront(nil)
+        bringFront(settingsWindow)
     }
 
     /// 账户：统一设置窗口的第一页
@@ -186,7 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         w.center()
         extraWindow = w
         activate()
-        w.makeKeyAndOrderFront(nil)
+        bringFront(w)
     }
 
     func windowWillClose(_ notification: Notification) {

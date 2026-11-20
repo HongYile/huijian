@@ -28,6 +28,7 @@ enum Keychain {
     static let account = "device-token"
 
     static func save(_ token: String, service: String = defaultService) -> Bool {
+        if DemoMode.requested { return demo { DemoMode.memoryKeychain[service] = token; return true } }   // 演示模式不碰钥匙串
         delete(service: service)
         let q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -40,6 +41,7 @@ enum Keychain {
     }
 
     static func load(service: String = defaultService) -> String? {
+        if DemoMode.requested { return demo { DemoMode.memoryKeychain[service] } }
         let q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -54,6 +56,7 @@ enum Keychain {
 
     @discardableResult
     static func delete(service: String = defaultService) -> Bool {
+        if DemoMode.requested { return demo { DemoMode.memoryKeychain[service] = nil; return true } }
         let q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -61,6 +64,11 @@ enum Keychain {
         ]
         let s = SecItemDelete(q as CFDictionary)
         return s == errSecSuccess || s == errSecItemNotFound
+    }
+
+    private static func demo<T>(_ body: () -> T) -> T {
+        DemoMode.memoryLock.lock(); defer { DemoMode.memoryLock.unlock() }
+        return body()
     }
 }
 
@@ -84,6 +92,7 @@ struct KeychainSecrets: E2ESecrets {
     }
 
     func read(_ name: String) throws -> Data? {
+        if DemoMode.requested { throw Failure(status: errSecNotAvailable) }   // 演示模式不碰钥匙串
         var q = base(name)
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -95,6 +104,7 @@ struct KeychainSecrets: E2ESecrets {
     }
 
     func write(_ name: String, _ value: Data) throws {
+        if DemoMode.requested { throw Failure(status: errSecNotAvailable) }
         let s = SecItemUpdate(base(name) as CFDictionary, [kSecValueData as String: value] as CFDictionary)
         if s == errSecSuccess { return }
         guard s == errSecItemNotFound else { throw Failure(status: s) }
@@ -107,6 +117,7 @@ struct KeychainSecrets: E2ESecrets {
     }
 
     func remove(_ name: String) throws {
+        if DemoMode.requested { throw Failure(status: errSecNotAvailable) }
         let s = SecItemDelete(base(name) as CFDictionary)
         guard s == errSecSuccess || s == errSecItemNotFound else { throw Failure(status: s) }
     }

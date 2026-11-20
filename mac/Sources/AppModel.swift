@@ -94,26 +94,27 @@ struct NotifyPrefs: Codable, Equatable {
 @MainActor
 final class AppModel: ObservableObject {
     /// 正常启动用标准目录；`--demo <server> <token> <workdir>` 用于隔离的 GUI 测试
-    /// （数据写测试目录、token 直接注入、不碰钥匙串、不请求通知权限、偏好写独立 suite）。
+    /// （数据写测试目录、token 直接注入、不碰钥匙串、不请求通知权限、偏好写独立 suite，见 DemoMode.swift）。
+    /// 命令行里只要有 --demo 就只走演示分支：参数不对时 Entry.main 已经退出，这里再兜底一次，绝不落到真实数据上。
     static let shared: AppModel = {
-        let a = CommandLine.arguments
-        if let i = a.firstIndex(of: "--demo"), i + 3 < a.count {
-            let dir = URL(fileURLWithPath: a[i + 3])
-            let suite = "io.github.hongyile.huijian.demo"
-            UserDefaults().removePersistentDomain(forName: suite)
-            let m = AppModel(paths: AppPaths(supportDir: dir.appendingPathComponent("support"),
-                                             cacheDir: dir.appendingPathComponent("cache")),
-                             keychainService: "io.github.hongyile.huijian.demo", loadToken: false,
-                             defaults: UserDefaults(suiteName: suite)!)
-            m.useToken(a[i + 2], server: a[i + 1])
-            m.notificationsEnabled = false
+        if DemoMode.requested {
+            guard let d = DemoMode.args else { DemoMode.exitIfInvalid(); fatalError("--demo 参数不完整") }
+            UserDefaults().removePersistentDomain(forName: DemoMode.suite)
+            let m = AppModel(paths: AppPaths(supportDir: d.workdir.appendingPathComponent("support"),
+                                             cacheDir: d.workdir.appendingPathComponent("cache")),
+                             keychainService: DemoMode.keychainService, loadToken: false,
+                             defaults: DemoMode.defaults)
             m.isDemo = true
+            m.useToken(d.token, server: d.server)
+            m.notificationsEnabled = false
             m.deviceName = "我的 MacBook"
             return m
         }
         return AppModel(paths: .standard)
     }()
     private(set) var isDemo = false
+    /// 心跳记录：演示模式写独立偏好域（Heartbeat.shared 固定写标准偏好）
+    private var heartbeat: Heartbeat { isDemo ? DemoMode.heartbeat : .shared }
 
     @Published private(set) var messages: [Message] = [] { didSet { archGen &+= 1 } }  // 按 id 升序
     @Published var read: Set<Int64> = []
@@ -279,7 +280,7 @@ final class AppModel: ObservableObject {
         self.paths = paths
         self.keychainService = keychainService
         self.defaults = defaults
-        e2eSecrets = loadToken ? KeychainSecrets(service: keychainService + ".e2e") : E2E.MemorySecrets()
+        e2eSecrets = loadToken && !DemoMode.requested ? KeychainSecrets(service: keychainService + ".e2e") : E2E.MemorySecrets()
         let s = Persistence.load(paths.messagesFile)
         messages = s.messages.sorted { $0.id < $1.id }
         read = s.read
@@ -308,7 +309,7 @@ final class AppModel: ObservableObject {
         let attDir = defaults.string(forKey: Self.key("attachmentDir")).map { URL(fileURLWithPath: $0, isDirectory: true) } ?? paths.attDir
         attachmentDir = attDir
         cache = AttachmentCache(baseDir: attDir, indexFile: paths.cacheDir.appendingPathComponent("att-index.json"))
-        if loadToken { token = Keychain.load(service: keychainService) }
+        if loadToken && !DemoMode.requested { token = Keychain.load(service: keychainService) }
         state = token == nil ? .unpaired : .connecting
         refreshLocalFiles()
     }
@@ -743,7 +744,7 @@ final class AppModel: ObservableObject {
                 let since = manage ? changesCursor : nil
                 let net = NetKind.shared.snapshot
                 let kind = net.kind
-                let wait = Heartbeat.shared.wait(for: kind)
+                let wait = heartbeat.wait(for: kind)
                 let began = Date()
                 let page: APIClient.MessagePage
                 do {
@@ -751,13 +752,13 @@ final class AppModel: ObservableObject {
                 } catch {
                     // 只记「这条网络把连接断了」：重启循环、换网络、断网引起的失败都不算
                     if !Task.isCancelled, net.ready, NetKind.shared.snapshot.gen == net.gen, Heartbeat.countsAsDrop(error) {
-                        Heartbeat.shared.record(kind, wait: wait, elapsed: Date().timeIntervalSince(began), outcome: .failed)
+                        heartbeat.record(kind, wait: wait, elapsed: Date().timeIntervalSince(began), outcome: .failed)
                     }
                     throw error
                 }
                 if Task.isCancelled { return }
                 let gotData = !page.messages.isEmpty || page.changesReset || !page.changes.isEmpty
-                if net.ready { Heartbeat.shared.record(kind, wait: wait, elapsed: Date().timeIntervalSince(began), outcome: .ok, gotData: gotData) }
+                if net.ready { heartbeat.record(kind, wait: wait, elapsed: Date().timeIntervalSince(began), outcome: .ok, gotData: gotData) }
                 if let n = page.nextSince { serverCursor = max(serverCursor, n) }
                 var fresh = page.messages
                 var changes: [APIClient.MsgChange] = []
@@ -881,13 +882,13 @@ final class AppModel: ObservableObject {
             do {
                 serverInfo = try await client.info()
                 serverLegacy = false
-                Heartbeat.shared.serverMax = support("poll.long") == .yes ? (serverInfo?.long_poll_max ?? Heartbeat.oldServerMax) : Heartbeat.oldServerMax
+                heartbeat.serverMax = support("poll.long") == .yes ? (serverInfo?.long_poll_max ?? Heartbeat.oldServerMax) : Heartbeat.oldServerMax
                 // 服务端不支持频道设置（降级过）：本地缓存的隐藏 / 静音没法再改，不再生效
                 if support("channels") == .needsServerUpdate, !channelSettings.isEmpty { channelSettings = [:] }
             } catch APIError.unsupported {
                 serverInfo = nil
                 serverLegacy = true
-                Heartbeat.shared.serverMax = Heartbeat.oldServerMax
+                heartbeat.serverMax = Heartbeat.oldServerMax
             } catch {}   // 网络错误：保留上一次的结果
         }
     }
@@ -1858,6 +1859,7 @@ final class AppModel: ObservableObject {
     var launchAtLogin: Bool { SMAppService.mainApp.status == .enabled }
 
     func setLaunchAtLogin(_ on: Bool) throws {
+        if isDemo { return }     // 演示模式不改本机的登录项
         if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
         objectWillChange.send()
     }
@@ -1867,6 +1869,24 @@ final class AppModel: ObservableObject {
     /// demo：按环境变量预下载附件、选中消息
     private func demoAfterSync() async {
         let env = ProcessInfo.processInfo.environment
+        // 0.9.0 账号注册即开启加密：配对码登录的演示设备先用账号密码解锁（截图里的加密消息才能解开）。
+        // 密码只在启动演示 App 的那一行作为环境变量传入，是测试脚本随机生成的演示账号密码
+        if let pw = env["HUIJIAN_DEMO_PASSWORD"], !pw.isEmpty {
+            if account == nil { await refreshMe() }
+            for _ in 0..<50 where serverInfo == nil { try? await Task.sleep(nanoseconds: 100_000_000) }
+            await refreshE2E()
+            if e2eLocked {
+                do { try await e2eUnlock(password: pw) } catch { NSLog("演示：用密码解锁加密失败：\(error.localizedDescription)") }
+            }
+            // HUIJIAN_DEMO_RECOVERY=1：演示账号像真实用户一样设好恢复码（和设置里「更换恢复码」同一条路，再相当于点了「完成」），
+            // 主窗口不再显示「还没有设置恢复码」的建议（和 iOS 演示 -demoRecovery 一致）。已经设过的不重复设
+            if env["HUIJIAN_DEMO_RECOVERY"] == "1", e2eStatus == .unlocked, e2eState?.hasRecovery == false {
+                do {
+                    try await e2eRotateRecovery(password: pw)
+                    e2eRecoveryDone()
+                } catch { NSLog("演示：设置恢复码失败：\(error.localizedDescription)") }
+            }
+        }
         if env["HUIJIAN_DEMO_UPDATE"] != nil {
             // 演示用的新版本号 = 当前版本的修订号 + 1，截图不会出现「新版本」比当前版本还旧
             var parts = AppInfo.version.split(separator: ".").map { Int($0) ?? 0 }
@@ -1920,8 +1940,10 @@ final class AppModel: ObservableObject {
 
 // MARK: 通知
 
+/// 演示模式（DemoMode）下一律不碰通知中心：不请求授权、不发、不撤
 enum Notifier {
     static func requestAuthorization() {
+        if DemoMode.requested { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, err in
             if let err { NSLog("回笺 通知授权失败: \(err.localizedDescription)") }
             NSLog("回笺 通知授权: \(granted)")
@@ -1930,6 +1952,7 @@ enum Notifier {
 
     /// 一次到达太多（例如断网恢复后）时只弹一条汇总，避免刷屏
     static func postSummary(count: Int, sound: Bool) {
+        if DemoMode.requested { return }
         let c = UNMutableNotificationContent()
         c.title = "收到 \(count) 条新消息"
         c.body = "点击打开回笺查看"
@@ -1940,6 +1963,7 @@ enum Notifier {
 
     /// 有设备请求解锁加密消息（T50），点开进入设置的「加密」页
     static func postE2ERequest(_ r: E2E.Request) {
+        if DemoMode.requested { return }
         let c = UNMutableNotificationContent()
         c.title = "端到端加密"
         c.body = E2E.T.t50(r.name.isEmpty ? "新设备" : r.name)
@@ -1951,11 +1975,12 @@ enum Notifier {
 
     /// 删除消息后，把通知中心里对应的通知一起撤掉
     static func remove(_ ids: [Int64]) {
-        guard !ids.isEmpty else { return }
+        guard !ids.isEmpty, !DemoMode.requested else { return }
         UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids.map { "msg-\($0)" })
     }
 
     static func post(_ m: Message, sound: Bool, topicName: String? = nil) {
+        if DemoMode.requested { return }
         let c = UNMutableNotificationContent()
         let s = PriorityStyle.of(m.priority)
         c.title = m.priority >= 4 ? "【\(s.name)】\(m.text)" : m.text

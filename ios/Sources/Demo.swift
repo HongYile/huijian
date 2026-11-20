@@ -2,7 +2,7 @@ import SwiftUI
 
 /// 演示 / 测试模式（tests/sim_shots.sh、tests/selftest.sh 用）。参数通过启动参数传入，例如
 ///   xcrun simctl launch <设备> io.github.hongyile.huijian -demoServer http://127.0.0.1:28790 -demoUser me -demoPass xxx \
-///     -demoReset YES -demoUnread 4 -demoOpen "exp42 完成"
+///     -demoReset YES -demoUnread 4 -demoOpen "exp42 完成" -demoRecovery YES
 /// 这些参数进入 UserDefaults 的参数域，不会写进持久设置。正常启动时不带这些参数，什么都不做。
 enum Demo {
     private static var d: UserDefaults { .standard }
@@ -34,6 +34,18 @@ enum Demo {
         await model.waitLoaded()      // 本地消息在后台读取，读完再演示标未读、打开消息
         // 等首次同步完成（首次同步会把消息全部标为已读）
         for _ in 0..<100 where !model.settings.initialSyncDone { try? await Task.sleep(nanoseconds: 200_000_000) }
+        // -demoRecovery YES：演示账号像真实用户一样设好恢复码（和设置里「设置恢复码」同一条路：用密码核对、换上新的恢复码，
+        // 再相当于点了「完成」）。设好后首页不再显示「还没有设置恢复码」的建议。已经设过的不重复设
+        if d.bool(forKey: "demoRecovery") {
+            await model.refreshE2E()
+            for _ in 0..<40 where model.e2eStatus != .unlocked { try? await Task.sleep(nanoseconds: 250_000_000) }
+            if model.e2eStatus == .unlocked, model.e2eState?.hasRecovery == false {
+                do {
+                    try await model.e2eRotateRecovery(password: pass)
+                    model.e2eFinishRecovery()
+                } catch { print("演示设置恢复码失败：\(shortError(error))") }
+            }
+        }
         let unread = d.integer(forKey: "demoUnread")
         if unread > 0 { model.demoMarkUnread(unread) }
         // 等频道、Bark 配置等辅助信息拉完

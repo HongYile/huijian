@@ -24,9 +24,9 @@ enum DeviceFingerprint {
     /// 取不到硬件 UUID 时（极少见）：生成一个随机 ID 存在偏好里，至少同一个用户账户下稳定
     private static func fallbackID() -> String {
         let k = "huijian.fallbackDeviceID"
-        if let v = UserDefaults.standard.string(forKey: k) { return v }
+        if let v = DemoMode.defaults.string(forKey: k) { return v }   // 演示模式用独立偏好域
         let v = UUID().uuidString
-        UserDefaults.standard.set(v, forKey: k)
+        DemoMode.defaults.set(v, forKey: k)
         return v
     }
 }

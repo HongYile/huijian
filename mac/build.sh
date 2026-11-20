@@ -13,6 +13,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 #   PUBLIC_BUILD=1  构建公开发布版：只从 build.local.env 读取签名身份，忽略其中的私人服务器 / 更新源配置
 #   OUT_DIR         输出目录，默认 build
+#   DEMO_ONLY=1     只用于截图的演示构建（tests/gui_shots.sh 用）：Info.plist 写 HuijianDemoOnly，App 只能带 --demo 启动，
+#                   Bundle ID 必须和正式版不同
 if [ -f build.local.env ]; then
   if [ "${PUBLIC_BUILD:-}" = 1 ]; then
     eval "$(grep -E '^(SIGN_IDENTITY|SIGN_KEYCHAIN|SIGN_KEYCHAIN_PASSWORD_FILE)=' build.local.env)"
@@ -21,6 +23,12 @@ if [ -f build.local.env ]; then
   fi
 fi
 BUNDLE_ID="${BUNDLE_ID:-io.github.hongyile.huijian}"
+DEMO_ONLY="${DEMO_ONLY:-}"
+DEMO_KEY=""
+if [ "$DEMO_ONLY" = 1 ]; then
+  [ "$BUNDLE_ID" != io.github.hongyile.huijian ] || { echo "DEMO_ONLY=1 的演示构建必须用单独的 BUNDLE_ID" >&2; exit 1; }
+  DEMO_KEY=' <key>HuijianDemoOnly</key><true/>'
+fi
 DEFAULT_SERVER="${DEFAULT_SERVER:-}"
 UPDATE_SOURCE="${UPDATE_SOURCE:-github:HongYile/huijian}"
 # 官方 GitHub 发布渠道的签名公钥（私钥只在维护者手里）
@@ -59,6 +67,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
  <key>HuijianDefaultServer</key><string>${DEFAULT_SERVER}</string>
  <key>HuijianUpdatePublicKey</key><string>${UPDATE_PUBKEY}</string>
  <key>HuijianUpdateSource</key><string>${UPDATE_SOURCE}</string>
+${DEMO_KEY}
  <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
  <key>LSMinimumSystemVersion</key><string>14.0</string>
  <key>LSUIElement</key><true/>

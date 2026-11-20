@@ -24,7 +24,7 @@ S=screenshots; mkdir -p $S; rm -f $S/*.png
 xcrun simctl terminate "$UDID" $BID 2>/dev/null
 xcrun simctl uninstall "$UDID" $BID 2>/dev/null
 xcrun simctl install "$UDID" build/sim/Huijian.app
-DEMO_ARGS=(-demoServer $PUB -demoUser $DEMO_USER -demoPass $DEMO_PASS)
+DEMO_ARGS=(-demoServer $PUB -demoUser $DEMO_USER -demoPass $DEMO_PASS -demoRecovery YES)
 shot(){ # 名称 外观 等待秒数 启动参数...
   local name=$1 look=$2 wait=$3; shift 3
   xcrun simctl ui "$UDID" appearance $look
@@ -72,9 +72,13 @@ xcrun simctl terminate "$UDID" $BID 2>/dev/null
 xcrun simctl ui "$UDID" appearance light
 NEWID=$(curl -s $PUB/message/push -d pushkey=$K_MON -d priority=5 -d topic=infra --data-urlencode "text=gpu-node-2 掉线" \
   --data-urlencode $'desp=最后一次心跳：**3 分钟前**\n\n- 主机：gpu-node-2\n- 影响：exp43 训练暂停' \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin)["content"]["result"][0])')
-xcrun simctl launch "$UDID" $BID -demoOpenURL "huijian://message/$NEWID" > /dev/null
-sleep 7
-xcrun simctl io "$UDID" screenshot --type=png $S/deeplink.png > /dev/null 2>&1 && echo "✅ $S/deeplink.png（huijian://message/${NEWID}）"
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["content"]["result"][0])' 2>/dev/null)
+case "$NEWID" in
+  ''|*[!0-9]*) echo "❌ deeplink：推送「gpu-node-2 掉线」失败，跳过这张";;
+  *) xcrun simctl launch "$UDID" $BID -demoOpenURL "huijian://message/$NEWID" > /dev/null
+     sleep 7
+     xcrun simctl io "$UDID" screenshot --type=png $S/deeplink.png > /dev/null 2>&1 && echo "✅ $S/deeplink.png（huijian://message/${NEWID}）" \
+       || echo "❌ deeplink";;
+esac
 xcrun simctl status_bar "$UDID" clear
 xcrun simctl terminate "$UDID" $BID 2>/dev/null
