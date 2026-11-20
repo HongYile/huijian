@@ -4,6 +4,8 @@
   "attest": "hja1.DAwMDAwMDAwMDAwMLUkqs2bVqwxgXNp421_bRwZaWVxd0KqtOV2PlF7qa90-wwkgSOiQIK0XMi-Yv0eh5xQ6z0RLjItHcxYBtdqYmg8DMc2DOMf8zCVwyZg10S5acJvkM92cWDJsBBN_2UE1qz8puzgPrPqOfY2XdRlm8jEdTjmHOJG2D5IC1HcQ7t6ToF7QoIXJ-LRLIfOwBeL-XdKqk4DVrGwt3ftE",
   "attest_plain": "{\"session_id\":\"as0123456789abcdef\",\"pub\":\"nAIeO6xrRphtc6VSnG8PKwibjoT7DghcURHSoyOPsAw\",\"name\":\"家里 Claude Code\",\"approved_at\":1763600000}",
   "commit": "HixbT0diYPsF3L2Rabda1ENL0bZ8rtSbZaA2RPdNeIM",
+  "eph1_sk": "X3cbhaHcN2IVcBRCpuUuS6d1Gf9O15dnuwgIglfI1RU",
+  "eph2_sk": "Sfhfw8fPWCSRQXzoi5Z0CT5CKuHcm_sT3_YGvNnPbAo",
   "message": "{\"v\":1,\"kind\":\"message\",\"text\":\"要不要删掉 3 个异常样本？\",\"ask\":true,\"choices\":[\"删\",\"保留\"],\"seq\":1,\"sent_at\":1763600000}",
   "message_envelope": "hje2.216a804d4ed4b272.as0123456789abcdef.ayONaGyV7L-4cs2ioWv_rryHMJChCS2hh050xJbxWVkettRto76wkgZDAZ2DQ19HuZAJECs_dvdfLkc6o7bMqFFaA6494-oTJ5B3EU-OnZ-UlynR65uDLfF-8toxMBJQkznkHM6Y8OXkpj-LUrBNzIWg-9ZtNqGPmE9OA6ZqWu1Ec95S0d1-5_Y-UD-LNejiCKAcYGfRVOB6-oSBBWzugGxx15Lbdn9K1IJOF2wSHxQzYTQAQigjy6k",
   "msg_id": 42,

@@ -404,6 +404,7 @@ func TestAgentVectors(t *testing.T) {
 	v := map[string]any{
 		"account_sk": b64of(acct.Bytes()), "account_pub": b64of(acct.PublicKey().Bytes()),
 		"session_sk": b64of(sess.Bytes()), "session_pub": b64of(sess.PublicKey().Bytes()),
+		"eph1_sk": b64of(eph1.Bytes()), "eph2_sk": b64of(eph2.Bytes()),
 		"na": b64of(na), "nb": b64of(nb),
 		"commit":     b64of(agentCommit(sess.PublicKey().Bytes(), acct.PublicKey().Bytes(), nb)),
 		"sas":        agentSAS(sess.PublicKey().Bytes(), acct.PublicKey().Bytes(), na, nb),

@@ -138,7 +138,7 @@ MCP 工具：
 
 skill：`skills/huijian` 里加一节「问用户、等回复」，教 agent 用 `huijian agent ask`。只有确实需要人决定时才用，不要把普通进度做成提问。
 
-会话状态（会话私钥、令牌、钉住的账号公钥、已处理 seq）存在 `~/.huijian/agent/<会话名>/`，权限 600。
+会话状态（会话私钥、令牌、钉住的账号公钥、消息序号、处理过的回复）存在 `~/.huijian/agent/<槽位>/session.json`（目录 700、文件 600）；槽位用 `-s` 或环境变量 `HUIJIAN_AGENT_SESSION` 指定，默认 `default`。`ask` 超时退出码 3；等待期间收到的别的消息的回复留到下次 `replies` / `check_replies` 交出。MCP 的工具调用一个一个执行（`ask` 等待期间别的调用排队）。
 
 ## 8. 客户端
 
@@ -189,6 +189,19 @@ Mac、iPhone、安卓同步做：
 | 设备 → agent `hjq1` | `hjq1.<session_id>.<base64url(enc‖ct)>`；HPKE auth（发送方 = 账号私钥，接收方 = 会话公钥，取自会话证明），info `huijian agent v1 reply`，附加数据 `hjq1.<session_id>.<msg_id>` | |
 | 回复载荷 | `{"v":1,"text","n":"<16 字节随机数 base64url>","sent_at":秒,"device":"<设备名>"}` | 文字最长 16 KB；agent 记下处理过的 `n`（保留 3 天），重放的丢弃 |
 | 回复副本 | 普通 `hje1` 信封（加密给账号公钥），载荷同上 | 同账号其他设备靠它显示回复内容（`hjq1` 只有 agent 解得开） |
+
+共用核心（`core/src/agent.rs`，JSON 操作见 `api.rs`）给设备一侧提供：
+
+| 操作 | 参数 → 结果 |
+|---|---|
+| `agent_commit` | `{pub, account, nonce}` → `{commit}`：设备用**自己私钥算出的**账号公钥核对 agent 揭晓的 nb |
+| `agent_sas` | `{pub, account, na, nb}` → `{code}` |
+| `agent_attest_seal` | `{sk, session_id, pub, name, approved_at}` → `{attest}` |
+| `agent_attest_open` | `{sk, attest, session_id, pub}` → `{name, approved_at}`；证明里的会话 id、公钥对不上时 `format` |
+| `agent_open` | `{keys:[账号私钥…], session_pub, session_id, envelope}` → `{payload, kid}`：消息和回执都用它 |
+| `agent_reply_seal` | `{sk, session_pub, session_id, msg_id, payload}` → `{envelope, copy}` |
+
+跨平台向量：`server/testdata/agent_vectors.json`（Go 生成，`core/tests/agent.rs` 逐字节核对）。
 
 设备收到 `hje2` 消息：先用会话证明拿到会话公钥（证明解不开、`session_id` 对不上 → 显示「来源无法核实」，不显示回复按钮），再用 auth 模式解开；发送方核对失败同样当作「来源无法核实」。
 

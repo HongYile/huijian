@@ -4,7 +4,7 @@
 //! 二进制字段（钥匙、随机数、凭证）一律 base64url 无填充；盐是十六进制（与服务端 /v1/prelogin 一致）。
 //! 错误代码：bad_request（参数缺失或格式不对）、format（密文格式不对或被篡改）、wrong_key（不是这把钥匙加密的）、
 //! io（文件读写失败）、weak_params（服务器给的派生参数太弱，拒绝）。
-use crate::{crypto, md, password};
+use crate::{agent, crypto, md, password};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use base64::Engine;
 use serde_json::{json, Map, Value};
@@ -207,6 +207,67 @@ fn dispatch(m: &Map<String, Value>) -> R {
         "sas_commit" => Ok(json!({"commit": b64(&crypto::sas_commit(&key32(m, "pub")?, &key32(m, "account")?, &key32(m, "nonce")?))})),
         "sas_code" => Ok(json!({"code": crypto::sas_code(&key32(m, "pub")?, &key32(m, "account")?, &key32(m, "na")?, &key32(m, "nb")?)})),
 
+        // ---------- agent 双向（docs/agent-mcp.md §11） ----------
+        "agent_commit" => Ok(json!({"commit": b64(&agent::commit(&key32(m, "pub")?, &key32(m, "account")?, &key32(m, "nonce")?))})),
+        "agent_sas" => Ok(json!({"code": agent::sas(&key32(m, "pub")?, &key32(m, "account")?, &key32(m, "na")?, &key32(m, "nb")?)})),
+        "agent_attest_seal" => {
+            let a = Attest {
+                session_id: s(m, "session_id")?.into(),
+                pub_key: s(m, "pub")?.into(),
+                name: s(m, "name")?.into(),
+                approved_at: m.get("approved_at").and_then(Value::as_i64).ok_or_else(|| bad("缺少参数 approved_at"))?,
+            };
+            key32(m, "pub")?;
+            let pt = serde_json::to_vec(&a).unwrap();
+            let att = crypto::wrap(agent::ATTEST_PREFIX, &agent::attest_key(&key32(m, "sk")?), &pt, None).map_err(from_crypto)?;
+            Ok(json!({"attest": att}))
+        }
+        // 核对会话证明：必须是这把账号私钥写的，且写的就是这个会话、这个公钥（服务器换不了会话公钥）
+        "agent_attest_open" => {
+            let pt = crypto::unwrap(agent::ATTEST_PREFIX, &agent::attest_key(&key32(m, "sk")?), s(m, "attest")?).map_err(from_crypto)?;
+            let a: Attest = serde_json::from_slice(&pt).map_err(|_| Fail("format", "会话证明内容不对".into()))?;
+            if a.session_id != s(m, "session_id")? || a.pub_key != s(m, "pub")? {
+                return Err(Fail("format", "会话证明和会话对不上".into()));
+            }
+            Ok(json!({"name": a.name, "approved_at": a.approved_at}))
+        }
+        // 解开 agent 消息或回执：keys 是账号私钥（可多把，按 kid 选），session_pub 取自核对过的会话证明
+        "agent_open" => {
+            let env = s(m, "envelope")?;
+            let sess_pub = key32(m, "session_pub")?;
+            let want = s(m, "session_id")?;
+            let keys = m.get("keys").and_then(Value::as_array).ok_or_else(|| bad("缺少参数 keys"))?;
+            let mut last = crypto::Error::WrongKey;
+            for k in keys {
+                let sk: [u8; 32] = k
+                    .as_str()
+                    .and_then(|x| B64.decode(x).ok())
+                    .and_then(|b| b.try_into().ok())
+                    .ok_or_else(|| bad("keys 里的钥匙格式不对"))?;
+                match agent::open(&sk, &sess_pub, env) {
+                    Ok((sid, pt)) => {
+                        if sid != want {
+                            return Err(Fail("format", "消息不是这个会话发的".into()));
+                        }
+                        let payload: Value = serde_json::from_slice(&pt).map_err(|_| Fail("format", "解开的内容不是 JSON".into()))?;
+                        return Ok(json!({"payload": payload, "kid": crypto::kid(&crypto::public_key(&sk))}));
+                    }
+                    Err(crypto::Error::WrongKey) => continue,
+                    Err(e) => last = e,
+                }
+            }
+            Err(from_crypto(last))
+        }
+        // 回复 agent：envelope 给会话（hjq1），copy 是给账号自己的副本（hje1，别的设备显示用）
+        "agent_reply_seal" => {
+            let sk = key32(m, "sk")?;
+            let payload = s(m, "payload")?.as_bytes();
+            let msg_id = m.get("msg_id").and_then(Value::as_i64).filter(|x| *x > 0).ok_or_else(|| bad("缺少参数 msg_id"))?;
+            let env = agent::reply_seal(&key32(m, "session_pub")?, &sk, s(m, "session_id")?, msg_id, payload, None).map_err(from_crypto)?;
+            let copy = crypto::seal_message(&crypto::public_key(&sk), payload).map_err(from_crypto)?;
+            Ok(json!({"envelope": env, "copy": copy}))
+        }
+
         // ---------- 消息与附件 ----------
         "open_message" => {
             let env = s(m, "envelope")?;
@@ -344,4 +405,14 @@ fn pct_decode(s: &str) -> Option<String> {
         }
     }
     String::from_utf8(out).ok()
+}
+
+/// 会话证明 hja1 的明文（字段顺序与服务端 agentAttest 一致）
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Attest {
+    session_id: String,
+    #[serde(rename = "pub")]
+    pub_key: String,
+    name: String,
+    approved_at: i64,
 }
