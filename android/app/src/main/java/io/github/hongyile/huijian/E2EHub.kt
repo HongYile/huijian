@@ -284,9 +284,10 @@ object E2EHub {
     fun activeSk(): String? = if (_status.value == E2EStatus.UNLOCKED) accountKey()?.sk else null
 
     private fun recompute() {
-        AgentHub.keysMaybeChanged(vault().keys.map { it.kid })    // 钥匙变了（解锁、重置）：重新核实 agent 会话证明
         val pin = pinned()
         _status.value = if (unsupported) E2EStatus.UNSUPPORTED else logic.status(_state.value, vault().keys, pin)
+        // 本机钥匙或当前钥匙变了（解锁、重置）：重新核实 agent 会话证明（只有当前钥匙写的证明能回复）
+        AgentHub.keysMaybeChanged(vault().keys.map { it.kid } + listOfNotNull(accountKey()?.kid?.takeIf { _status.value == E2EStatus.UNLOCKED }?.let { "current:$it" }))
         _keyChanged.value = !unsupported && logic.pinStale(_state.value, pin)
         _weakPassword.value = owner()?.let { Hub.store.weakPassword(it) } ?: false
         updatePrompt()

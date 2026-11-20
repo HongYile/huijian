@@ -33,6 +33,8 @@ object AgentText {
     const val NO_REPLY_SEALED = "消息还没解开，不能回复。"
     const val NO_REPLY_LOCKED = "本机还没有解锁加密，不能回复。"
     const val NO_REPLY_LOADING = "正在读取 agent 会话…"
+    const val NO_REPLY_OLD_KEY = "这个会话是重置加密前批准的，不能再回复。"
+    const val NO_REPLY_NO_SEQ = "这条消息没有序号，不能回复。"
     const val UNSUPPORTED = "服务端版本较旧，agent 双向需要回笺服务端 0.10.0 及以上，请更新服务端"
 }
 
@@ -44,7 +46,7 @@ interface AgentCrypto {
     fun random32(): String
     fun openMessage(keys: List<String>, envelope: String): JSONObject
     fun mdBuild(text: String, desp: String, atts: List<Map<String, Any?>>): Pair<String, String>
-    fun agentCommit(pub: String, account: String, nonce: String): String
+    fun agentCommit(pub: String, account: String, nonce: String, name: String): String
     fun agentSas(pub: String, account: String, na: String, nb: String): String
     fun agentAttestSeal(sk: String, sessionId: String, pub: String, name: String, approvedAt: Long): String
     fun agentAttestOpen(sk: String, attest: String, sessionId: String, pub: String): String
@@ -58,7 +60,7 @@ object CoreAgentCrypto : AgentCrypto {
     override fun random32() = Core.random32()
     override fun openMessage(keys: List<String>, envelope: String) = Core.openMessage(keys, envelope)
     override fun mdBuild(text: String, desp: String, atts: List<Map<String, Any?>>) = Core.mdBuild(text, desp, atts)
-    override fun agentCommit(pub: String, account: String, nonce: String) = Core.agentCommit(pub, account, nonce)
+    override fun agentCommit(pub: String, account: String, nonce: String, name: String) = Core.agentCommit(pub, account, nonce, name)
     override fun agentSas(pub: String, account: String, na: String, nb: String) = Core.agentSas(pub, account, na, nb)
     override fun agentAttestSeal(sk: String, sessionId: String, pub: String, name: String, approvedAt: Long) =
         Core.agentAttestSeal(sk, sessionId, pub, name, approvedAt)
@@ -118,8 +120,12 @@ data class AgentReplyStatus(
     val copy: String = "", val receipt: String = "", val device: String = "",
 )
 
-/** 核实过的会话：名称取自会话证明（服务器给的 name 不用），公钥用来解开它的消息、加密给它的回复 */
-data class AgentVerified(val name: String, val pub: String)
+/**
+ * 核实过的会话：名称取自会话证明（服务器给的 name 不用），公钥用来解开它的消息、加密给它的回复。
+ * current：证明是账号**当前**钥匙写的，只有这样的会话能回复；重置加密前的旧钥匙写的只用来显示历史消息
+ * （旧私钥可能已经泄露：拿着旧私钥又控制服务器的人能给自己的公钥伪造证明）
+ */
+data class AgentVerified(val name: String, val pub: String, val current: Boolean = true)
 
 /** 一条回复在本机显示的样子。sentAt / receivedAt 是 Unix 秒；received 只在回执核对通过时才算 */
 data class AgentReplyView(val id: Long, val text: String, val device: String, val sentAt: Long?, val state: State, val receivedAt: Long?) {
@@ -176,12 +182,13 @@ class AgentApproval private constructor(private val c: AgentCrypto, val session:
         if (stopped || phase != AgentPhase.Challenged) return phase
         val s = sessions.firstOrNull { it.id == session.id }
         if (s == null || !s.pending) { phase = AgentPhase.Failed(AgentText.GONE); return phase }
-        if (s.pub != session.pub || s.commit != session.commit || s.challenge != na) {
+        if (s.pub != session.pub || s.commit != session.commit || s.name != session.name || s.challenge != na) {
             phase = AgentPhase.Failed(AgentText.RESTARTED); return phase
         }
         if (s.reveal.isEmpty()) return phase
-        // 用本机私钥算出的账号公钥核对承诺：agent 看到的是假的账号公钥时对不上
-        val commit = runCatching { c.agentCommit(s.pub, account, s.reveal) }.getOrNull()
+        // 用本机私钥算出的账号公钥核对承诺：agent 看到的是假的账号公钥时对不上。
+        // 名称也在承诺里（用接手时快照的名称）：服务器改不了设备上显示、写进证明的名称
+        val commit = runCatching { c.agentCommit(s.pub, account, s.reveal, session.name) }.getOrNull()
         val code = if (commit == s.commit) runCatching { c.agentSas(s.pub, account, na, s.reveal) }.getOrNull() else null
         if (code == null) {
             runCatching { net.agentDeny(s.id) }
@@ -258,14 +265,17 @@ object Agent {
 
     // ---------- 核实会话 ----------
 
-    /** 用账号私钥（可以多把：重置加密前批准的会话用旧钥匙写的证明）核对每个会话的证明；核对不过的不在结果里 */
-    fun verify(sessions: List<AgentSession>, keys: List<String>, c: AgentCrypto): Map<String, AgentVerified> {
+    /**
+     * 用账号私钥（可以多把：重置加密前批准的会话用旧钥匙写的证明）核对每个会话的证明；核对不过的不在结果里。
+     * current：账号当前的私钥（null = 不知道，全部按旧钥匙处理，不能回复）
+     */
+    fun verify(sessions: List<AgentSession>, keys: List<String>, current: String?, c: AgentCrypto): Map<String, AgentVerified> {
         val out = LinkedHashMap<String, AgentVerified>()
         for (s in sessions) {
             if (s.attest.isEmpty() || s.pub.isEmpty()) continue
             for (k in keys) {
                 val name = runCatching { c.agentAttestOpen(k, s.attest, s.id, s.pub) }.getOrNull() ?: continue
-                out[s.id] = AgentVerified(name, s.pub)
+                out[s.id] = AgentVerified(name, s.pub, current = current != null && k == current)
                 break
             }
         }
@@ -304,22 +314,25 @@ object Agent {
         val choices = (0 until (arr?.length() ?: 0)).mapNotNull { arr!!.opt(it) as? String }
             .map { it.trim() }.filter { cps(it) in 1..MAX_CHOICE_LEN }.take(MAX_CHOICES)
         val (doc, preview) = if (desp.isBlank()) null to "" else try { c.mdBuild(text, desp, emptyList()) } catch (_: Exception) { null to "" }
+        // 「等你回复」用载荷里的 ask（服务器给的只在解开前显示占位）；seq 回复时写进 re_seq
         return m.copy(text = text, desp = desp, type = "markdown", doc = doc, preview = preview, e2eStatus = E2EMessages.OK,
-            agentName = v.name, choices = choices)
+            agentName = v.name, choices = choices, ask = p.optBoolean("ask"), agentSeq = p.optLong("seq"))
     }
 
     // ---------- 回复 ----------
 
     /**
      * 这条消息现在能不能回复：null = 可以；否则是显示给用户的原因。
-     * 要求：已解开 + 本机已解锁 + 会话已核实 + 会话还在（approved）。loaded：会话列表读到过了
+     * 要求：已解开且带 seq + 本机已解锁 + 会话由当前钥匙核实 + 会话还在（approved）。loaded：会话列表读到过了
      */
     fun replyBlock(m: Message, unlocked: Boolean, verified: Map<String, AgentVerified>, sessions: List<AgentSession>, loaded: Boolean = true): String? {
         val sid = m.agentSession ?: return AgentText.ENDED
         if (m.e2eStatus != E2EMessages.OK) return if (m.e2eStatus == E2EMessages.UNVERIFIED) AgentText.NO_REPLY_UNVERIFIED else AgentText.NO_REPLY_SEALED
         if (!unlocked) return AgentText.NO_REPLY_LOCKED
         if (!loaded) return AgentText.NO_REPLY_LOADING
-        if (verified[sid] == null) return AgentText.NO_REPLY_UNVERIFIED
+        val v = verified[sid] ?: return AgentText.NO_REPLY_UNVERIFIED
+        if (!v.current) return AgentText.NO_REPLY_OLD_KEY
+        if (m.agentSeq <= 0) return AgentText.NO_REPLY_NO_SEQ
         if (sessions.none { it.id == sid && it.active }) return AgentText.ENDED
         return null
     }
@@ -329,20 +342,27 @@ object Agent {
     /** 回复载荷里的随机数 n：16 字节 base64url（agent 靠它去重，回执靠它对上这条回复） */
     fun newNonce(): String = ByteArray(16).also { rnd.nextBytes(it) }.let { Base64.getUrlEncoder().withoutPadding().encodeToString(it) }
 
-    /** 回复载荷（§11.2）：{"v":1,"text","n","sent_at","device"} */
-    fun replyPayload(text: String, n: String, sentAt: Long, device: String): String =
-        JSONObject().put("v", 1).put("text", text).put("n", n).put("sent_at", sentAt).put("device", device).toString()
+    /** 序列化后的回复载荷上限（转义后会变长；信封上限 32 KB） */
+    const val MAX_REPLY_PAYLOAD = 20 shl 10
+
+    /** 回复载荷（§11.2）：{"v":1,"re_seq","text","n","sent_at","device"}；reSeq = 被回复消息载荷里的 seq */
+    fun replyPayload(reSeq: Long, text: String, n: String, sentAt: Long, device: String): String =
+        JSONObject().put("v", 1).put("re_seq", reSeq).put("text", text).put("n", n).put("sent_at", sentAt).put("device", device).toString()
 
     /**
-     * 回复一条 agent 消息 → reply_id。sk：本机账号私钥；device：本机名称（写进载荷，agent 看得到）。
-     * 空、超过 16 KB 时直接报错，不发请求；会话已结束（409）→ ENDED
+     * 回复一条 agent 消息 → reply_id。seq：被回复消息载荷里的 seq（写进 re_seq）；sk：本机账号私钥；device：本机名称（写进载荷，agent 看得到）。
+     * 空、文字超过 16 KB、序列化后超过 20 KB、seq ≤ 0、会话证明不是当前钥匙写的：直接报错，不发请求；会话已结束（409）→ ENDED
      */
-    fun reply(net: AgentNet, c: AgentCrypto, msgId: Long, sessionId: String, verified: AgentVerified, sk: String, text: String, device: String,
-              nowSec: Long = System.currentTimeMillis() / 1000, nonce: () -> String = ::newNonce): Long {
+    fun reply(net: AgentNet, c: AgentCrypto, msgId: Long, seq: Long, sessionId: String, verified: AgentVerified, sk: String, text: String,
+              device: String, nowSec: Long = System.currentTimeMillis() / 1000, nonce: () -> String = ::newNonce): Long {
         val t = text.trim()
         if (t.isEmpty()) throw E2EError(AgentText.EMPTY)
         if (t.toByteArray(Charsets.UTF_8).size > MAX_REPLY_BYTES) throw E2EError(AgentText.TOO_LONG)
-        val (env, copy) = c.agentReplySeal(sk, verified.pub, sessionId, msgId, replyPayload(t, nonce(), nowSec, device))
+        if (!verified.current) throw E2EError(AgentText.NO_REPLY_OLD_KEY)
+        if (seq <= 0) throw E2EError(AgentText.NO_REPLY_NO_SEQ)
+        val payload = replyPayload(seq, t, nonce(), nowSec, device)
+        if (payload.toByteArray(Charsets.UTF_8).size > MAX_REPLY_PAYLOAD) throw E2EError(AgentText.TOO_LONG)
+        val (env, copy) = c.agentReplySeal(sk, verified.pub, sessionId, msgId, payload)
         val o = try {
             net.agentReply(msgId, env, copy)
         } catch (e: ApiException) {

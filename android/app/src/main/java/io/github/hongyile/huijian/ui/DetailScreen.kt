@@ -160,7 +160,8 @@ fun DetailScreen(id: Long, back: () -> Unit, openMessage: (Long) -> Unit = {}) {
                     else -> item { Box(Modifier.padding(top = 10.dp)) { MarkdownView(m.desp) } }
                 }
                 // agent 消息：已发出的回复和送达状态、快捷回复、回复框（§5.1、§8）
-                if (m.isAgent) item(key = "agentReply") { DisableSelection { AgentReplyPanel(m) } }
+                // 按消息 id 重建：换消息时草稿、回复列表、错误提示都重置
+                if (m.isAgent) item(key = "agentReply:${m.id}") { DisableSelection { androidx.compose.runtime.key(m.id) { AgentReplyPanel(m) } } }
                 if (m.sealed && m.attachments.isNotEmpty()) item {
                     Text("附件 ${m.attachments.size} 个（解锁后查看）", Modifier.padding(top = 16.dp), fontSize = 13.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)

@@ -64,6 +64,7 @@ struct AgentReplyPanel: View {
         if message.e2eStatus != "ok" { return message.e2eStatus == "unverified" ? "来源无法核实，不能回复。" : "消息还没解开，不能回复。" }
         if model.e2eAccountKey == nil { return "本机还没有解锁加密，不能回复。" }
         if let sid = message.agentSession, model.agentVerified[sid]?.current == false { return "这个会话是重置加密前批准的，不能再回复。" }
+        if message.agentSeq <= 0 { return "这条消息没有序号，不能回复。" }
         return Agent.T.ended
     }
 

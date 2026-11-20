@@ -1244,7 +1244,7 @@ object E2EMessages {
     /** 还没解开（或解不开）的加密消息：标题换成说明，正文清空，保留信封原文和服务端附件（解锁后重新解密要用） */
     fun sealed(m: Message, status: String): Message = m.copy(
         text = when (status) { WRONG_KEY -> E2EText.T61; FORMAT -> E2EText.T62; UNVERIFIED -> AgentText.UNVERIFIED; else -> E2EText.T60 },
-        desp = "", doc = null, preview = "", e2eStatus = status, agentName = null, choices = emptyList(),
+        desp = "", doc = null, preview = "", e2eStatus = status, agentName = null, choices = emptyList(), agentSeq = 0,
     )
 
     /** keys：本账号全部私钥；没有时（已锁定）返回 sealed。不是加密消息、或已经解开的原样返回 */

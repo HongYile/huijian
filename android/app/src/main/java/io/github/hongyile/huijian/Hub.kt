@@ -276,7 +276,8 @@ object Hub {
             val u = updated[m.id]
             if (u == null || !m.sealed || m.e2e != u.e2e) m
             else m.copy(text = u.text, desp = u.desp, type = u.type, attachments = u.attachments, doc = u.doc,
-                preview = u.preview, e2eStatus = u.e2eStatus, agentName = u.agentName, choices = u.choices).takeIf { it != m }?.also { changed = true } ?: m
+                preview = u.preview, e2eStatus = u.e2eStatus, agentName = u.agentName, choices = u.choices,
+                agentSeq = u.agentSeq, ask = u.ask).takeIf { it != m }?.also { changed = true } ?: m
         }
         if (!changed) return
         _messages.value = next

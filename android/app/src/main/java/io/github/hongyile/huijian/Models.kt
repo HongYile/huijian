@@ -62,6 +62,8 @@ data class Message(
     /** 本机解开 agent 消息后得到的：会话证明里的名称、快捷回复（只在本机产生，fromServer 一律清空） */
     val agentName: String? = null,
     val choices: List<String> = emptyList(),
+    /** 本机解开的载荷里的 seq（回复时写进 re_seq）；0 = 没有 */
+    val agentSeq: Long = 0,
 ) {
     val title get() = text.ifBlank { attachments.firstOrNull()?.name ?: "（无标题）" }
 
@@ -84,6 +86,7 @@ data class Message(
             if (ask) put("ask", true)
             if (agentName != null) put("agent_name", agentName)
             if (choices.isNotEmpty()) put("choices", JSONArray(choices))
+            if (agentSeq > 0) put("agent_seq", agentSeq)
         }
 
     /** agent 发来的消息（可以回复，能不能回复见 Agent.replyBlock） */
@@ -99,7 +102,7 @@ data class Message(
          */
         fun fromServer(o: JSONObject): Message = from(o).let { m ->
             m.copy(e2eStatus = "", attachments = m.attachments.map { if (it.key.isEmpty()) it else it.copy(key = "") },
-                agentName = null, choices = emptyList())
+                agentName = null, choices = emptyList(), agentSeq = 0)
         }
 
         /** 解码本地缓存（messages.json）；服务端响应要用 fromServer */
@@ -129,6 +132,7 @@ data class Message(
                 ask = o.optBoolean("ask"),
                 agentName = if (o.isNull("agent_name")) null else o.optString("agent_name").ifBlank { null },
                 choices = o.optJSONArray("choices")?.let { a -> (0 until a.length()).mapNotNull { a.opt(it) as? String } }.orEmpty(),
+                agentSeq = o.optLong("agent_seq"),
             )
         }
     }

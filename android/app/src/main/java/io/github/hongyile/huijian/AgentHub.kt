@@ -62,7 +62,14 @@ object AgentHub {
         }
         try {
             while (true) {
-                once(api)
+                try {
+                    once(api)
+                } catch (e: Throwable) {
+                    // 这次失败了，但期间又有人要求刷新：再试一次（登录失效除外）
+                    val retry = e !is UnauthorizedException && synchronized(lock) { again.also { again = false } }
+                    if (retry) continue
+                    throw e
+                }
                 synchronized(lock) {
                     if (!again) { running = false; return }
                     again = false
@@ -87,7 +94,7 @@ object AgentHub {
         _unsupported.value = false
         if (list != _sessions.value) _sessions.value = list
         _loaded.value = true
-        val v = Agent.verify(list, E2EHub.secretKeys(), CoreAgentCrypto)
+        val v = Agent.verify(list, E2EHub.secretKeys(), E2EHub.activeSk(), CoreAgentCrypto)
         if (session != Hub.session) return
         val changed = v != _verified.value
         if (changed) _verified.value = v
@@ -201,7 +208,7 @@ object AgentHub {
         val sk = E2EHub.activeSk() ?: throw E2EError(AgentText.LOCKED_APPROVE)
         val session = Hub.session
         val a = AgentApproval.begin(api, CoreAgentCrypto, s, sk)
-        if (session != Hub.session) { a.stop(); return@withContext }
+        if (session != Hub.session) { a.stop(); return@withContext }       // 等待期间换了账号：结果不写进新账号的状态
         synchronized(this@AgentHub) { approvals.put(s.id, a)?.stop() }
         publish(a)
         runCatching { refresh(api) }
@@ -253,7 +260,7 @@ object AgentHub {
         val sid = m.agentSession ?: throw E2EError(AgentText.NO_REPLY_UNVERIFIED)
         val v = _verified.value[sid] ?: throw E2EError(AgentText.NO_REPLY_UNVERIFIED)
         val sk = E2EHub.activeSk() ?: throw E2EError(AgentText.LOCKED_REPLY)
-        Agent.reply(api, CoreAgentCrypto, m.id, sid, v, sk, text, Hub.store.deviceName)
+        Agent.reply(api, CoreAgentCrypto, m.id, m.agentSeq, sid, v, sk, text, Hub.store.deviceName)
     }
 
     suspend fun replies(m: Message): List<AgentReplyView> = withContext(Dispatchers.IO) {

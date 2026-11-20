@@ -124,9 +124,9 @@ object Core {
 
     // ---------- agent 双向（docs/agent-mcp.md §11） ----------
 
-    /** 登录承诺：pub 是 agent 的会话公钥，account 是本机用自己私钥算出的账号公钥 */
-    fun agentCommit(pub: String, account: String, nonce: String): String =
-        call("agent_commit", mapOf("pub" to pub, "account" to account, "nonce" to nonce)).str("commit")
+    /** 登录承诺：pub 是 agent 的会话公钥，account 是本机用自己私钥算出的账号公钥，name 是会话名称（也在承诺里，服务器改不了） */
+    fun agentCommit(pub: String, account: String, nonce: String, name: String): String =
+        call("agent_commit", mapOf("pub" to pub, "account" to account, "nonce" to nonce, "name" to name)).str("commit")
 
     /** 6 位核对码（字符串，保留前导 0） */
     fun agentSas(pub: String, account: String, na: String, nb: String): String =

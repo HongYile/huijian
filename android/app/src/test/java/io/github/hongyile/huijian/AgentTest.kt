@@ -36,7 +36,7 @@ class AgentTest {
             return JSONObject(p[2])
         }
         override fun mdBuild(text: String, desp: String, atts: List<Map<String, Any?>>) = """{"v":1}""" to "预览：$desp"
-        override fun agentCommit(pub: String, account: String, nonce: String) = "acommit:$pub:$account:$nonce"
+        override fun agentCommit(pub: String, account: String, nonce: String, name: String) = "acommit:$pub:$account:$nonce:$name"
         override fun agentSas(pub: String, account: String, na: String, nb: String) =
             "%06d".format(Math.floorMod("agent|$pub|$account|$na|$nb".hashCode(), 1_000_000))
         override fun agentAttestSeal(sk: String, sessionId: String, pub: String, name: String, approvedAt: Long) =
@@ -127,21 +127,25 @@ class AgentTest {
         // 不是本账号私钥写的（服务器自己写的）
         val forged = AgentSession("as4", pub = "pubC", state = "approved", attest = c.agentAttestSeal("sk666", "as4", "pubC", "冒充", 1))
         val none = AgentSession("as5", pub = "pubD", state = "pending")
-        val v = Agent.verify(listOf(good, swapped, moved, forged, none), listOf(sk), c)
+        val v = Agent.verify(listOf(good, swapped, moved, forged, none), listOf(sk), sk, c)
         assertEquals(mapOf("as1" to AgentVerified("家里 Claude Code", "pubA")), v)
     }
 
     @Test fun verifyTriesOlderKeys() {
         // 重置加密前批准的会话：证明是旧钥匙写的
         val s = AgentSession("as1", pub = "pubA", state = "approved", attest = c.agentAttestSeal("sk0", "as1", "pubA", "旧会话", 1))
-        assertEquals(AgentVerified("旧会话", "pubA"), Agent.verify(listOf(s), listOf(sk, "sk0"), c)["as1"])
-        assertTrue(Agent.verify(listOf(s), listOf(sk), c).isEmpty())
+        // 旧钥匙写的证明：能核实（显示历史消息），但不是当前钥匙写的（不能回复）
+        assertEquals(AgentVerified("旧会话", "pubA", current = false), Agent.verify(listOf(s), listOf(sk, "sk0"), sk, c)["as1"])
+        assertEquals(AgentVerified("旧会话", "pubA", current = true), Agent.verify(listOf(s), listOf(sk, "sk0"), "sk0", c)["as1"])
+        // 不知道当前钥匙（本机锁定等）：一律不算当前
+        assertFalse(Agent.verify(listOf(s), listOf("sk0"), null, c).getValue("as1").current)
+        assertTrue(Agent.verify(listOf(s), listOf(sk), sk, c).isEmpty())
     }
 
     // ---------- 批准状态机 ----------
 
     private fun pending(net: FakeAgentNet, id: String = "as1", name: String = "家里 Claude Code", acct: String = account, nb: String = "nb1"): AgentSession {
-        val s = AgentSession(id, name = name, pub = "pubS", state = "pending", commit = c.agentCommit("pubS", acct, nb))
+        val s = AgentSession(id, name = name, pub = "pubS", state = "pending", commit = c.agentCommit("pubS", acct, nb, name))
         net.sessions[id] = s
         return s
     }
@@ -179,7 +183,7 @@ class AgentTest {
         assertEquals(AgentPhase.Failed(AgentText.COMMIT_MISMATCH), a.handle(list(net), net))
         assertEquals(listOf("as1"), net.denied)
         // 失败之后不会再显示核对码，也不能批准
-        net.sessions["as1"] = net.sessions["as1"]!!.copy(state = "pending", commit = c.agentCommit("pubS", account, "nb1"))
+        net.sessions["as1"] = net.sessions["as1"]!!.copy(state = "pending", commit = c.agentCommit("pubS", account, "nb1", "家里 Claude Code"))
         assertEquals(AgentPhase.Failed(AgentText.COMMIT_MISMATCH), a.handle(list(net), net))
         a.approve(net, sk)
         assertTrue(net.approved.isEmpty())
@@ -268,6 +272,7 @@ class AgentTest {
         assertEquals("家里 Claude Code", o.agentName)
         // 空的、超过 20 字的丢掉，最多 4 个
         assertEquals(listOf("删", "保留", "再看看", "问别人"), o.choices)
+        assertEquals(1L, o.agentSeq)
         assertEquals("预览：**3** 个样本", o.preview)
         // 恰好 20 字的保留
         val twenty = "一二三四五六七八九十一二三四五六七八九十"
@@ -321,6 +326,10 @@ class AgentTest {
         assertEquals(AgentText.ENDED, Agent.replyBlock(ok, true, verified, listOf(AgentSession("as1", state = "ended"))))
         assertEquals(AgentText.ENDED, Agent.replyBlock(ok, true, verified, emptyList()))
         assertEquals(AgentText.NO_REPLY_LOADING, Agent.replyBlock(ok, true, verified, emptyList(), loaded = false))
+        // 重置加密前（旧钥匙）批准的会话：历史消息照常显示，但不能回复
+        assertEquals(AgentText.NO_REPLY_OLD_KEY, Agent.replyBlock(ok, true, mapOf("as1" to AgentVerified("x", "pubS", current = false)), active))
+        // 载荷里没有 seq：不能回复
+        assertEquals(AgentText.NO_REPLY_NO_SEQ, Agent.replyBlock(ok.copy(agentSeq = 0), true, verified, active))
         // 证明后来核实不了了（会话证明被换掉）：不能回复
         assertEquals(AgentText.NO_REPLY_UNVERIFIED, Agent.replyBlock(ok, true, emptyMap(), active))
         val unverified = Agent.open(msg(c.seal(account, "pubS", "as1", payload()), "as1"), listOf(sk), emptyMap(), c)
@@ -331,7 +340,7 @@ class AgentTest {
 
     @Test fun replySealsForVerifiedSessionAndCopy() {
         val net = FakeAgentNet()
-        val id = Agent.reply(net, c, 9, "as1", verified.getValue("as1"), sk, "  删  ", "我的手机", nowSec = 77, nonce = { "N1" })
+        val id = Agent.reply(net, c, 9, 5, "as1", verified.getValue("as1"), sk, "  删  ", "我的手机", nowSec = 77, nonce = { "N1" })
         assertEquals(41L, id)
         val r = net.replies.single()
         assertEquals(9L, r.getLong("msg_id"))
@@ -343,23 +352,31 @@ class AgentTest {
         assertEquals(77L, p.getLong("sent_at"))
         assertEquals("我的手机", p.getString("device"))
         assertEquals(1, p.getInt("v"))
+        // re_seq：被回复消息载荷里的 seq（agent 靠它核对回的是哪个问题）
+        assertEquals(5L, p.getLong("re_seq"))
+        assertTrue(r.getString("e2e").contains("\"re_seq\":5"))
     }
 
     @Test fun replyRejectsEmptyTooLongAndEnded() {
         val net = FakeAgentNet()
         val v = verified.getValue("as1")
-        try { Agent.reply(net, c, 9, "as1", v, sk, "   ", "d"); fail() } catch (e: E2EError) { assertEquals(AgentText.EMPTY, e.message) }
-        try { Agent.reply(net, c, 9, "as1", v, sk, "字".repeat(6000), "d"); fail() } catch (e: E2EError) { assertEquals(AgentText.TOO_LONG, e.message) }
+        try { Agent.reply(net, c, 9, 1, "as1", v, sk, "   ", "d"); fail() } catch (e: E2EError) { assertEquals(AgentText.EMPTY, e.message) }
+        try { Agent.reply(net, c, 9, 1, "as1", v, sk, "字".repeat(6000), "d"); fail() } catch (e: E2EError) { assertEquals(AgentText.TOO_LONG, e.message) }
+        // 文字不到 16 KB，但转义后（引号、控制字符）序列化超过 20 KB
+        try { Agent.reply(net, c, 9, 1, "as1", v, sk, "\"\u0001".repeat(3000), "d"); fail() } catch (e: E2EError) { assertEquals(AgentText.TOO_LONG, e.message) }
+        // 没有 seq、会话证明不是当前钥匙写的：不发
+        try { Agent.reply(net, c, 9, 0, "as1", v, sk, "删", "d"); fail() } catch (e: E2EError) { assertEquals(AgentText.NO_REPLY_NO_SEQ, e.message) }
+        try { Agent.reply(net, c, 9, 1, "as1", v.copy(current = false), sk, "删", "d"); fail() } catch (e: E2EError) { assertEquals(AgentText.NO_REPLY_OLD_KEY, e.message) }
         assertTrue(net.replies.isEmpty())
-        Agent.reply(net, c, 9, "as1", v, sk, "a".repeat(Agent.MAX_REPLY_BYTES), "d")       // 恰好 16 KB 可以
+        Agent.reply(net, c, 9, 1, "as1", v, sk, "a".repeat(Agent.MAX_REPLY_BYTES), "d")       // 恰好 16 KB 可以
         net.conflictReply = true
-        try { Agent.reply(net, c, 9, "as1", v, sk, "再回", "d"); fail() } catch (e: E2EError) { assertEquals(AgentText.ENDED, e.message) }
+        try { Agent.reply(net, c, 9, 1, "as1", v, sk, "再回", "d"); fail() } catch (e: E2EError) { assertEquals(AgentText.ENDED, e.message) }
         assertTrue(Agent.newNonce().length >= 21 && !Agent.newNonce().contains('='))
     }
 
     // ---------- 回复状态与回执 ----------
 
-    private fun copyOf(text: String, n: String) = "env|$account|" + Agent.replyPayload(text, n, 50, "我的手机")
+    private fun copyOf(text: String, n: String) = "env|$account|" + Agent.replyPayload(1, text, n, 50, "我的手机")
     private fun receipt(replyId: Long, n: String, sender: String = "pubS", kind: String = "receipt") =
         c.seal(account, sender, "as1", JSONObject().put("v", 1).put("kind", kind).put("reply_id", replyId).put("n", n).put("received_at", 60))
 
@@ -377,7 +394,7 @@ class AgentTest {
             AgentReplyStatus(6, "as1", "expired", copy = copyOf("过期", "N6")),
             AgentReplyStatus(7, "as1", "sent", copy = copyOf("已发出", "N7")),
             // 副本解不开、别的会话的、没有 n 的：不显示
-            AgentReplyStatus(8, "as1", "sent", copy = "env|pub9|" + Agent.replyPayload("别人的", "N8", 1, "")),
+            AgentReplyStatus(8, "as1", "sent", copy = "env|pub9|" + Agent.replyPayload(1, "别人的", "N8", 1, "")),
             AgentReplyStatus(9, "as2", "sent", copy = copyOf("别的会话", "N9")),
             AgentReplyStatus(10, "as1", "sent", copy = "env|$account|" + JSONObject().put("text", "没有 n")),
         )
@@ -440,5 +457,36 @@ class AgentTest {
         assertEquals(AgentText.UNVERIFIED, m.text)
         assertNull(m.agentName)
         assertTrue(m.choices.isEmpty())
+    }
+
+    @Test fun approvalNameChangedOrNotInCommitFails() {
+        // 服务器在接手之后改了显示的名称：按对方重新发起处理
+        val net = FakeAgentNet()
+        val a = AgentApproval.begin(net, c, pending(net), sk)
+        net.sessions["as1"] = net.sessions["as1"]!!.copy(name = "冒充的名字")
+        assertEquals(AgentPhase.Failed(AgentText.RESTARTED), a.handle(list(net), net))
+        // 服务器一开始就给了和 agent 承诺里不同的名称：承诺对不上，自动拒绝
+        val net2 = FakeAgentNet()
+        val s = pending(net2).let { it.copy(name = "服务器改的名字").also { x -> net2.sessions["as1"] = x } }
+        val b = AgentApproval.begin(net2, c, s, sk)
+        net2.reveal("as1", "nb1")
+        assertEquals(AgentPhase.Failed(AgentText.COMMIT_MISMATCH), b.handle(list(net2), net2))
+        assertEquals(listOf("as1"), net2.denied)
+    }
+
+    @Test fun askComesFromPayload() {
+        // 服务器说在等回复，载荷里没有：以载荷为准
+        val m = msg(c.seal(account, "pubS", "as1", payload().put("ask", false)), "as1")
+        assertTrue(m.ask)
+        val o = Agent.open(m, listOf(sk), verified, c)
+        assertFalse(o.ask)
+        // 反过来：服务器没标、载荷里是 true
+        assertTrue(Agent.open(m.copy(ask = false, e2e = c.seal(account, "pubS", "as1", payload())), listOf(sk), verified, c).ask)
+        // 解开前（来源无法核实）保留服务器给的，只用来显示占位
+        assertTrue(Agent.open(m, listOf(sk), emptyMap(), c).ask)
+        // seq 存进本地缓存，服务器下发时清空
+        val back = Message.from(Agent.open(m, listOf(sk), verified, c).toJson())
+        assertEquals(1L, back.agentSeq)
+        assertEquals(0L, Message.fromServer(JSONObject().put("id", 9).put("agent_seq", 7).put("agent_session", "as1")).agentSeq)
     }
 }
