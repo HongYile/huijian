@@ -94,6 +94,34 @@ object Core {
     fun sasCode(pub: String, account: String, na: String, nb: String): String =
         call("sas_code", mapOf("pub" to pub, "account" to account, "na" to na, "nb" to nb)).str("code")
 
+    // ---------- 配对码带钥匙（e2ee-client.md §12） ----------
+
+    /** 生成一次性钥匙 S 并用它锁住账号私钥 → (secret, wrap)：secret 只放进二维码 / 长配对码，wrap 交给服务器暂存 */
+    fun pairKeyNew(sk: String): Pair<String, String> = call("pair_key_new", mapOf("sk" to sk)).let { it.str("secret") to it.str("wrap") }
+
+    /** 新设备用配对码里的 S 解开服务器交来的 key_wrap → 账号私钥；钥匙不对抛 format */
+    fun pairKeyOpen(secret: String, wrap: String): String = call("pair_key_open", mapOf("secret" to secret, "wrap" to wrap)).str("data")
+
+    /** 长配对码（123456-XXXXX-…）和配对链接（huijian://pair?server=…&code=…，二维码内容） */
+    fun pairFormat(server: String, code: String, secret: String): Pair<String, String> =
+        call("pair_format", mapOf("server" to server, "code" to code, "secret" to secret)).let { it.str("text") to it.str("link") }
+
+    /** 用户输入的配对码：6 位、长配对码或配对链接 */
+    data class PairInput(val code: String, val secret: String?, val server: String?)
+
+    fun pairParse(input: String): PairInput = call("pair_parse", mapOf("input" to input)).let {
+        PairInput(it.str("code"), it.optString("secret").ifEmpty { null }, it.optString("server").ifEmpty { null })
+    }
+
+    /** 二维码矩阵：size × size，modules[y * size + x] 为 true 表示黑色（不含四周留白） */
+    fun qr(text: String): Pair<Int, BooleanArray> {
+        val r = call("qr", mapOf("text" to text))
+        val n = r.optInt("size")
+        val m = r.optString("modules")
+        if (n <= 0 || m.length != n * n) throw Failure("format", "核心库结果缺少二维码")
+        return n to BooleanArray(m.length) { m[it] == '1' }
+    }
+
     // ---------- 消息与附件 ----------
 
     /** 用账号的私钥（可以多把）解开信封 → 载荷 {v, text, desp, type, atts:[{name, mime, size, key}]} */

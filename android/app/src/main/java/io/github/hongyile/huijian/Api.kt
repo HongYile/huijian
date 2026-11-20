@@ -163,6 +163,12 @@ class Api(val server: String, private val token: String?) : E2ENet {
 
     fun createPairCode(): PairCode = Manage.pairCode(json(req("/v1/pair-codes").post(ByteArray(0).toRequestBody()).build()))
 
+    override fun createPairCodeRaw(keyWrap: String?): JSONObject =
+        if (keyWrap == null) json(req("/v1/pair-codes").post(ByteArray(0).toRequestBody()).build())
+        else json(post("/v1/pair-codes", JSONObject().put("key_wrap", keyWrap)))
+
+    override fun pairRaw(body: JSONObject): JSONObject = json(post("/v1/pair", body))
+
     fun pairCodeStatus(code: String): PairCodeStatus = Manage.pairStatus(json(req(pathUrl("v1/pair-codes", code)).build()))
 
     fun revokeDevice(id: String) { exec(req(pathUrl("v1/devices", id, "revoke")).post(ByteArray(0).toRequestBody()).build()).close() }

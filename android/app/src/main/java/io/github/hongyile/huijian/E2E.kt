@@ -56,6 +56,13 @@ object E2EText {
     const val PLAIN_BADGE = "未加密"
     const val T65 = "用普通 pushkey 发来的消息，服务器收到后立即用你的公钥加密再保存，数据库和备份里没有明文。服务器在收到的那一刻能看到内容；想让服务器完全看不到，请改用加密发送密钥。"
     const val T67 = "输入一次密码，开启端到端加密：之后服务器上只保存密文。"
+    // §12.6（服务端 0.10.0 起：配对码带钥匙）
+    const val T80 = "用新设备扫这个二维码，或在登录页输入下面的配对码：登录后直接解锁加密消息，不用输密码。3 分钟内有效，只能用一次。只给自己的设备用，不要截图发给别人。"
+    const val T81 = "新设备在登录页输入这 6 位配对码，登录后需要输入密码（或用这台设备批准）解锁加密消息。这台设备解锁后，生成的配对码可以让新设备直接解锁。"
+    const val T82 = "配对码里的钥匙对不上，加密消息还没解锁：请输入密码解锁。"
+    const val T83 = "这个配对码没有带钥匙，加密消息还没解锁：请输入密码解锁。"
+    const val T84 = "这台设备已经登录。要用这个配对码加入另一个账号，请先退出登录。"
+    const val PAIR_NO_STATE = "暂时取不到账号的加密状态，加密消息还没解锁：请输入密码解锁。"
     const val T66 = "普通 pushkey 适合 curl 等无法加密的发送端，消息由服务器收到后立即代为加密。"
     const val T70 = "发送端用它代替 pushkey，消息会在发送端加密，只有你的设备能解开。它只能加密、不能解密，泄露了也看不到你的消息。"
     const val T73 = "本机解锁一次后才显示（防止被冒充的服务器换掉公钥）。"
@@ -143,6 +150,8 @@ interface E2ECrypto {
     fun openMessage(keys: List<String>, envelope: String): JSONObject
     fun mdBuild(text: String, desp: String, atts: List<Map<String, Any?>>): Pair<String, String>
     fun decryptFile(key: String, src: File, dst: File)
+    fun pairKeyNew(sk: String): Pair<String, String>
+    fun pairKeyOpen(secret: String, wrap: String): String
 }
 
 /** 正式实现：Rust 共用核心（第一次用到时才加载 .so） */
@@ -165,6 +174,8 @@ object CoreCrypto : E2ECrypto {
     override fun openMessage(keys: List<String>, envelope: String) = Core.openMessage(keys, envelope)
     override fun mdBuild(text: String, desp: String, atts: List<Map<String, Any?>>) = Core.mdBuild(text, desp, atts)
     override fun decryptFile(key: String, src: File, dst: File) = Core.decryptFile(key, src, dst)
+    override fun pairKeyNew(sk: String) = Core.pairKeyNew(sk)
+    override fun pairKeyOpen(secret: String, wrap: String) = Core.pairKeyOpen(secret, wrap)
 }
 
 /**
@@ -188,6 +199,10 @@ interface E2ENet {
     fun e2eRecovery(body: JSONObject)
     fun accountAuth(body: JSONObject): JSONObject
     fun credentials(body: JSONObject): JSONObject
+    /** POST /v1/pair：原始响应（0.10.0 起可能带 key_wrap，§12） */
+    fun pairRaw(body: JSONObject): JSONObject
+    /** POST /v1/pair-codes：keyWrap 不为空时带上（§12.2） */
+    fun createPairCodeRaw(keyWrap: String?): JSONObject
 }
 
 /** 「这个服务器上的这个账号已升级到新登录协议」标记：普通偏好设置，退出登录也不删 */
@@ -551,6 +566,43 @@ class E2ELogic(private val c: E2ECrypto, private val flags: UpgradeFlags, privat
     }
 
     private fun loginResult(o: JSONObject) = LoginResult(o.getString("device_id"), o.optString("name"), o.getString("token"))
+
+    // ---------- 配对码带钥匙（§12） ----------
+
+    /** 生成配对码时要锁进去的私钥：本机有账号 active 钥匙的私钥才带（§12.2）；没有（没解锁、钥匙已更换）返回 null */
+    fun activeSecretKey(local: List<String>, st: E2EState?): String? {
+        val active = st?.takeIf { it.enabled }?.keys?.firstOrNull { it.active } ?: return null
+        return local.firstOrNull { runCatching { c.publicKey(it).first }.getOrNull() == active.pub }
+    }
+
+    /** 生成配对码（§12.2）：sk 不为空且服务端支持 pair.key 时带钥匙 → (配对码, 有效秒数, 一次性钥匙或 null) */
+    fun createPairCode(net: E2ENet, sk: String?, supportsKey: Boolean): Triple<String, Int, String?> {
+        val k = if (sk != null && supportsKey) c.pairKeyNew(sk) else null
+        val o = net.createPairCodeRaw(k?.second)
+        return Triple(o.optString("code"), o.optInt("expires_in", 180), k?.first)
+    }
+
+    /**
+     * 配对码登录（§2.3、§12.3）。secret：长配对码 / 链接里的一次性钥匙（只输 6 位时 null），不发给服务器。
+     * 带钥匙时解开服务器交来的 key_wrap，按服务器 keys 核对（§4.5 第 1 条）后放进 keys：调用方按「服务器伪造不了的来源」
+     * 保存、可以替换钉住的公钥（§12.3 第 4 步）。解不开、没带钥匙时登录照常成功，notice 给出说明（T82 / T83）
+     */
+    fun pair(net: E2ENet, code: String, secret: String?, name: String, fingerprint: String, authed: (String) -> E2ENet): LoginOutcome {
+        val o = net.pairRaw(JSONObject().put("code", code).put("name", name).put("platform", "android").put("fingerprint", fingerprint))
+        val r = loginResult(o)
+        if (secret == null) return LoginOutcome(r)
+        val wrap = o.optString("key_wrap")
+        if (wrap.isEmpty()) return LoginOutcome(r, notice = E2EText.T83)
+        val sk = try { c.pairKeyOpen(secret, wrap) } catch (_: Exception) { return LoginOutcome(r, notice = E2EText.T82) }
+        var st: E2EState? = null
+        for (i in 0 until 3) {
+            if (i > 0) Thread.sleep(500)
+            st = runCatching { E2EState.parse(authed(r.token).e2eState()) }.getOrNull()
+            if (st != null) break
+        }
+        if (st == null) return LoginOutcome(r, notice = E2EText.PAIR_NO_STATE)
+        return try { LoginOutcome(r, listOf(verify(sk, st.keys, null))) } catch (x: E2EError) { LoginOutcome(r, notice = x.message) }
+    }
 
     // ---------- 状态、核对（§3、§4.5） ----------
 

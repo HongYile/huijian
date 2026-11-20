@@ -29,6 +29,8 @@ sealed interface ConnState {
  */
 object Hub {
     lateinit var store: Store
+    /** 系统打开的 huijian://pair 链接（系统相机扫码、点链接，§12.3）：没登录时交给登录页填好，用户确认后再配对 */
+    val pendingPairLink = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
     private lateinit var app: Context
         private set
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)

@@ -55,6 +55,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.material3.OutlinedButton
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
+import io.github.hongyile.huijian.Core
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 @Composable
 fun LoginScreen(onSignedIn: () -> Unit) {
@@ -75,6 +81,22 @@ fun LoginScreen(onSignedIn: () -> Unit) {
     var error by rememberSaveable { mutableStateOf<String?>(null) }
     /** 密码强度不够（注册时核心库检查的结果）：显示在密码框下面 */
     var passwordError by rememberSaveable { mutableStateOf<String?>(null) }
+    /** 配对码输入框的解析结果：6 位、长配对码、配对链接（docs/e2ee-client.md §12.3）；格式不对时 null */
+    val parsed = remember(code) { if (code.isBlank()) null else runCatching { Core.pairParse(code) }.getOrNull() }
+    // 系统打开的 huijian://pair 链接（系统相机扫码、点链接）：切到「配对码」并填好，等用户确认后再点「配对」
+    val pendingLink by Hub.pendingPairLink.collectAsStateWithLifecycle()
+    LaunchedEffect(pendingLink) {
+        val l = pendingLink ?: return@LaunchedEffect
+        Hub.pendingPairLink.value = null
+        usePair = true; error = null; code = l
+    }
+    // 链接里带服务器地址：填进服务器地址栏（用户看得到、可以改）
+    LaunchedEffect(parsed?.server) { parsed?.server?.let { if (Api.normalize(it) != Api.normalize(server)) server = it } }
+    val scanner = rememberLauncherForActivityResult(ScanContract()) { r ->
+        val s = r.contents ?: return@rememberLauncherForActivityResult
+        usePair = true; code = s
+        error = if (runCatching { Core.pairParse(s) }.isFailure) "扫到的不是回笺配对码" else null
+    }
     // 注册新账号：服务端开放注册或要邀请码时才显示（填好服务器地址后查 /v1/info 的 register）；关闭时没有注册入口。
     // 读不到 /v1/info 时注册入口照样显示，点了（或提交注册前）重新读，读到后按结果显示（Manage.registerUi）
     var reg by remember { mutableStateOf(Manage.registerUi(null)) }
@@ -118,7 +140,7 @@ fun LoginScreen(onSignedIn: () -> Unit) {
                 }
                 return
             }
-            usePair && !code.trim().matches(Regex("\\d{6}")) -> { error = "配对码是 6 位数字"; return }
+            usePair && parsed == null -> { error = "配对码格式不对：应为 6 位数字，或扫码 / 复制得到的长配对码"; return }
             !usePair && (username.isBlank() || password.isEmpty()) -> { error = "请填写用户名和密码"; return }
             registering -> (Manage.usernameProblem(username) ?: Manage.passwordProblem(password, password2, required = true)
                 ?: Manage.inviteProblem(reg.mode, invite))?.let { error = it; return }
@@ -130,7 +152,8 @@ fun LoginScreen(onSignedIn: () -> Unit) {
                 val fp = Hub.store.fingerprint()
                 val dev = name.trim()
                 // 账号密码登录、注册走新协议（e2ee-client.md §2）：在本机派生凭证，从不发送密码原文；Argon2id 在后台线程算
-                val o = if (usePair) withContext(Dispatchers.IO) { LoginOutcome(api.pair(code.trim(), dev, fp)) }
+                val p = parsed
+                val o = if (usePair && p != null) E2EHub.work { E2EHub.logic.pair(api, p.code, p.secret, dev, fp) { Api(url, it) } }
                 else E2EHub.work {
                     // 邀请码只在要邀请码时带上；被拒（邀请码不对、用完了等）时服务端的 403 说明原样显示
                     // 服务端有 register.e2e：注册时一起开启加密（本机生成钥匙），成功后本机直接已解锁
@@ -186,11 +209,22 @@ fun LoginScreen(onSignedIn: () -> Unit) {
             SegmentedButton(usePair, { usePair = true }, SegmentedButtonDefaults.itemShape(1, 2)) { Text("配对码") }
         }
         if (usePair) {
+            OutlinedButton({
+                scanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE).setPrompt("对准已登录设备上「添加设备」里的二维码")
+                    .setBeepEnabled(false).setOrientationLocked(true))
+            }, Modifier.fillMaxWidth().testTag("scan")) { Text("扫码登录") }
             OutlinedTextField(
-                code, { v -> code = v.filter { it.isDigit() }.take(6) }, Modifier.fillMaxWidth().testTag("code"),
-                label = { Text("6 位配对码") }, singleLine = true,
-                supportingText = { Text("在已登录的设备上生成：手机「设置 → 账户与设备」，或 Mac 客户端点左下角头像 → 账户（3 分钟内有效，只能用一次）") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
+                code, { v -> code = v.take(400) }, Modifier.fillMaxWidth().testTag("code"),
+                label = { Text("配对码") }, placeholder = { Text("6 位数字，或粘贴长配对码") },
+                isError = parsed == null && code.trim().length > 6,
+                supportingText = {
+                    Text(when {
+                        parsed?.secret != null -> "✓ 带钥匙的配对码：登录后直接解锁加密消息"
+                        parsed == null && code.trim().length > 6 -> "配对码格式不对"
+                        else -> "在已登录的设备上生成：手机「设置 → 账户与设备」，或 Mac「设置 → 账户」。扫二维码或输入长配对码，登录后直接解锁加密消息；只输 6 位时要再输一次密码解锁。3 分钟内有效，只能用一次"
+                    })
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { submit() }),
             )
         } else {

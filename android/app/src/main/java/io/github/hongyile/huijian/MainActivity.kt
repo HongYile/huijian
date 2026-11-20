@@ -152,8 +152,14 @@ class MainActivity : ComponentActivity() {
         handle(intent)
     }
 
-    /** 点通知打开对应消息 */
+    /** 点通知打开对应消息；huijian://pair 配对链接（§12.3）：没登录 → 登录页填好；已登录 → T84，不做任何事 */
     private fun handle(i: Intent?) {
+        val data = i?.data
+        if (i?.action == Intent.ACTION_VIEW && data?.scheme == "huijian" && data.host == "pair") {
+            if (Hub.loggedIn) android.widget.Toast.makeText(this, E2EText.T84, android.widget.Toast.LENGTH_LONG).show()
+            else Hub.pendingPairLink.value = data.toString()
+            return
+        }
         val id = i?.getLongExtra(Notifier.EXTRA_MESSAGE_ID, -1L) ?: -1L
         if (id > 0) screen = Screen.Detail(id)
         else if (i?.getBooleanExtra(Notifier.EXTRA_OPEN_E2E, false) == true) screen = Screen.E2E

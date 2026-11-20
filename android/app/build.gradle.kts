@@ -96,6 +96,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")   // 登录页扫配对码二维码（自带相机界面，不依赖 Google 服务）
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20250517")      // 单元测试跑在 JVM 上，android.jar 里的 org.json 只是空壳
 }

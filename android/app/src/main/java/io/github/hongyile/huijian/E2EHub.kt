@@ -369,11 +369,11 @@ object E2EHub {
                 if (i < tries - 1) Thread.sleep(if (i == 0) 500L else 1500L)
             }
         }
-        o.keys.forEach { adopt(it, trusted = true) }      // 用这次的密码解开的：可以替换钉住的公钥（§11.4）
+        o.keys.forEach { adopt(it, trusted = true) }      // 用这次的密码 / 配对码里的一次性钥匙解开的：可以替换钉住的公钥（§11.4、§12.3）
         if (o.notice != null) notice.value = o.notice
         // 登录时已经解开了钥匙（账号早已开启）：凭证用完即弃，不留在内存里；否则留给自动开启
         if (o.keys.isEmpty()) notePasswordKeys(Hub.store.loginUsername, o.pre, o.weak)
-        else { owner()?.let { Hub.store.setWeakPassword(it, o.weak) }; _weakPassword.value = o.weak }
+        else if (o.pre != null) { owner()?.let { Hub.store.setWeakPassword(it, o.weak) }; _weakPassword.value = o.weak }   // 配对码登录（§12）没输密码：不知道强弱，不改
     }
 
     // ---------- 默认自动加密（§11.1） ----------

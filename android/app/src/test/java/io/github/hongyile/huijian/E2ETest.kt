@@ -67,6 +67,13 @@ class E2ETest {
         override fun mdBuild(text: String, desp: String, atts: List<Map<String, Any?>>) =
             JSONObject().put("v", 1).put("atts", JSONArray(atts.map { it["name"] })).toString() to "预览：$desp"
         override fun decryptFile(key: String, src: File, dst: File) = throw UnsupportedOperationException()
+        /** 配对码带钥匙：hjc1|<一次性钥匙>|<私钥> */
+        override fun pairKeyNew(sk: String): Pair<String, String> { val sec = "SECRET-${next()}"; return sec to "hjc1|$sec|$sk" }
+        override fun pairKeyOpen(secret: String, wrap: String): String {
+            val p = wrap.split("|")
+            if (p.size != 3 || p[0] != "hjc1" || p[1] != secret) throw Core.Failure("format", "配对码里的钥匙对不上")
+            return p[2]
+        }
     }
 
     class Flags : UpgradeFlags {
@@ -111,6 +118,8 @@ class E2ETest {
         var tamperReveal: String? = null
         /** 给某台设备看的假 keys（被攻破的服务器给新设备看自己的公钥） */
         val fakeKeysFor = HashMap<String, List<E2EKeyInfo>>()
+        /** 配对码 → key_wrap（不带钥匙时为空串）；用掉即删 */
+        val pairCodes = HashMap<String, String>()
 
         val upgraded get() = authKey.isNotEmpty()
         val enabled get() = keys.isNotEmpty()
@@ -260,6 +269,18 @@ class E2ETest {
                 if (!hasPassword) { legacyPassword = body.getString("password"); hasPassword = true }
                 return JSONObject().put("account", JSONObject().put("username", username))
             }
+            override fun createPairCodeRaw(keyWrap: String?): JSONObject {
+                val code = "%06d".format(100000 + pairCodes.size)
+                pairCodes[code] = keyWrap.orEmpty()
+                return JSONObject().put("code", code).put("expires_in", 180)
+            }
+            override fun pairRaw(body: JSONObject): JSONObject {
+                bodies += body
+                val wrap = pairCodes.remove(body.getString("code")) ?: err(403, "配对码无效或已过期")
+                val name = body.optString("name")
+                return JSONObject().put("device_id", "d_$name").put("name", name).put("token", "d_$name")
+                    .apply { if (wrap.isNotEmpty()) put("key_wrap", wrap) }
+            }
         }
 
         /** 管理员在后台用原文重设密码：账号回到旧协议，密码副本作废 */
@@ -290,6 +311,50 @@ class E2ETest {
     private fun enabledAccount(): LocalKey {
         login("old-password", "mac")
         return logic.setup(s.net("d_mac"), server, "alice", "old-password", "good-password-1").key
+    }
+
+    // ---------- 配对码带钥匙（§12） ----------
+
+    @Test fun pairCodeCarriesKey() {
+        val key = enabledAccount()
+        val st = E2EState.parse(s.net("d_mac").e2eState())
+        // 本机有 active 钥匙的私钥才带钥匙；没有（没解锁、只有别的钥匙）时不带
+        assertEquals(key.sk, logic.activeSecretKey(listOf("skX", key.sk), st))
+        assertNull(logic.activeSecretKey(emptyList(), st))
+        assertNull(logic.activeSecretKey(listOf("skX"), st))
+        assertNull(logic.activeSecretKey(listOf(key.sk), null))
+
+        val (code, ttl, secret) = logic.createPairCode(s.net("d_mac"), key.sk, supportsKey = true)
+        assertEquals(180, ttl); assertNotNull(secret)
+        val o = logic.pair(s.net("?"), code, secret, "phone", "fp9") { s.net(it) }
+        assertEquals(key, o.keys.single()); assertNull(o.notice)
+        // 一次性钥匙不发给服务器
+        assertTrue(s.bodies.last().toString().let { !it.contains(secret!!) && it.contains(code) })
+        // 只能用一次
+        try { logic.pair(s.net("?"), code, secret, "again", "fp8") { s.net(it) }; fail() } catch (e: ApiException) { assertEquals(403, e.status) }
+    }
+
+    @Test fun pairCodeKeyProblems() {
+        val key = enabledAccount()
+        // 一次性钥匙不对：登录成功、不解锁、T82
+        val (c1, _, _) = logic.createPairCode(s.net("d_mac"), key.sk, supportsKey = true)
+        logic.pair(s.net("?"), c1, "SECRET-999", "p1", "f1") { s.net(it) }.let { assertTrue(it.keys.isEmpty()); assertEquals(E2EText.T82, it.notice) }
+        // 服务端不支持 / 本机没解锁：不带钥匙；新设备却有一次性钥匙 → T83
+        val (c2, _, s2) = logic.createPairCode(s.net("d_mac"), key.sk, supportsKey = false)
+        assertNull(s2)
+        logic.pair(s.net("?"), c2, "SECRET-1", "p2", "f2") { s.net(it) }.let { assertTrue(it.keys.isEmpty()); assertEquals(E2EText.T83, it.notice) }
+        // 只输 6 位：照旧锁定、不提示
+        val (c3, _, s3) = logic.createPairCode(s.net("d_mac"), key.sk, supportsKey = true)
+        logic.pair(s.net("?"), c3, null, "p3", "f3") { s.net(it) }.let { assertTrue(it.keys.isEmpty()); assertNull(it.notice) }
+        // 服务器给新设备看的 active 钥匙不是锁在配对码里的那把（被攻破的服务器把新设备登进别的账号）：T43，不保存
+        val (c4, _, s4) = logic.createPairCode(s.net("d_mac"), key.sk, supportsKey = true)
+        s.fakeKeysFor["d_p4"] = listOf(E2EKeyInfo("kidX", "pubX", true))
+        logic.pair(s.net("?"), c4, s4, "p4", "f4") { s.net(it) }.let { assertTrue(it.keys.isEmpty()); assertEquals(E2EText.T43, it.notice) }
+        // 取不到加密状态（断网）：不保存，提示用密码解锁
+        val (c5, _, s5) = logic.createPairCode(s.net("d_mac"), key.sk, supportsKey = true)
+        val down = { _: String -> object : E2ENet by s.net("?") { override fun e2eState(): JSONObject = throw java.io.IOException("断网") } }
+        logic.pair(s.net("?"), c5, s5, "p5", "f5", down).let { assertTrue(it.keys.isEmpty()); assertEquals(E2EText.PAIR_NO_STATE, it.notice) }
+        assertNotNull(s3)
     }
 
     // ---------- 登录（§2.1） ----------

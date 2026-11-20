@@ -48,6 +48,17 @@ import io.github.hongyile.huijian.E2EHub
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.hongyile.huijian.Hub
 import io.github.hongyile.huijian.Manage
+import io.github.hongyile.huijian.Core
+import io.github.hongyile.huijian.E2EText
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.size
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -228,6 +239,12 @@ private fun PairCodeCard(onUsed: () -> Unit, say: (String) -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var statusUnsupported by remember { mutableStateOf(false) }
+    // 带钥匙的配对码（§12.2）：长配对码和配对链接（二维码内容）。一次性钥匙只在内存里，用掉、过期、重新生成、离开页面都清掉
+    var keyText by remember { mutableStateOf<String?>(null) }
+    var keyLink by remember { mutableStateOf<String?>(null) }
+    val clipboard = LocalClipboardManager.current
+    val e2eEnabled = E2EHub.state.collectAsStateWithLifecycle().value?.enabled == true
+    DisposableEffect(Unit) { onDispose { keyText = null; keyLink = null } }
 
     LaunchedEffect(code) { while (code != null) { now = System.currentTimeMillis(); delay(1000) } }
     LaunchedEffect(code) {
@@ -235,21 +252,36 @@ private fun PairCodeCard(onUsed: () -> Unit, say: (String) -> Unit) {
         while (code == c && usedBy == null && !dead && !statusUnsupported) {
             delay(2000)
             if (code != c) return@LaunchedEffect
-            if (System.currentTimeMillis() - expiresAt > 30_000) { dead = true; return@LaunchedEffect }   // 过期 30 秒仍查不到：按失效处理
+            if (System.currentTimeMillis() - expiresAt > 30_000) { dead = true; keyText = null; keyLink = null; return@LaunchedEffect }   // 过期 30 秒仍查不到：按失效处理
             val s = try { api { it.pairCodeStatus(c) } } catch (e: ApiException) {
-                if (e.oldServer) statusUnsupported = true else if (e.status == 404) dead = true
+                if (e.oldServer) statusUnsupported = true else if (e.status == 404) { dead = true; keyText = null; keyLink = null }
                 null
             } catch (_: Exception) { null } ?: continue
             when (s.state) {
-                "used" -> { usedBy = s.usedBy ?: "新设备"; onUsed() }
-                "expired" -> dead = true
+                "used" -> { usedBy = s.usedBy ?: "新设备"; keyText = null; keyLink = null; onUsed() }
+                "expired" -> { dead = true; keyText = null; keyLink = null }
                 else -> s.expiresIn?.let { expiresAt = System.currentTimeMillis() + it * 1000L }
             }
         }
     }
 
-    SectionCard("添加设备到这个账号", "新设备在登录页选「配对码」输入这 6 位数字，直接进入这个账号；也可以选「账号登录」用用户名密码。重新生成后，之前的配对码立即作废。") {
+    val footer = when {
+        code == null -> "新设备在登录页选「配对码」，扫码或输入后直接进入这个账号。本机已解锁时生成的二维码 / 长配对码，新设备登录后直接解锁加密消息。重新生成后，之前的配对码立即作废。"
+        keyLink != null -> E2EText.T80
+        e2eEnabled -> E2EText.T81
+        else -> "新设备在登录页选「配对码」输入这 6 位数字，直接进入这个账号。"
+    }
+    SectionCard("添加设备到这个账号", footer) {
         val c = code
+        val link = keyLink
+        val text = keyText
+        if (link != null && text != null && usedBy == null && !dead) {
+            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                QrCode(link, Modifier.size(220.dp).testTag("pairQr"))
+                SelectionContainer { Text(text, fontFamily = FontFamily.Monospace, fontSize = 13.sp, modifier = Modifier.testTag("pairLongCode")) }
+                OutlinedButton({ clipboard.setText(AnnotatedString(text)); say("已复制。只粘贴到自己的设备上，3 分钟内有效。") }) { Text("复制长配对码") }
+            }
+        }
         if (c != null) {
             val left = ((expiresAt - now) / 1000).coerceAtLeast(0)
             val gone = usedBy != null || dead || left == 0L
@@ -276,8 +308,15 @@ private fun PairCodeCard(onUsed: () -> Unit, say: (String) -> Unit) {
             busy = true
             scope.launch {
                 try {
-                    val r = api { it.createPairCode() }
-                    code = r.code; expiresAt = System.currentTimeMillis() + r.expiresIn * 1000L
+                    keyText = null; keyLink = null
+                    // 本机已解锁、服务端支持时带钥匙（§12.2）：新设备扫码 / 输入长配对码后直接解锁
+                    val sk = E2EHub.logic.activeSecretKey(E2EHub.secretKeys(), E2EHub.state.value)
+                    val (pc, expiresIn, secret) = api { a ->
+                        val supports = sk != null && runCatching { Manage.hasFeature(a.info(), "pair.key") }.getOrDefault(false)
+                        E2EHub.logic.createPairCode(a, sk, supports)
+                    }
+                    if (secret != null) Core.pairFormat(Hub.store.server, pc, secret).let { (t, l) -> keyText = t; keyLink = l }
+                    code = pc; expiresAt = System.currentTimeMillis() + expiresIn * 1000L
                     usedBy = null; dead = false; now = System.currentTimeMillis()
                 } catch (e: Exception) { say("生成失败：${describe(e)}") } finally { busy = false }
             }
@@ -367,4 +406,20 @@ private fun CredentialsDialog(
         },
         dismissButton = { TextButton(onDismiss) { Text("取消") } },
     )
+}
+
+/** 二维码（共用核心生成矩阵，这里只负责画）：白底黑码、四周留 4 格白边，深色模式下也一样（扫码软件只认这种） */
+@Composable
+fun QrCode(text: String, modifier: Modifier = Modifier) {
+    val q = remember(text) { runCatching { Core.qr(text) }.getOrNull() }
+    Canvas(modifier) {
+        drawRect(Color.White)
+        val (n, m) = q ?: return@Canvas
+        val cell = kotlin.math.floor(minOf(size.width, size.height) / (n + 8))
+        val ox = kotlin.math.floor((size.width - cell * n) / 2)
+        val oy = kotlin.math.floor((size.height - cell * n) / 2)
+        for (y in 0 until n) for (x in 0 until n) if (m[y * n + x]) {
+            drawRect(Color.Black, Offset(ox + x * cell, oy + y * cell), Size(cell, cell))
+        }
+    }
 }
