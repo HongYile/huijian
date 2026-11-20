@@ -26,7 +26,8 @@ UPDATE_SOURCE="${UPDATE_SOURCE:-github:HongYile/huijian}"
 # 官方 GitHub 发布渠道的签名公钥（私钥只在维护者手里）
 UPDATE_PUBKEY="${UPDATE_PUBKEY:-XySRu/CNn8ODqgnD5ZLZWGo3VbVryLv1RTjVETHekZw=}"
 VERSION="${VERSION:-$(cat VERSION)}"
-BUILD="${BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}"
+# 构建号 = git 提交数 + 100：0.7.0 改名时仓库历史重新开始，旧仓库发到服务器的构建号到过 32，加偏移保证只增不减
+BUILD="${BUILD:-$(( $(git rev-list --count HEAD 2>/dev/null || echo 1) + 100 ))}"
 # 构建产物实际放在 build.noindex（以 .noindex 结尾的目录不会被 Spotlight 收录，
 # 搜索「回笺 / Huijian」时只出现「应用程序」里那一个），build 是指向它的符号链接，其他脚本照常用 build/…
 if [ ! -L build ]; then rm -rf build; mkdir -p build.noindex; ln -s build.noindex build; fi

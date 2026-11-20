@@ -7,12 +7,12 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// 版本号来自 android/VERSION；构建号默认取 git 提交数（与 Mac 端一致），可用 -PbuildNumber=N 覆盖
+// 版本号来自 android/VERSION；构建号默认取 git 提交数 + 100（与 Mac 端一致），可用 -PbuildNumber=N 覆盖
 val appVersion = rootProject.file("VERSION").readText().trim()
 val buildNumber = (findProperty("buildNumber") as String?)?.toInt()
     ?: runCatching {
         ProcessBuilder("git", "rev-list", "--count", "HEAD").directory(rootDir).start()
-            .inputStream.bufferedReader().readText().trim().toInt()
+            .inputStream.bufferedReader().readText().trim().toInt() + 100   // 与 Mac 一致：改名后仓库历史重新开始，加偏移让构建号只增不减
     }.getOrDefault(1)
 // 登录页预填的服务器地址：-PdefaultServer=https://push.example.com（公开构建留空）
 val defaultServer = (findProperty("defaultServer") as String?) ?: ""

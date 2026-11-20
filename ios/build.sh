@@ -22,7 +22,8 @@ if [ -z "$UPDATE_PUBKEY" ] && [ "${PUBLIC_BUILD:-}" != 1 ] && [ -f ../mac/build.
   UPDATE_PUBKEY=$(sed -n 's/^UPDATE_PUBKEY=//p' ../mac/build.local.env | tail -1 | tr -d "\"' ")
 fi
 VERSION="${VERSION:-$(cat VERSION)}"
-BUILD="${BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}"
+# 构建号 = git 提交数 + 100：0.7.0 改名时仓库历史重新开始，旧仓库发到服务器的构建号到过 32，加偏移保证只增不减
+BUILD="${BUILD:-$(( $(git rev-list --count HEAD 2>/dev/null || echo 1) + 100 ))}"
 MIN_IOS=17.0
 REFRESH_ID="io.github.hongyile.huijian.refresh"
 
