@@ -26,6 +26,23 @@ fn rfc9180_first_encryption() {
 }
 
 #[test]
+fn rfc9180_auth_mode() {
+    let v = load("hpke_rfc9180_x25519_sha256_aes256gcm_auth.json");
+    assert_eq!(v["mode"], 2);
+    let e = &v["encryptions"][0];
+    let info = unhex(v["info"].as_str().unwrap());
+    let aad = unhex(e["aad"].as_str().unwrap());
+    let (enc, ct) = hpke_auth_seal(&arr(&v["pkRm"]), &arr(&v["skSm"]), &info, &aad, &unhex(e["pt"].as_str().unwrap()), Some(arr(&v["skEm"]))).unwrap();
+    assert_eq!(hex(&enc), v["enc"].as_str().unwrap());
+    assert_eq!(hex(&ct), e["ct"].as_str().unwrap());
+    let pt = hpke_auth_open(&arr(&v["skRm"]), &arr(&v["pkSm"]), &enc, &info, &aad, &ct).unwrap();
+    assert_eq!(hex(&pt), e["pt"].as_str().unwrap());
+    // 发送方公钥不对（冒充）、用 base 模式解：都解不开
+    assert!(hpke_auth_open(&arr(&v["skRm"]), &public_key(&[7u8; 32]), &enc, &info, &aad, &ct).is_err());
+    assert!(hpke_open(&arr(&v["skRm"]), &enc, &info, &aad, &ct).is_err());
+}
+
+#[test]
 fn huijian_vectors() {
     let v = load("e2e_vectors.json");
     let sk = arr(&v["recipient_sk"]);

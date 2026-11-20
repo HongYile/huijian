@@ -72,16 +72,24 @@ func e2eDeriveKeyPair(ikm []byte) (*ecdh.PrivateKey, error) {
 	return ecdh.X25519().NewPrivateKey(labeledExpand(kemSuite, prk, "sk", nil, 32))
 }
 
-func kemSharedSecret(dh, enc, pkR []byte) []byte {
+// kemSharedSecret：kemContext = enc ‖ pkR（base 模式）或 enc ‖ pkR ‖ pkS（auth 模式）
+func kemSharedSecret(dh []byte, kemContext ...[]byte) []byte {
 	prk := labeledExtract(kemSuite, nil, "eae_prk", dh)
-	return labeledExpand(kemSuite, prk, "shared_secret", append(append([]byte{}, enc...), pkR...), 32)
+	return labeledExpand(kemSuite, prk, "shared_secret", bytes.Join(kemContext, nil), 32)
 }
 
-// hpkeContext：返回 AES-256-GCM 和 base_nonce（每个密钥只加密一条，序号固定为 0）
-func hpkeContext(shared, info []byte) (cipher.AEAD, []byte) {
+const (
+	hpkeModeBase = 0x00
+	hpkeModeAuth = 0x02
+)
+
+// hpkeContext：base 模式，返回 AES-256-GCM 和 base_nonce（每个密钥只加密一条，序号固定为 0）
+func hpkeContext(shared, info []byte) (cipher.AEAD, []byte) { return hpkeContextMode(hpkeModeBase, shared, info) }
+
+func hpkeContextMode(mode byte, shared, info []byte) (cipher.AEAD, []byte) {
 	pskIDHash := labeledExtract(hpkeSuite, nil, "psk_id_hash", nil)
 	infoHash := labeledExtract(hpkeSuite, nil, "info_hash", info)
-	ctx := append(append([]byte{0}, pskIDHash...), infoHash...)
+	ctx := append(append([]byte{mode}, pskIDHash...), infoHash...)
 	secret := labeledExtract(hpkeSuite, shared, "secret", nil)
 	key := labeledExpand(hpkeSuite, secret, "key", ctx, 32)
 	nonce := labeledExpand(hpkeSuite, secret, "base_nonce", ctx, 12)
@@ -116,6 +124,52 @@ func hpkeOpen(skR *ecdh.PrivateKey, enc, info, aad, ct []byte) ([]byte, error) {
 		return nil, errE2E
 	}
 	g, nonce := hpkeContext(kemSharedSecret(dh, enc, skR.PublicKey().Bytes()), info)
+	pt, err := g.Open(nil, nonce, ct, aad)
+	if err != nil {
+		return nil, errE2E
+	}
+	return pt, nil
+}
+
+// ---------- HPKE auth 模式（RFC 9180 mode_auth）：加密的同时证明发送方持有 skS（agent 双向，docs/agent-mcp.md §4.2） ----------
+
+// hpkeAuthSeal：用发送方私钥 skS 加密给 pkR。eph 为 nil 时随机生成一次性密钥
+func hpkeAuthSeal(pkR *ecdh.PublicKey, skS *ecdh.PrivateKey, info, aad, pt []byte, eph *ecdh.PrivateKey) (enc, ct []byte, err error) {
+	if eph == nil {
+		if eph, err = ecdh.X25519().GenerateKey(rand.Reader); err != nil {
+			return nil, nil, err
+		}
+	}
+	dh1, err := eph.ECDH(pkR)
+	if err != nil {
+		return nil, nil, err
+	}
+	dh2, err := skS.ECDH(pkR)
+	if err != nil {
+		return nil, nil, err
+	}
+	enc = eph.PublicKey().Bytes()
+	shared := kemSharedSecret(append(dh1, dh2...), enc, pkR.Bytes(), skS.PublicKey().Bytes())
+	g, nonce := hpkeContextMode(hpkeModeAuth, shared, info)
+	return enc, g.Seal(nil, nonce, pt, aad), nil
+}
+
+// hpkeAuthOpen：只有发送方确实持有 pkS 对应的私钥时才能解开
+func hpkeAuthOpen(skR *ecdh.PrivateKey, pkS *ecdh.PublicKey, enc, info, aad, ct []byte) ([]byte, error) {
+	pkE, err := ecdh.X25519().NewPublicKey(enc)
+	if err != nil {
+		return nil, errE2E
+	}
+	dh1, err := skR.ECDH(pkE)
+	if err != nil {
+		return nil, errE2E
+	}
+	dh2, err := skR.ECDH(pkS)
+	if err != nil {
+		return nil, errE2E
+	}
+	shared := kemSharedSecret(append(dh1, dh2...), enc, skR.PublicKey().Bytes(), pkS.Bytes())
+	g, nonce := hpkeContextMode(hpkeModeAuth, shared, info)
 	pt, err := g.Open(nil, nonce, ct, aad)
 	if err != nil {
 		return nil, errE2E

@@ -47,19 +47,32 @@ fn labeled_expand(suite: &[u8], prk: &[u8; 32], label: &[u8], info: &[u8], out: 
 }
 
 fn kem_shared(dh: &[u8; 32], enc: &[u8; 32], pk_r: &[u8; 32]) -> [u8; 32] {
-    let prk = labeled_extract(KEM_SUITE, b"", b"eae_prk", dh);
     let mut ctx = [0u8; 64];
     ctx[..32].copy_from_slice(enc);
     ctx[32..].copy_from_slice(pk_r);
+    kem_extract_expand(dh, &ctx)
+}
+
+/// ExtractAndExpand：dh 是一段（base 模式 32 字节）或两段（auth 模式 64 字节），ctx 是 kem_context
+fn kem_extract_expand(dh: &[u8], ctx: &[u8]) -> [u8; 32] {
+    let prk = labeled_extract(KEM_SUITE, b"", b"eae_prk", dh);
     let mut out = [0u8; 32];
-    labeled_expand(KEM_SUITE, &prk, b"shared_secret", &ctx, &mut out);
+    labeled_expand(KEM_SUITE, &prk, b"shared_secret", ctx, &mut out);
     out
 }
 
+const MODE_BASE: u8 = 0x00;
+const MODE_AUTH: u8 = 0x02;
+
 fn key_schedule(shared: &[u8; 32], info: &[u8]) -> (Aes256Gcm, [u8; 12]) {
+    key_schedule_mode(MODE_BASE, shared, info)
+}
+
+fn key_schedule_mode(mode: u8, shared: &[u8; 32], info: &[u8]) -> (Aes256Gcm, [u8; 12]) {
     let psk_id_hash = labeled_extract(HPKE_SUITE, b"", b"psk_id_hash", b"");
     let info_hash = labeled_extract(HPKE_SUITE, b"", b"info_hash", info);
     let mut ctx = [0u8; 65];
+    ctx[0] = mode;
     ctx[1..33].copy_from_slice(&psk_id_hash);
     ctx[33..].copy_from_slice(&info_hash);
     let secret = labeled_extract(HPKE_SUITE, shared, b"secret", b"");
@@ -102,6 +115,40 @@ pub fn hpke_open_pk(sk_r: &[u8; 32], pk_r: &[u8; 32], enc: &[u8; 32], info: &[u8
     let pk_r = *pk_r;
     let shared = kem_shared(&dh(&sk, &PublicKey::from(*enc))?, enc, &pk_r);
     let (aead, nonce) = key_schedule(&shared, info);
+    aead.decrypt(Nonce::from_slice(&nonce), Payload { msg: ct, aad }).map_err(|_| Error::Format)
+}
+
+/// HPKE auth 模式（RFC 9180 mode_auth）：用发送方私钥 sk_s 加密给 pk_r，接收方能确认是 sk_s 的持有者发的（docs/agent-mcp.md §4.2）
+pub fn hpke_auth_seal(pk_r: &[u8; 32], sk_s: &[u8; 32], info: &[u8], aad: &[u8], pt: &[u8], eph: Option<[u8; 32]>) -> Result<([u8; 32], Vec<u8>)> {
+    let sk_e = StaticSecret::from(match eph {
+        Some(e) => e,
+        None => random32()?,
+    });
+    let enc = PublicKey::from(&sk_e).to_bytes();
+    let pk = PublicKey::from(*pk_r);
+    let mut dhs = [0u8; 64];
+    dhs[..32].copy_from_slice(&dh(&sk_e, &pk)?);
+    dhs[32..].copy_from_slice(&dh(&StaticSecret::from(*sk_s), &pk)?);
+    let mut ctx = [0u8; 96];
+    ctx[..32].copy_from_slice(&enc);
+    ctx[32..64].copy_from_slice(pk_r);
+    ctx[64..].copy_from_slice(&public_key(sk_s));
+    let (aead, nonce) = key_schedule_mode(MODE_AUTH, &kem_extract_expand(&dhs, &ctx), info);
+    let ct = aead.encrypt(Nonce::from_slice(&nonce), Payload { msg: pt, aad }).map_err(|_| Error::Format)?;
+    Ok((enc, ct))
+}
+
+/// 只有发送方确实持有 pk_s 对应的私钥时才能解开；否则 Format
+pub fn hpke_auth_open(sk_r: &[u8; 32], pk_s: &[u8; 32], enc: &[u8; 32], info: &[u8], aad: &[u8], ct: &[u8]) -> Result<Vec<u8>> {
+    let sk = StaticSecret::from(*sk_r);
+    let mut dhs = [0u8; 64];
+    dhs[..32].copy_from_slice(&dh(&sk, &PublicKey::from(*enc))?);
+    dhs[32..].copy_from_slice(&dh(&sk, &PublicKey::from(*pk_s))?);
+    let mut ctx = [0u8; 96];
+    ctx[..32].copy_from_slice(enc);
+    ctx[32..64].copy_from_slice(&public_key(sk_r));
+    ctx[64..].copy_from_slice(pk_s);
+    let (aead, nonce) = key_schedule_mode(MODE_AUTH, &kem_extract_expand(&dhs, &ctx), info);
     aead.decrypt(Nonce::from_slice(&nonce), Payload { msg: ct, aad }).map_err(|_| Error::Format)
 }
 
