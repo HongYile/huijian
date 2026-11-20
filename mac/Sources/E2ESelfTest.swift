@@ -1433,6 +1433,61 @@ enum E2ESelfTest {
             let keysB = try E2E.KeyRing(secrets: ringB, scope: E2E.scope(server: sid, accountID: aidA), defaults: marks.defaults).accountKeys()
             check("用密码登录：自动解锁（私钥核对后保存）", lb.unlocked && keysB == [skA], "")
 
+            // 3b. 配对码带钥匙（§12，服务端 0.10.0）：扫码 / 长配对码登录后直接解锁；钥匙不对 T82、没带钥匙 T83、只输 6 位照旧锁定
+            do {
+                /// 配对接口按来源 IP 限速（突发 5 次）：碰到 429 等一会儿再试
+                func retry<R>(_ f: () async throws -> R) async throws -> R {
+                    var attempt = 0
+                    while true {
+                        do { return try await f() } catch let e as E2E.Failure where e.status == 429 && attempt < 4 {
+                            attempt += 1
+                            try await Task.sleep(nanoseconds: 7_000_000_000)
+                        }
+                    }
+                }
+                func pairWith(_ code: String, _ secret: String?, _ name: String) async throws -> (E2E.LoginResult, E2E.KeyRing) {
+                    let m = freshMarks("io.github.hongyile.huijian.e2e-selftest-online-pk-\(name.hashValue)")
+                    let sec = E2E.MemorySecrets()
+                    let r = try await retry { try await E2E.pair(server: transport(nil), authed: transport, serverID: sid, code: code, secret: secret,
+                                                                  device: dev(name), marks: m, secrets: sec) }
+                    return (r, E2E.KeyRing(secrets: sec, scope: E2E.scope(server: sid, accountID: aidA), defaults: m.defaults))
+                }
+                let stK = try await apiA.state()
+                let active = E2E.activeSecretKey(keysA, state: stK)
+                check("配对码带钥匙：本机找到账号 active 钥匙的私钥", active == skA, "")
+                let strayKey = try Core.keypair().sk
+                check("配对码带钥匙：本机没解锁（没有私钥）时不带钥匙", E2E.activeSecretKey([], state: stK) == nil
+                      && E2E.activeSecretKey([strayKey], state: stK) == nil, "")
+                let pc = try await retry { try await E2E.createPairCode(apiA, sk: active, supportsKey: true) }
+                guard let secret = pc.secret else { check("带钥匙的配对码：返回一次性钥匙", false, ""); throw E2E.Failure(.server, "没有一次性钥匙") }
+                let f = try Core.pairFormat(server: sid, code: pc.code, secret: secret)
+                let parsed = try Core.pairParse(f.link)
+                check("配对链接：解析出 6 位配对码、一次性钥匙和服务器地址", parsed.code == pc.code && parsed.secret == secret
+                      && parsed.server.map(E2E.normalizeServer) == E2E.normalizeServer(sid) && f.text.hasPrefix(pc.code + "-"), f.link)
+                let (rK, ringK) = try await pairWith(parsed.code, parsed.secret, "扫码设备")
+                check("扫码登录：直接解锁，私钥就是账号私钥，并钉住账号公钥", rK.unlocked && rK.note == nil
+                      && (try? ringK.accountKeys()) == [skA] && ringK.pinned == stK.activeKey?.pub, rK.note ?? "")
+                do {
+                    _ = try await pairWith(parsed.code, parsed.secret, "再用一次")
+                    check("带钥匙的配对码只能用一次", false, "居然成功了")
+                } catch { check("带钥匙的配对码只能用一次（\(err(error))）", (error as? E2E.Failure)?.status == 403, "") }
+
+                // 一次性钥匙不对（别的码的钥匙）：登录成功、没解锁、T82
+                let pc2 = try await retry { try await E2E.createPairCode(apiA, sk: active, supportsKey: true) }
+                let other = try Core.pairKeyNew(sk: skA).secret
+                let (r2, ring2) = try await pairWith(pc2.code, other, "钥匙不对")
+                check("一次性钥匙不对：登录成功但不解锁，提示 T82", !r2.unlocked && r2.note == E2E.T.t82 && (try? ring2.accountKeys())?.isEmpty == true, r2.note ?? "")
+                // 只输 6 位：照旧锁定，不提示
+                let pc3 = try await retry { try await E2E.createPairCode(apiA, sk: active, supportsKey: true) }
+                let (r3, _) = try await pairWith(pc3.code, nil, "只输六位")
+                check("只输 6 位配对码：登录成功、已锁定、不提示", !r3.unlocked && r3.note == nil && r3.pendingKey == nil, "")
+                // 配对码没带钥匙（生成它的设备没解锁 / 旧服务端），新设备却有一次性钥匙：T83
+                let pc4 = try await retry { try await E2E.createPairCode(apiA, sk: nil, supportsKey: true) }
+                check("本机没解锁时生成的配对码不带钥匙", pc4.secret == nil, "")
+                let (r4, _) = try await pairWith(pc4.code, secret, "没带钥匙")
+                check("配对码没带钥匙：登录成功、已锁定，提示 T83", !r4.unlocked && r4.note == E2E.T.t83, r4.note ?? "")
+            }
+
             // 4. 配对码登录 → 用密码解锁
             func pairDevice(_ name: String) async throws -> (E2E.API, E2E.KeyRing) {
                 struct PC: Decodable { let code: String }

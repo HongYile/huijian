@@ -81,6 +81,12 @@ enum E2E {
         static let t65 = "用普通 pushkey 发来的消息，服务器收到后立即用你的公钥加密再保存，数据库和备份里没有明文。服务器在收到的那一刻能看到内容；想让服务器完全看不到，请改用加密发送密钥。"
         static let t66 = "普通 pushkey 适合 curl 等无法加密的发送端，消息由服务器收到后立即代为加密。"
         static let t67 = "输入一次密码，开启端到端加密：之后服务器上只保存密文。"
+        // §12.6（服务端 0.10.0 起：配对码带钥匙）
+        static let t80 = "用新设备扫这个二维码，或在登录页输入下面的配对码：登录后直接解锁加密消息，不用输密码。3 分钟内有效，只能用一次。只给自己的设备用，不要截图发给别人。"
+        static let t81 = "新设备在登录页输入这 6 位配对码，登录后需要输入密码（或用这台设备批准）解锁加密消息。这台设备解锁后，生成的配对码可以让新设备直接解锁。"
+        static let t82 = "配对码里的钥匙对不上，加密消息还没解锁：请输入密码解锁。"
+        static let t83 = "这个配对码没有带钥匙，加密消息还没解锁：请输入密码解锁。"
+        static let t84 = "这台设备已经登录。要用这个配对码加入另一个账号，请先退出登录。"
 
         // 规格里没有编号、但各端最好一致的提示
         static let weakCurrent = "当前密码不够安全，请换一个新密码"
@@ -910,6 +916,74 @@ enum E2E {
         case .plain:
             break
         }
+        return out
+    }
+
+    // MARK: - 配对码带钥匙（§12）
+
+    /// 生成配对码时要锁进去的私钥：本机有账号 active 钥匙的私钥才带（§12.2）；没有（没解锁、钥匙已更换）返回 nil
+    static func activeSecretKey(_ keys: [String], state: State?) -> String? {
+        guard let st = state, st.enabled, let active = st.activeKey else { return nil }
+        return keys.first { (try? Core.publicKey($0).pub) == active.pub }
+    }
+
+    /// 生成配对码（§12.2）：sk 不为 nil 且服务端支持 pair.key 时带钥匙。返回 6 位配对码、有效秒数、一次性钥匙（不带钥匙时 nil）
+    static func createPairCode(_ api: API, sk: String?, supportsKey: Bool) async throws -> (code: String, expiresIn: Int, secret: String?) {
+        struct R: Decodable { let code: String; let expires_in: Int? }
+        var secret: String?
+        var body: [String: Any]?
+        if let sk, supportsKey {
+            let k = try coreCall { try Core.pairKeyNew(sk: sk) }
+            secret = k.secret
+            body = ["key_wrap": k.wrap]
+        }
+        let data = try await api.call("POST", "/v1/pair-codes", body: body)
+        guard let r = try? JSONDecoder().decode(R.self, from: data) else { throw Failure(.server, "配对码响应格式不对") }
+        return (r.code, r.expires_in ?? 180, secret)
+    }
+
+    /// 配对码登录（§2.3、§12.3）。secret：用户输入的长配对码 / 链接里的一次性钥匙（只输 6 位时 nil），不发给服务器。
+    /// 带钥匙时解开服务器交来的 key_wrap，核对后保存（来自配对码钥匙，服务器伪造不了，可以替换钉住的公钥，§12.3 第 4 步）；
+    /// 解不开、没带钥匙时登录照常成功，note 给出说明（T82 / T83），进入「已锁定」
+    static func pair(server: E2ETransport, authed: (String) -> E2ETransport, serverID: String, code: String, secret: String?,
+                     device: Device, marks: UpgradeMarks, secrets: E2ESecrets, alive: AliveFlag = AliveFlag()) async throws -> LoginResult {
+        let api = API(server)
+        let data = try await api.call("POST", "/v1/pair", body: ["code": code, "name": device.name, "platform": device.platform,
+                                                                 "fingerprint": device.fingerprint])
+        let token = try tokenOf(data)
+        let authedAPI = API(authed(token))
+        var aid = await accountID(authedAPI)
+        for _ in 0..<2 where aid == nil && secret != nil {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            aid = await accountID(authedAPI)
+        }
+        var out = LoginResult(response: data, token: token, accountID: aid)
+        guard let secret else { return out }
+        struct W: Decodable { let key_wrap: String? }
+        guard let wrap = (try? JSONDecoder().decode(W.self, from: data))?.key_wrap, !wrap.isEmpty else {
+            out.note = T.t83
+            return out
+        }
+        let sk: String
+        do { sk = try coreCall { try Core.pairKeyOpen(secret: secret, wrap: wrap) } } catch { out.note = T.t82; return out }
+        var st: State?
+        for i in 0..<3 where st == nil {
+            if i > 0 { try? await Task.sleep(nanoseconds: 500_000_000) }
+            st = try? await authedAPI.state()
+        }
+        guard let st else { out.note = "暂时取不到账号的加密状态，加密消息还没解锁：请输入密码解锁。"; return out }
+        do {
+            if let aid {
+                try acceptOwnKey(sk, keys: st.keys, ring: KeyRing(secrets: secrets, scope: scope(server: serverID, accountID: aid),
+                                                                  defaults: marks.defaults, alive: alive))
+                out.unlocked = true
+            } else {
+                try verify(sk: sk, keys: st.keys, pinned: nil)
+                out.pendingKey = (sk, st.keys)
+            }
+        } catch let f as Failure where f.kind == .keyMismatch || f.kind == .storage {
+            out.note = f.message
+        } catch {}
         return out
     }
 

@@ -257,6 +257,9 @@ struct AccountView: View {
     @State private var revokeTarget: APIClient.DeviceInfo?
     @State private var codeBusy = false
     @State private var codeMsg: String?
+    /// 带钥匙的配对码（§12.2）：长配对码和配对链接（二维码内容）。一次性钥匙只在这里（内存），用掉、过期、重新生成、离开页面都清掉
+    @State private var codeText: String?
+    @State private var codeLink: String?
 
     private static var demoCodeMade = false
 
@@ -294,7 +297,7 @@ struct AccountView: View {
             }
         // 打开窗口、登录、退出、换账号时都重新加载，不显示上一个账号的设备和配对码
         .task(id: "\(model.token != nil)#\(model.account?.id ?? -1)") {
-            detail = nil; code = nil; codeExpires = nil; codeMsg = nil; codeUsedBy = nil; codeDead = false
+            detail = nil; code = nil; codeExpires = nil; codeMsg = nil; codeUsedBy = nil; codeDead = false; codeText = nil; codeLink = nil
             message = nil; credMsg = nil; nameMsg = nil; unsupported = false
             resetForm()
             nameDraft = model.deviceName
@@ -420,7 +423,7 @@ struct AccountView: View {
     // MARK: 添加设备
 
     var addDeviceCard: some View {
-        SettingsCard(title: "添加设备到这个账号", footer: codeMsg ?? "新设备在登录页选「配对码」输入这 6 位数字，直接进入这个账号；也可以选「账号登录」用用户名密码。重新生成后，之前的配对码立即作废。") {
+        SettingsCard(title: "添加设备到这个账号", footer: codeMsg ?? addDeviceFooter) {
             SettingsRow(label: code == nil ? "生成一个配对码（3 分钟内有效，只能用一次）" : "配对码", divider: false) {
                 if let code {
                     TimelineView(.periodic(from: .now, by: 1)) { ctx in
@@ -448,23 +451,68 @@ struct AccountView: View {
                 Button(codeBusy ? "生成中…" : (code == nil ? "生成配对码" : "重新生成")) { Task { await makeCode() } }
                     .buttonStyle(SoftButtonStyle()).disabled(codeBusy)
             }
+            pairKeyBlock
         }
         // 每 2 秒查一次配对码状态：被用掉后立即显示是哪台设备，并刷新设备列表
         .task(id: code) { await watchCode() }
+        .onDisappear { codeText = nil; codeLink = nil }
+    }
+
+    var addDeviceFooter: String {
+        if code != nil { return codeLink != nil ? E2E.T.t80 : (model.e2eState?.enabled == true ? E2E.T.t81 : "新设备在登录页选「配对码」输入这 6 位数字，直接进入这个账号。") }
+        return "新设备在登录页选「配对码」输入，直接进入这个账号；也可以用用户名密码登录。本机已解锁时生成的二维码 / 长配对码，新设备登录后直接解锁加密消息。重新生成后，之前的配对码立即作废。"
+    }
+
+    /// 二维码和长配对码（还没用掉、没过期时显示）
+    @ViewBuilder var pairKeyBlock: some View {
+        if let link = codeLink, let text = codeText, codeUsedBy == nil, !codeDead {
+            HStack(alignment: .top, spacing: 16) {
+                QRCodeView(text: link).frame(width: 176, height: 176)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.border))
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("长配对码").font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.text2)
+                    Text(text).font(.system(size: 13, design: .monospaced)).foregroundStyle(Theme.text)
+                        .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 8) {
+                        Button("复制配对码") { copyPair(text) }.buttonStyle(SoftButtonStyle())
+                        Button("复制链接") { copyPair(link) }.buttonStyle(SoftButtonStyle())
+                    }
+                    Text("iPhone、安卓：在回笺登录页点「扫码」，或用系统相机扫。Mac：在登录页粘贴长配对码或链接。")
+                        .font(.system(size: 11.5)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 12)
+        }
+    }
+
+    func copyPair(_ s: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(s, forType: .string)
+        codeMsg = "已复制。只粘贴到自己的设备上，3 分钟内有效。"
     }
 
     func makeCode() async {
-        guard let client = model.client, !codeBusy else { return }
+        guard let api = model.e2eAPI, !codeBusy else { return }
         codeBusy = true
         defer { codeBusy = false }
+        codeText = nil; codeLink = nil
         do {
-            let r = try await client.createPairCodeInfo()
+            // 本机已解锁、服务端支持时带钥匙（§12.2）：新设备扫码 / 输入长配对码后直接解锁
+            let sk = E2E.activeSecretKey(model.e2eKeys, state: model.e2eState)
+            let r = try await E2E.createPairCode(api, sk: sk, supportsKey: model.support("pair.key") == .yes)
+            if let secret = r.secret {
+                let f = try E2E.coreCall { try Core.pairFormat(server: model.server, code: r.code, secret: secret) }
+                codeText = f.text
+                codeLink = f.link
+            }
             code = r.code
-            codeExpires = Date().addingTimeInterval(TimeInterval(r.expires_in ?? 600))
+            codeExpires = Date().addingTimeInterval(TimeInterval(r.expiresIn))
             codeUsedBy = nil
             codeDead = false
             codeMsg = nil
-        } catch APIError.unsupported {
+        } catch let f as E2E.Failure where f.kind == .unsupported {
             unsupported = true
         } catch {
             codeMsg = "生成失败：\(Updater.describe(error))"
@@ -478,18 +526,20 @@ struct AccountView: View {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             guard !Task.isCancelled, code == c else { return }
             // 过期 30 秒后还查不到结果（例如一直断网）：按失效处理，不再轮询
-            if let exp = codeExpires, Date().timeIntervalSince(exp) > 30 { codeDead = true; return }
+            if let exp = codeExpires, Date().timeIntervalSince(exp) > 30 { codeDead = true; codeText = nil; codeLink = nil; return }
             let s: APIClient.PairCodeStatus
             do { s = try await client.pairCodeStatus(c) }
             catch APIError.unsupported { return }
-            catch APIError.http(404, _) { codeDead = true; return }    // 已过期的码保留 1 小时后被清理
+            catch APIError.http(404, _) { codeDead = true; codeText = nil; codeLink = nil; return }    // 已过期的码保留 1 小时后被清理
             catch { continue }
             switch s.state {
             case "used":
                 codeUsedBy = s.used_by ?? "新设备"
+                codeText = nil; codeLink = nil
                 await load()
             case "expired":
                 codeDead = true
+                codeText = nil; codeLink = nil
             default:
                 if let left = s.expires_in { codeExpires = Date().addingTimeInterval(TimeInterval(left)) }
             }

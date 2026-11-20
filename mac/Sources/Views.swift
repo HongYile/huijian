@@ -1246,7 +1246,7 @@ struct PairView: View {
 
     var subtitle: String {
         switch mode {
-        case .code: return "输入已登录设备「账户」窗口生成的 6 位配对码。"
+        case .code: return "输入已登录设备「账户」页生成的配对码，或粘贴配对链接。用扫码得到的长配对码登录，加密消息直接解锁。"
         case .login: return "用账号的用户名和密码登录，pushkey 和历史消息会自动同步过来。"
         case .register:
             switch registerMode {
@@ -1264,12 +1264,17 @@ struct PairView: View {
 
     var canSubmit: Bool {
         switch mode {
-        case .code: return code.count == 6
+        case .code: return parsedCode != nil
         case .login: return !username.trimmingCharacters(in: .whitespaces).isEmpty && !password.isEmpty
         case .register: return !registerClosed && AppModel.normalizeUsername(username).count >= 2 && AppModel.usernameProblem(username) == nil
             && password.count >= 8 && password == password2 && registerProblem == nil
             && (!needsInvite || !invite.trimmingCharacters(in: .whitespaces).isEmpty)
         }
+    }
+
+    /// 配对码输入框的解析结果（6 位、长配对码、配对链接，docs/e2ee-client.md §12.3）；格式不对时 nil
+    var parsedCode: (code: String, secret: String?, server: String?)? {
+        code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : try? Core.pairParse(code)
     }
 
     /// 注册时的密码强度（服务器拿不到密码，只能在客户端检查，docs/e2ee-client.md §2.2）
@@ -1315,11 +1320,23 @@ struct PairView: View {
                     }
                     if mode == .code {
                         field("配对码") {
-                            WarmField(placeholder: "输入 6 位数字", text: $code, large: true)
-                                .onChange(of: code) { _, v in
-                                    let d = String(v.filter(\.isNumber).prefix(6))
-                                    if d != v { code = d }
+                            VStack(alignment: .leading, spacing: 5) {
+                                WarmField(placeholder: "6 位数字，或粘贴长配对码 / 配对链接", text: $code, large: code.count <= 8)
+                                    .onChange(of: code) { _, _ in
+                                        // 配对链接里带服务器地址：填进上面的服务器地址栏（用户看得到、可以改）
+                                        if let sv = parsedCode?.server, AppModel.normalizeServer(sv) != AppModel.normalizeServer(server) { server = sv }
+                                    }
+                                if let p = parsedCode {
+                                    if p.secret != nil {
+                                        Label("带钥匙的配对码：登录后直接解锁加密消息", systemImage: "key.fill")
+                                            .font(.system(size: 11.5)).foregroundStyle(Theme.success)
+                                    } else {
+                                        Text("只输 6 位时，登录后需要输入密码解锁加密消息").font(.system(size: 11.5)).foregroundStyle(Theme.text3)
+                                    }
+                                } else if code.trimmingCharacters(in: .whitespaces).count > 6 {
+                                    Text("配对码格式不对").font(.system(size: 11.5)).foregroundStyle(Theme.danger)
                                 }
+                            }
                         }
                     } else if !registerClosed {
                         if needsInvite {
@@ -1379,7 +1396,9 @@ struct PairView: View {
         .onAppear {
             if server.isEmpty { server = model.server.isEmpty ? AppModel.defaultServer : model.server }
             if name.isEmpty { name = model.deviceName }
+            takePairLink()
         }
+        .onChange(of: model.pendingPairLink) { _, _ in takePairLink() }
         .onChange(of: server) { _, _ in uncertainRegister = nil }
         .onChange(of: username) { _, _ in uncertainRegister = nil }
         // 服务器地址变了（停止输入 0.5 秒后）：取 /v1/info 看注册方式（不开放 / 要邀请码 / 开放）
@@ -1389,6 +1408,15 @@ struct PairView: View {
             registerMode = nil       // 换了服务器：旧的注册方式作废，取到新的再说
             _ = await loadRegisterMode()
         }
+    }
+
+    /// 系统打开的 huijian://pair 链接（扫码、点链接）：切到「配对码」并填好，等用户确认后再点「配对」
+    func takePairLink() {
+        guard let link = model.pendingPairLink else { return }
+        model.pendingPairLink = nil
+        mode = .code
+        error = nil
+        code = link
     }
 
     func field<C: View>(_ label: String, @ViewBuilder _ c: () -> C) -> some View {
@@ -1427,7 +1455,10 @@ struct PairView: View {
         do {
             let n = name.isEmpty ? model.deviceName : name
             switch mode {
-            case .code: try await model.pair(server: server, code: code, name: n)
+            case .code:
+                guard let p = parsedCode else { error = "配对码格式不对"; return }
+                try await model.pair(server: server, code: p.code, secret: p.secret, name: n)
+                code = ""
             case .login: try await model.login(server: server, username: username, password: password, name: n, register: false)
             case .register: try await model.login(server: server, username: username, password: password, name: n, register: true,
                                                   inviteCode: needsInvite ? invite : nil)

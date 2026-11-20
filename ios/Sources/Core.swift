@@ -110,6 +110,40 @@ enum Core {
         try str(try call("sas_code", ["pub": pub, "account": account, "na": na, "nb": nb]), "code")
     }
 
+    // MARK: 配对码带钥匙（e2ee-client.md §12）
+
+    /// 生成一次性钥匙 S 并用它锁住账号私钥：secret 只放进二维码 / 长配对码，wrap 交给服务器暂存
+    static func pairKeyNew(sk: String) throws -> (secret: String, wrap: String) {
+        let r = try call("pair_key_new", ["sk": sk])
+        return (try str(r, "secret"), try str(r, "wrap"))
+    }
+
+    /// 新设备用配对码里的 S 解开服务器交来的 key_wrap → 账号私钥；钥匙不对抛 format
+    static func pairKeyOpen(secret: String, wrap: String) throws -> String {
+        try str(try call("pair_key_open", ["secret": secret, "wrap": wrap]), "data")
+    }
+
+    /// 长配对码（123456-XXXXX-…）和配对链接（huijian://pair?server=…&code=…，二维码内容）
+    static func pairFormat(server: String, code: String, secret: String) throws -> (text: String, link: String) {
+        let r = try call("pair_format", ["server": server, "code": code, "secret": secret])
+        return (try str(r, "text"), try str(r, "link"))
+    }
+
+    /// 用户输入的配对码：6 位、长配对码或配对链接 → 6 位配对码、一次性钥匙（可能没有）、服务器地址（只有链接里有）
+    static func pairParse(_ input: String) throws -> (code: String, secret: String?, server: String?) {
+        let r = try call("pair_parse", ["input": input])
+        return (try str(r, "code"), r["secret"] as? String, r["server"] as? String)
+    }
+
+    /// 二维码矩阵：size × size，modules[y * size + x] 为 true 表示黑色（不含四周留白）
+    static func qr(_ text: String) throws -> (size: Int, modules: [Bool]) {
+        let r = try call("qr", ["text": text])
+        guard let n = r["size"] as? Int, let m = r["modules"] as? String, m.utf8.count == n * n else {
+            throw Failure(code: "format", message: "核心库结果缺少二维码")
+        }
+        return (n, m.utf8.map { $0 == UInt8(ascii: "1") })
+    }
+
     // MARK: 消息与附件
 
     /// 用账号的私钥（可以多把）解开信封 → 载荷 {v, text, desp, type, atts:[{name, mime, size, key}]}

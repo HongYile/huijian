@@ -185,6 +185,8 @@ final class AppModel: ObservableObject {
     @Published var e2eStorageError: String?
     /// 登录时关于加密的一句提示（例如私钥对不上 T43），加密页显示
     @Published var e2eLoginNote: String?
+    /// 系统打开的 huijian://pair 链接（§12.3）：没登录时交给登录页填好，用户确认后再配对
+    @Published var pendingPairLink: String?
     /// 登录时解开、但还没取到账号 id 没法保存的私钥（只在内存里，loadE2EKeys 时保存）
     var e2ePendingLoginKey: (sk: String, keys: [E2E.Key])?
     /// 开启加密的结果提示（结果不确定 / 上次没成功，§4.1）；进行中的开启本身存在钥匙串（KeyRing.pendingSetup）
@@ -546,14 +548,20 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func pair(server: String, code: String, name: String) async throws {
+    /// 配对码登录。secret：长配对码 / 配对链接里的一次性钥匙（§12.3，只输 6 位时 nil）：带钥匙时登录后直接解锁
+    func pair(server: String, code: String, secret: String? = nil, name: String) async throws {
         let trimmed = Self.normalizeServer(server)
         guard !trimmed.isEmpty else { throw APIError.invalid("请填写服务器地址") }
         guard let url = URL(string: trimmed), url.scheme == "http" || url.scheme == "https", url.host != nil else {
             throw APIError.invalid("服务器地址格式不对")
         }
-        let r = try await APIClient.pair(server: url, code: code.trimmingCharacters(in: .whitespaces), name: name)
-        try adopt(r, server: trimmed)
+        let r = try await E2E.pair(server: APIClient(server: url, token: nil), authed: { APIClient(server: url, token: $0) },
+                                   serverID: trimmed, code: code.trimmingCharacters(in: .whitespaces), secret: secret,
+                                   device: .init(name: name, platform: "macos", fingerprint: DeviceFingerprint.value),
+                                   marks: e2eMarks, secrets: e2eSecrets, alive: e2eAlive)
+        try adopt(try JSONDecoder().decode(APIClient.PairResult.self, from: r.response), server: trimmed)
+        e2eLoginNote = r.note
+        e2ePendingLoginKey = r.pendingKey
     }
 
     /// 用户名密码登录；register=true 时注册新账号（服务器需开放注册）
@@ -829,6 +837,7 @@ final class AppModel: ObservableObject {
         "account": "账号登录", "devices": "设备身份与配对记录", "subscriptions": "按设备设置接收方式", "presence": "在用设备优先",
         "keys.delete": "删除已吊销的 pushkey", "messages.manage": "删除和归档消息", "channels": "频道改名、隐藏、静音、排序",
         "pair.status": "配对码倒计时与使用状态",
+        "pair.key": "配对码带钥匙（扫码登录直接解锁加密消息）",
         "markdown.doc": "回笺 Markdown（表格、提示框、正文里的附件图片、进度条）",
         "sync.settings": "设置实时同步（pushkey、设备、账户）",
         "poll.long": "省电的实时接收（按网络自适应等待时长）",

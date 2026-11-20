@@ -112,6 +112,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     /// huijian://message/<id>（Bark、iPhone、正文链接用的写法）和早期的 huijian://msg/<id>；改名前的 hongyan:// 也认
     func handle(_ url: URL) {
         guard url.scheme == "huijian" || url.scheme == "hongyan" else { return }
+        // huijian://pair?server=…&code=…（配对码二维码，§12.3）：没登录 → 登录页填好；已登录 → T84，不做任何事
+        if url.scheme == "huijian", url.host?.lowercased() == "pair" {
+            let model = AppModel.shared
+            if model.token == nil {
+                model.pendingPairLink = url.absoluteString
+                showMainWindow(select: nil)
+            } else {
+                showMainWindow(select: nil)
+                let a = NSAlert()
+                a.messageText = E2E.T.t84
+                a.runModal()
+            }
+            return
+        }
         if let id = MDLogic.messageID(url) {
             showMainWindow(select: id)
         } else {
