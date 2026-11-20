@@ -8,6 +8,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 CARGO="${CARGO:-$(command -v cargo || echo "$HOME/.cargo/bin/cargo")}"
 JOBS="${CORE_JOBS:-2}"   # 默认只用 2 个核心编译，避免机器卡顿
+# 依赖的源码路径（panic 位置等）会编进产物：把主目录换成 ~，产物里不带本机用户名
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=~"
 
 case "${1:-}" in
   mac)     T=aarch64-apple-darwin;  export MACOSX_DEPLOYMENT_TARGET=14.0 ;;
