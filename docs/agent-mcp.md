@@ -155,7 +155,7 @@ Mac、iPhone、安卓同步做：
 1. 先确认本文档。
 2. HPKE Auth 模式：Go、Rust 核心、测试向量。
 3. 服务端接口、额度、3 天清理，测试。
-4. 命令行 `huijian agent` 和 skill，在 rock 上实测。
+4. 命令行 `huijian agent` 和 skill，在自建服务器上实测。
 5. Mac、iPhone、安卓的回复和批准界面。
 6. `huijian mcp`，用 Claude Code 实测 `ask`。
 

@@ -2,8 +2,9 @@
 # 最简部署（一台有公网 IP 的服务器即可，不需要域名）：
 #   cp .env.example .env      # 把 HUIJIAN_PUBLIC_URL 改成 http://你的公网IP:8790
 #   docker compose up -d --build
-#   docker exec huijian huijian admin-link     # 打印管理后台的一次性登录链接
-# 记得在云服务器的安全组 / 防火墙里放行 8790 和 8791 端口。
+#   docker exec huijian huijian admin-link     # 打印管理后台的一次性登录链接（配合 ssh -L 8791:127.0.0.1:8791 在自己电脑上打开）
+#   docker exec huijian huijian invite new     # 生成邀请码，在回笺客户端里注册（账号只能注册产生，注册即开启加密）
+# 云服务器的安全组 / 防火墙只需放行 8790。管理后台默认只绑本机（HUIJIAN_ADMIN_BIND 默认 127.0.0.1），不要对外放行 8791。
 services:
   huijian:
     build:
@@ -16,7 +17,7 @@ services:
     restart: unless-stopped
     ports:
       - "${HUIJIAN_PUBLIC_PORT:-${HONGYAN_PUBLIC_PORT:-8790}}:8790"   # 消息 API：发送方、Mac 客户端连这个端口
-      - "${HUIJIAN_ADMIN_BIND:-${HONGYAN_ADMIN_BIND:-0.0.0.0}}:${HUIJIAN_ADMIN_PORT:-${HONGYAN_ADMIN_PORT:-8791}}:8791"   # 管理后台；只想内网访问就把 HUIJIAN_ADMIN_BIND 设为 127.0.0.1
+      - "${HUIJIAN_ADMIN_BIND:-${HONGYAN_ADMIN_BIND:-127.0.0.1}}:${HUIJIAN_ADMIN_PORT:-${HONGYAN_ADMIN_PORT:-8791}}:8791"   # 管理后台：默认只绑宿主机本机，远程用 ssh -L 8791:127.0.0.1:8791 服务器 访问
     environment:
       HUIJIAN_PUBLIC_ADDR: "0.0.0.0:8790"
       HUIJIAN_ADMIN_ADDR: "0.0.0.0:8791"
@@ -28,7 +29,7 @@ services:
       HUIJIAN_LONGPOLL_MAX: "${HUIJIAN_LONGPOLL_MAX:-${HONGYAN_LONGPOLL_MAX:-600}}"     # 长轮询最长挂起秒数；反向代理读超时要比它长
       HUIJIAN_PUBLIC_PORT: "${HUIJIAN_PUBLIC_PORT:-${HONGYAN_PUBLIC_PORT:-8790}}"      # 对外端口，用来推导页面上显示的地址
       HUIJIAN_ADMIN_PORT: "${HUIJIAN_ADMIN_PORT:-${HONGYAN_ADMIN_PORT:-8791}}"
-      HUIJIAN_ADMIN_BIND: "${HUIJIAN_ADMIN_BIND:-${HONGYAN_ADMIN_BIND:-0.0.0.0}}"      # 宿主机绑定地址；为 127.0.0.1 时登录链接指向本机（SSH 隧道）
+      HUIJIAN_ADMIN_BIND: "${HUIJIAN_ADMIN_BIND:-${HONGYAN_ADMIN_BIND:-127.0.0.1}}"      # 宿主机绑定地址；为 127.0.0.1 时登录链接指向本机（SSH 隧道）
       HUIJIAN_FILES: "${HUIJIAN_FILES:-${HONGYAN_FILES:-}}"                      # 附件目录（容器内路径）；放 NAS 时设为 /files 并映射 HUIJIAN_FILES_HOST_DIR
       HUIJIAN_BACKUP_DIR: "${HUIJIAN_BACKUP_DIR:-${HONGYAN_BACKUP_DIR:-}}"            # 备份目录（容器内路径）；默认 /data/backups，放 NAS / 另一块盘时设为 /backup
       HUIJIAN_BACKUP_AT: "${HUIJIAN_BACKUP_AT:-${HONGYAN_BACKUP_AT:-03:30}}"

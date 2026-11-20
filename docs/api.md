@@ -36,19 +36,26 @@
 - 附件上传密文：文件头 `HJF1` + 4 字节块大小（大端，65536），之后每块 AES-256-GCM（密文 + 16 字节校验），nonce = 11 字节块序号（大端）+ 1 字节末块标记，附加数据 = 文件头。空文件也有一个（空的）末块。上传时文件名写 `encrypted-N.bin`（服务器也会强制改成这样），真实名字在信封里。
 - `priority`、`topic`、`thread`、`idem` 照常明文传（服务器要靠它们提醒、分类、去重）。
 
-服务器检查信封格式和 kid 是否属于这个账号（钥匙已更换时返回 400，请重新复制加密发送密钥），存下的消息 `type` 为 `e2e`，`text` 是占位文字「🔒 加密消息（请把回笺更新到最新版查看）」，`desp` 为空。一次发给多个 pushkey 时，它们必须属于同一个账号。用加密发送密钥（带 `.e2e.`）却没有 `e2e` 字段时返回 400（多半是旧版命令行或 curl，避免误以为发出去的是加密的）。钥匙更换后，用已停用的旧钥匙加密的消息返回 400。账号打开「只接受加密消息」后，明文发送返回 403（一次发给多个账号时，任何一个打开了都拒收）；服务器自己产生的系统通知（管理后台发的消息、存储告警）不受这个开关限制。
+服务器检查信封格式和 kid 是否属于这个账号（钥匙已更换时返回 400，请重新复制加密发送密钥），存下的消息 `type` 为 `e2e`，`text` 是占位文字「🔒 加密消息（请把回笺更新到最新版查看）」，`desp` 为空。一次发给多个 pushkey 时，它们必须属于同一个账号。用加密发送密钥（带 `.e2e.`）却没有 `e2e` 字段时返回 400（多半是旧版命令行或 curl，避免误以为发出去的是加密的）。钥匙更换后，用已停用的旧钥匙加密的消息返回 400。0.9.0 起没有「只接受加密消息」开关：服务器上本来就只有密文，普通 pushkey 发来的消息一律由服务器代加密（见下）。
 
-**服务器代加密**（0.8.0 起，功能 id `e2e.auto`，安全含义见 [e2ee.md](e2ee.md#服务器代加密080)）：所有账号都加密，服务器代加密**始终开启、没有开关**。账号开启了加密（有 active 钥匙）时，用普通 pushkey 发来的明文消息（没有 `e2e` 字段）由服务器收到后立即加密再保存：
+**服务器不保存明文**（0.9.0 起，功能 id `push.e2e`）：账号还没有加密钥匙（新建后还没有客户端用密码登录过）时，明文推送（没有 `e2e` 字段）返回
+
+```json
+403 {"code": 403, "error": "账号还没开启加密：请先在回笺客户端用密码登录一次（之后服务器只保存密文）"}
+```
+
+什么都不存（附件也不落盘）。一次发给多个账号时，任何一个账号没有钥匙都整条拒收。服务端自己的系统通知（备份失败、附件目录不可用、新版本提醒）遇到这种账号直接丢弃，只记日志。0.9.0 以前存下的明文历史仍由下面的「补加密」处理。
+
+**普通 pushkey 发送**（0.8.0 起，功能 id `e2e.auto`，安全含义见 [e2ee.md](e2ee.md#服务器代加密080)）：「明文发送：服务器收到时能看到内容，随后立即加密保存，数据库和备份里没有明文」。所有账号都加密，这一步**始终开启、没有开关**。用普通 pushkey 发来的明文消息（没有 `e2e` 字段）由服务器收到后立即用账号 active 的公钥加密再保存：
 
 - 处理顺序：校验 → 加密 → 写库 → 推送给设备；写库之后再转发 Bark（跳转链接要用消息 id），用的是这次请求在内存里的明文（Bark 本来就由服务器转发明文，见上文「转发到 Bark」），不从库里读。上传的附件先以明文写到数据目录的 `tmp/`，加密完立即删除（失败也删，启动时清空 `tmp/`）；`os.Remove` 不擦除磁盘内容，磁盘快照可能拍到。
 - 写库的事务里核对加密用的钥匙仍然启用：加密和写库之间账号被重置过加密时，服务器重读公钥重新加密。读不到账号公钥（数据库出错、公钥损坏）时返回 **503**，不会退回明文存储。
 - 信封、载荷、附件格式和发送端加密**完全一样**：用账号当前 active 的公钥封成 `hje1` 信封，载荷 `{"v": 1, "text", "desp", "type", "atts"}`，标题最多 2000 字、正文最多 64 KB、信封超过 120 KB 时截短正文（规则同 `huijian push -k`）。`text` 为空时载荷里也为空，客户端用附件名代替；`type` 是校验后的值（`markdown` / `text` / `image`）。
 - 每个附件一把随机钥匙，按 `HJF1` 分块加密后保存，附件名写成 `encrypted-N.bin`、类型 `application/octet-stream`，`size` 和 `sha256` 都是密文的；真实名字、类型、明文大小在载荷的 `atts` 里。附件目录名用占位标题。明文临时文件处理完立即删除。
 - 存下的消息和发送端加密的一样（`type: "e2e"`、占位 `text`、`desp` 为空、没有 `doc` / `preview`），另外多一个 `"sealed": "server"`。发送端加密的消息没有这个字段。
-- 一次发给多个账号时，各账号分别处理：已开启加密的用各自的公钥加密（附件各存一份密文），还没有钥匙的账号先存明文。
-- 「只接受加密消息」打开时明文直接 403，不走代加密。
-- 服务器自己生成的消息（管理后台的测试消息、系统通知）同样代加密。
-- **补加密**：账号还没有钥匙时（新建后还没有客户端用密码登录过，或者开启加密以前的历史）收到的明文消息，在 `POST /v1/e2e/setup`、`POST /v1/e2e/reset` 成功后由服务器在后台补加密，格式同上（`sealed: "server"`，消息 id 不变）；服务启动时也会给已开启加密、还有明文的账号补一遍，明文消息写进已开启加密的账号时（开启加密的那一刻正好有推送）也会立即补。补加密时：
+- 一次发给多个账号时，各账号分别用各自的公钥加密（附件各存一份密文）；任何一个账号还没有钥匙时整条返回 403（0.9.0 起，见上）。
+- 服务器自己生成的系统通知同样代加密（0.9.0 起管理后台不能再发测试消息）。
+- **补加密**：0.9.0 以前账号还没有钥匙时存下的明文消息（开启加密以前的历史），在 `POST /v1/e2e/setup`、`POST /v1/e2e/reset` 成功后由服务器在后台补加密，格式同上（`sealed: "server"`，消息 id 不变）；服务启动时也会给已开启加密、还有明文的账号补一遍。补加密时：
   - 附件换成密文，并且**换新的附件 id**；旧 id 下载返回 `410 {"code": 410, "error": "附件已加密，请刷新消息", "reason": "sealed", "message_id": <消息 id>}`，绝不返回密文；消息之后被删掉时，旧 id 和其他不存在的附件一样返回 404；
   - 同一个事务里给这条消息记一条 `kind: "sealed"` 的变更（`id` 是消息 id），客户端收到后用 `GET /v1/messages/{id}` 重新拉取（见下文「多设备同步」）；
   - 旧的明文附件文件在同一个事务里登记待删，提交后删除；删不掉（NAS 掉线、文件被占用）的在启动时和每 10 分钟重试，同内容去重共用的文件不删。
@@ -93,10 +100,10 @@ curl -F pushkey=PK_xxx -F text="exp42 完成" -F desp="val_loss **0.231**" -F pr
 
 客户端和服务端各自升级，可能出现「客户端新、服务端旧」或反过来的情况。约定如下：
 
-- 服务端**只新增**接口和字段，不删除、不改变含义；旧客户端在新服务端上照常工作。
+- 服务端**只新增**接口和字段，不删除、不改变含义；旧客户端在新服务端上照常工作。例外（0.9.0）：为了「客户端不能进入管理后台、服务器不保存明文」，删掉了 `POST /v1/admin/link`、`GET /v1/storage`、`POST /v1/storage/backup`（都返回纯文本 404；`/v1/info` 的功能清单里也不再有 `admin.link`、`storage`，客户端按「服务端没有这个功能」处理，隐藏入口即可）；`/v1/me` 的 `can_admin` 恒为 `false`、`admin_url` 恒为空；`GET /v1/e2e` 的 `e2e_only` 恒为 `false`，`PATCH /v1/e2e` 忽略 `e2e_only`。`POST /v1/register` 必须带加密字段（功能 id `register.e2e`），旧客户端注册返回 400「请更新回笺客户端后注册」；管理后台不能再改账号的用户名和密码。字段都还在，旧客户端解析不会出错。
 - `GET /v1/info`（无需鉴权）返回版本和功能清单：
   ```json
-  {"name": "huijian", "version": "0.5.0", "api": 1, "register_open": false,
+  {"name": "huijian", "version": "0.9.0", "api": 1, "register_open": false, "register": "invite",
    "features": [{"id": "keys", "title": "在客户端管理 pushkey", "since": "0.4.2"}, …]}
   ```
   所有 `/v1` 响应都带 `X-Huijian-Server: <版本>`，客户端发现版本变化时重新拉取。
@@ -105,7 +112,38 @@ curl -F pushkey=PK_xxx -F text="exp42 完成" -F desp="val_loss **0.231**" -F pr
 
 ### 账号
 
-一个账号 = 一个人，拥有自己的 pushkey、设备和消息历史。管理员在管理后台「账号」页创建账号，也可以开放注册。0.5.0 以前的数据属于第一个账号，它一开始没有密码，Mac 客户端升级到 0.5.1 后，在「允许管理」的设备上打开会先要求设置用户名和密码，之后即可在其他设备登录。新账号不预置 pushkey，由账号自己新建（客户端新建第一把时名称默认填 `default`）。
+一个账号 = 一个人，拥有自己的 pushkey、设备和消息历史。0.9.0 起账号**只能由用户注册产生**，注册即登录、注册即开启加密（见下文「注册即开启加密」）；管理后台和命令行都不能建账号。
+
+**登录以「账号 + 密码」为主**：新设备用密码登录后，用同一个密码在本机解开加密钥匙（`password_wrap`），不需要别的设备在线批准。配对码（已登录设备在自己客户端里生成，`POST /v1/pair-codes` → `POST /v1/pair`）只是可选的便捷方式；管理后台不再生成配对码。
+
+**注册模式和邀请码**（0.9.0 起，功能 id `register.invite`）：`GET /v1/info` 的 `register` 是 `closed`（关闭，不再产生新账号）、`invite`（需要邀请码，**新部署默认**）或 `open`（开放）。旧字段 `register_open` 只在 `open` 时为 `true`，旧客户端在 `invite` 模式下不显示注册入口。`invite` 模式下 `POST /v1/register` 要带 `invite_code`（10 位，字符集 `23456789ABCDEFGHJKMNPQRSTUVWXYZ`，不区分大小写，空格和短横线忽略），否则返回 403：
+
+| 情况 | `error` |
+|---|---|
+| 没带 | 这个服务器注册需要邀请码，请向管理员索取 |
+| 不存在 | 邀请码无效，请检查是否输错 |
+| 次数用完 | 邀请码已用完 |
+| 过期 | 邀请码已过期 |
+| 运营方作废 | 邀请码已作废 |
+| 模式为 `closed` | 这个服务器没有开放注册，请联系管理员创建账号 |
+
+客户端按 `error` 显示即可（不要比较文字做逻辑判断）。邀请码检查在用户名检查之前；同一个来源 IP 连续尝试会被限速（429）。注册成功时，在建号的同一个事务里扣一次可用次数、记下使用者，两个人同时用一个单次邀请码只有一个能成功。`open` 模式下带了 `invite_code` 也不扣次数。
+
+**注册即开启加密**（0.9.0 起，功能 id `register.e2e`）：注册时客户端在本机生成账号钥匙（X25519），按 `POST /v1/e2e/setup` 的格式一起提交 `pub`、`password_wrap`（`hjp1.…`，用密码派生的解锁钥匙锁住的私钥）、`auth_salt`（16 字节十六进制）和 `auth_key`（Argon2id 前 32 字节，base64url），`recovery_wrap`（`hjr1.…`）可选。服务器在**一个事务**里用掉邀请码、建账号、存账号公钥和锁住的私钥、把这台设备加入账号，返回设备 token 和 `e2e`（同新协议登录），账号从诞生起就有 active 的钥匙，马上就能收消息。服务器从头到尾拿不到密码和私钥。
+
+- 缺 `auth_key`、`pub` 或 `password_wrap`（旧客户端发密码原文、或只升级了登录协议）返回 `400 {"error": "请更新回笺客户端后注册（新版注册时同时开启端到端加密）"}`，什么都不建、邀请码不扣；字段格式不对也返回 400（错误文字不同）。
+- 检查顺序：限速（429）→ 注册模式为 `closed`、`invite` 模式没带邀请码（403）→ 缺加密字段（400「请更新回笺客户端后注册」）→ 字段格式（400）→ 邀请码无效 / 用完 / 过期 / 作废（403，见上表）→ 用户名不合法（400）→ 用户名已被占用（409）。任何一步失败都不建账号、不扣邀请码。
+- 账号 id 不复用：删除过的账号的 id 不会分给新账号。删除账号后它的 pushkey 字符串不能再被任何账号认领（409），推送返回 403。
+- 注册后不用再调 `/v1/e2e/setup`（会返回 409）。
+- 命令行：`echo 密码 | huijian register -u 服务器地址 -invite 邀请码 -token-out token.txt [-key-out key.txt] 用户名`，在本机生成钥匙并注册；设备 token（和可选的私钥）写到文件（0600），不打印。用于没有图形界面的机器和测试脚本。
+
+规划中（还没有实现）：新设备登录时用手机号验证。
+
+**第一个账号**（id 最小）接收服务器自己的通知（备份失败等），不能停用、不能删除。0.9.0 起全新部署不预建账号，第一个注册的人就是它；0.5.0 以前的数据归在原来的第一个账号名下。
+
+**密码**：只有用户自己能改（0.9.0 起管理后台不能改任何账号的用户名和密码——改了密码运营方就能登录进别人的账号）。0.5.0 以前的第一个账号一开始没有密码，由这个账号的**任一台**已登录设备在客户端里设置（`POST /v1/account/credentials`）。已有密码时，客户端改密码、改用户名都必须核对当前密码。忘记密码：用恢复码或另一台已登录的设备解锁后重新设置（见 [e2ee.md](e2ee.md)）；没有恢复码、也没有别的已登录设备时，只能请管理员删号后重新注册。
+
+**管理后台只能在服务器上进入**（0.9.0 起，功能 id `admin.accounts`）：任何账号都不能从客户端进入管理后台，也没有服务器级权限。以前的「允许管理」（按设备）和 0.9.0 开发期间的「管理员账号」都去掉了：`/v1/me` 的 `can_admin` 恒为 `false`、`admin_url` 恒为空；`POST /v1/admin/link`、`GET /v1/storage`、`POST /v1/storage/backup` 已删除（404）；配对码不带任何管理权限。客户端看到 `admin.accounts` 功能时，隐藏「管理后台」「允许管理」「存储与备份」入口。运营方的进入方式见 [deploy.md](deploy.md#进入管理后台)。新账号不预置 pushkey，由账号自己新建（客户端新建第一把时名称默认填 `default`）。
 
 用户名 2–32 个字，可以用中文、字母、数字、空格、下划线、点和短横线（0.5.1 起允许中间有空格，例如 `Alex Chen`）；首尾空白会去掉，中间连续空白合并成一个空格。登录时不区分大小写。
 
@@ -113,14 +151,14 @@ curl -F pushkey=PK_xxx -F text="exp42 完成" -F desp="val_loss **0.231**" -F pr
 |---|---|
 | `GET /v1/prelogin?username=` | 0.7.0 起：登录前取密码派生参数。`{"kdf": "argon2id", "salt", "time", "memory_kib", "lanes"}`：按新协议登录；`{"kdf": "pbkdf2-sha256", "salt", "iterations"}`：还没升级的旧账号，客户端在本机算 PBKDF2-HMAC-SHA256(密码, salt, iterations, 32 字节)，作为 `password_key` 发送（不发密码原文）。账号不存在时返回由用户名算出的固定假盐（注册时「用户名已被占用」本来就能看出账号是否存在，这里只是不额外给出答案） |
 | `POST /v1/login` | `{"username", "password", "name", "platform", "fingerprint"}` → `{"device_id", "name", "token", "reused"}`；用户名不区分大小写。0.7.0 起可以不带 `password` 而带 `auth_key`（已升级的账号）或 `password_key`（旧账号），见下文「新登录协议」；带 `auth_key` 时响应多一个 `e2e: {"enabled", "keys", "password_wrap"}`。已升级的账号用 `password` / `password_key` 登录返回 426 |
-| `POST /v1/register` | 同上，注册新账号（管理员开放注册后才可用，否则 403）。新协议注册带 `auth_key` 和 `auth_salt`（客户端随机生成的 16 字节盐，十六进制），服务器从头到尾拿不到密码 |
+| `POST /v1/register` | 注册新账号，注册即登录、注册即开启加密（0.9.0 起，见下文「注册即开启加密」）。`{"username", "name", "platform", "fingerprint", "invite_code", "auth_salt", "auth_key", "pub", "password_wrap", "recovery_wrap"（可选）}` → `{"device_id", "name", "token", "reused": false, "e2e": {"enabled": true, "keys", "password_wrap"}}`。`invite_code` 在注册模式为 `invite` 时必填；模式为 `closed` 时 403 |
 | `PUT /v1/account/auth` | 0.7.0 起：升级到新登录协议 / 改密码。`{"current_password" / "current_password_key" / "current_auth_key", "auth_salt", "auth_key", "password_wrap", "kid"}`；已开启加密时 `password_wrap`（用新密码锁住的私钥）必填（缺少时 400，和开启加密同时发生时 409）。`kid`（0.8.0 起）是 `password_wrap` 里那把私钥的 kid，客户端用本机私钥算出；带了就必须是账号启用中的钥匙，否则 409（本机还留着重置加密以前的旧私钥），不带时不检查（兼容 0.7 客户端） |
 | `POST /v1/logout` | 本机 token 立即失效（设备记录保留） |
 | `GET /v1/account` | 账号信息和本账号全部设备：`{"account": {"id", "username", "has_password"}, "devices": [{…, "pair_count", "pairings": [{"at", "ip", "method", "client"}]}], "register_open"}` |
-| `POST /v1/account/credentials` | `{"username", "password", "current_password"}`：账号还没有密码时，只有「允许管理」的设备能设置（防止被拿到普通配对码的人抢先设密码）；已有密码时需要当前密码，「允许管理」的设备可直接重设。`password` 为空表示只改用户名。已升级到新登录协议的账号：改密码要用 `PUT /v1/account/auth`（这里带 `password` 返回 426），只改用户名时用 `current_auth_key` 核对 |
-| `POST /v1/pair-codes` | 为本账号生成配对码（3 分钟有效、只能用一次，新设备没有服务器管理权限）→ `{"code", "expires_in"}`。同一台设备再次生成时，它之前没用掉的配对码立即作废；每个账号最多 5 个未使用的配对码，超出返回 429 |
+| `POST /v1/account/credentials` | `{"username", "password", "current_password"}`：账号还没有密码时，本账号任一台设备都能设置初始密码（不用核对）；已有密码时必须带当前密码（错了 403），没有例外。`password` 为空表示只改用户名。已升级到新登录协议的账号：改密码要用 `PUT /v1/account/auth`（这里带 `password` 返回 426），只改用户名时用 `current_auth_key` 核对 |
+| `POST /v1/pair-codes` | 为本账号生成配对码（3 分钟有效、只能用一次）→ `{"code", "expires_in"}`。同一台设备再次生成时，它之前没用掉的配对码立即作废；每个账号最多 5 个未使用的配对码，超出返回 429 |
 | `GET /v1/pair-codes/{code}` | 配对码状态（0.5.6 起，功能 id `pair.status`）：`{"state": "waiting" \| "used" \| "expired", "expires_in", "used_by", "used_at"}`，`used` 时带使用它的设备名。只能查本账号的配对码；已用或过期的配对码保留一小时 |
-| `POST /v1/devices/{id}/revoke` | 移除本账号的另一台设备（没有「允许管理」的设备不能移除有「允许管理」的设备，返回 403） |
+| `POST /v1/devices/{id}/revoke` | 移除本账号的另一台设备（同账号的设备之间都能互相移除）。已经移除过的返回 200 |
 
 **新登录协议（0.7.0 起）**：密码不再发给服务器。客户端先 `GET /v1/prelogin` 取盐，在本机算 Argon2id（RFC 9106，`time`=3、`memory_kib`=65536、`lanes`=1，输出 64 字节），前 32 字节 base64url 后作为 `auth_key` 发给服务器（服务器只存它的 SHA-256），后 32 字节是解锁钥匙，只留在本机，用来解开 `password_wrap`。旧账号用新客户端登录时发 `password_key`（PBKDF2 结果），登录后客户端用 `PUT /v1/account/auth` 自动升级。管理员在后台用原文重设密码后，账号回到旧协议，用旧密码锁住的私钥副本作废（要靠恢复码或另一台设备批准解锁，再重新升级）。核对当前密码的接口（`current_password` / `current_password_key` / `current_auth_key`）规则相同。
 
@@ -148,14 +186,14 @@ curl -F pushkey=PK_xxx -F text="exp42 完成" -F desp="val_loss **0.231**" -F pr
 ```json
 {"code": "123456", "name": "我的 MacBook", "platform": "macos", "fingerprint": "…"}
 ```
-配对码在管理后台「设备」页（加入当前选中的账号）或已登录设备的「账户」页生成，3 分钟内有效，只能使用一次。返回：
+配对码在已登录设备的「账户」页生成（`POST /v1/pair-codes`；0.9.0 起管理后台不再生成配对码），3 分钟内有效，只能使用一次。返回：
 ```json
 {"device_id": "d_…", "name": "我的 MacBook", "token": "DT_…", "reused": false}
 ```
 token 只返回这一次，请妥善保存（Mac 客户端存放在钥匙串里）。
 
 ### `GET /v1/me`
-返回 `device_id`、`name`、`platform`、`can_admin`、`admin_url`、`account`、`away_silent`，以及 `bark`（0.5.7 起：`{"url": "...", "encrypted": true}`，没设置时为 `null`；不返回加密密钥）。
+返回 `device_id`、`name`、`platform`、`can_admin`（0.9.0 起恒为 `false`，客户端不能进入管理后台）、`admin_url`（0.9.0 起恒为空）、`account`、`away_silent`，以及 `bark`（0.5.7 起：`{"url": "...", "encrypted": true}`，没设置时为 `null`；不返回加密密钥）。
 
 ### 转发到 Bark（0.5.7 起，功能 id `bark`）
 
@@ -190,7 +228,7 @@ iPhone 客户端用 GBox 等工具自签安装，用不了苹果推送。锁屏�
 
 | 请求 | 说明 |
 |---|---|
-| `GET /v1/e2e` | 本账号的加密状态：`{"enabled", "keys": [{"kid", "pub", "active"}], "e2e_only", "server_seal"（0.8.0 起，始终为 true）, "plain_messages"（0.8.0 起）, "auth_key"（是否已升级新登录协议）, "has_password_wrap", "recovery_wrap", "device": {"pub", "grant", "requested", "challenge", "revealed"}, "requests": [{"device_id", "name", "platform", "pub", "requested_at", "commit", "challenge", "reveal"}]}`。`enabled` = 有 active 的钥匙；`keys` 同时列出重置加密后停用的旧钥匙（`active: false`），客户端靠它们认出旧消息用的是哪把钥匙；`recovery_wrap` 为空表示没设置恢复码；`plain_messages`（0.8.0 起）是服务器上本账号还剩的明文消息条数（还没有钥匙、等待第一次用密码登录期间收到的消息只能先存明文，开启后服务器补加密）；`requests` 是等待批准的其他设备 |
+| `GET /v1/e2e` | 本账号的加密状态：`{"enabled", "keys": [{"kid", "pub", "active"}], "e2e_only"（0.9.0 起恒为 `false`）, "server_seal"（0.8.0 起，始终为 true）, "plain_messages"（0.8.0 起）, "auth_key"（是否已升级新登录协议）, "has_password_wrap", "recovery_wrap", "device": {"pub", "grant", "requested", "challenge", "revealed"}, "requests": [{"device_id", "name", "platform", "pub", "requested_at", "commit", "challenge", "reveal"}]}`。`enabled` = 有 active 的钥匙；`keys` 同时列出重置加密后停用的旧钥匙（`active: false`），客户端靠它们认出旧消息用的是哪把钥匙；`recovery_wrap` 为空表示没设置恢复码；`plain_messages`（0.8.0 起）是服务器上本账号还剩的明文消息条数：0.9.0 起服务器不再存明文（没有钥匙的账号直接拒收），这里只剩 0.9 以前存下、还没补加密完的历史，一般为 0；`requests` 是等待批准的其他设备 |
 | `POST /v1/e2e/setup` | 开启加密（同时升级登录协议）：`{"pub", "auth_salt", "auth_key", "password_wrap", "recovery_wrap"（0.8.0 起可选，给了就校验格式）, "current_password" / "current_password_key" / "current_auth_key"}` → `{"kid"}`。只能在**从没开启过**时用：开启过（哪怕钥匙已停用）返回 409，换钥匙用 `reset` |
 | `POST /v1/e2e/reset` | 重置加密（0.8.0 起，功能 id `e2e.auto`）：`{"pub", "auth_salt", "auth_key", "password_wrap", "recovery_wrap"（可选）, "current_auth_key" / "current_password_key" / "current_password"}` → `{"kid"}`。当前密码凭证的核对同 setup；管理员重设密码后账号回到旧登录方式时用 `current_password_key`。在一个事务里：旧钥匙全部标成停用（保留）、删除全部锁住的副本（密码、恢复码、转交给设备的）、清掉所有设备进行中的批准请求、写入新钥匙（active）、换成新的 `auth_salt` / `auth_key`、写入新的 `password_wrap`，并记一条 `kind: "e2e"` 变更。从没开启过返回 409；同一把公钥重复提交（没收到上次响应又重试）照样成功。核对当前密码之后、写入之前凭证被改过（另一台设备抢先重置或改了密码）时返回 409，请刷新后重试；setup 也一样 |
 | `POST /v1/e2e/unlock` | 没输过密码的设备（配对码登录）解锁：`{"auth_key"}` → `{"password_wrap"}` |
@@ -200,12 +238,12 @@ iPhone 客户端用 GBox 等工具自签安装，用不了苹果推送。锁屏�
 | `POST /v1/e2e/grant` | 批准另一台设备：`{"device_id", "pub", "grant", "kid"}`。`kid`（0.8.0 起）是转交的私钥的 kid，规则同改密码：不是启用中的钥匙返回 409。对方必须在等待批准、已经揭晓 nb，`pub` 必须和对方当前登记的一致，否则 409。新设备收到转交的私钥后，必须核对它对应的公钥是账号的有效钥匙（`keys` 里 `active` 的那把），对不上就丢弃 |
 | `POST /v1/e2e/deny` | 拒绝：`{"device_id"}` |
 | `PUT /v1/e2e/recovery` | 换恢复码：`{"recovery_wrap", "kid", "current_password" / "current_password_key" / "current_auth_key"}`，旧恢复码立即失效。`kid`（0.8.0 起）规则同改密码：不是启用中的钥匙返回 409 |
-| `PATCH /v1/e2e` | `{"e2e_only": true/false}` → `{"e2e_only", "server_seal": true}`：只接受加密消息（要求已开启加密）。服务器代加密不能关：带 `"server_seal": false` 返回 400，`true` 不改任何东西 |
-| `POST /v1/e2e/delete-plain` | `{"confirm": true}` → `{"deleted"}`：删除服务器上本账号的全部明文消息（加密消息不动）。删掉的消息记为 `kind: "purge"` 的变更（不是 `delete`），各设备保留已同步的本地副本。数据库开启了 `secure_delete`，删除后数据库文件里不残留原文；**之前做的备份不受影响**，需要的话请自行删除旧备份 |
+| `PATCH /v1/e2e` | 0.9.0 起没有可改的设置，只为兼容旧客户端保留：`e2e_only` 会被**忽略**（不报错），始终返回 `{"e2e_only": false, "server_seal": true}`；服务器代加密不能关，带 `"server_seal": false` 返回 400；两个字段都没带返回 400。旧客户端的「只接受加密消息」开关请隐藏 |
+| `POST /v1/e2e/delete-plain` | `{"confirm": true}` → `{"deleted"}`：删除服务器上本账号的全部明文消息（加密消息不动）。0.9.0 起服务器上不再有明文（新消息都是密文，升级前的明文在开启加密后补加密），一般返回 `deleted: 0`，接口保留给旧客户端。删掉的消息记为 `kind: "purge"` 的变更（不是 `delete`），各设备保留已同步的本地副本。数据库开启了 `secure_delete`，删除后数据库文件里不残留原文；**之前做的备份不受影响**，需要的话请自行删除旧备份 |
 
 没有关闭加密的接口：`reset` 只是换一把新钥匙，账号始终保持加密。
 
-有设备请求批准、批准或拒绝、重置加密、改了 `e2e_only` 后，同账号的长轮询会收到 `kind: "e2e"` 的变更（id 0），客户端重新 `GET /v1/e2e`。移除设备时，转交给它的副本一并删除。
+有设备请求批准、批准或拒绝、重置加密后，同账号的长轮询会收到 `kind: "e2e"` 的变更（id 0），客户端重新 `GET /v1/e2e`。移除设备时，转交给它的副本一并删除。
 
 ### `PATCH /v1/me`
 给本机改名：`{"name": "我的 MacBook"}`，返回同 `GET /v1/me`。名称可以重名；设备 ID 唯一，格式为 `d_<UTC 时间戳>_<4 位随机>`，例如 `d_20261117083015_a1b2`。
@@ -250,7 +288,7 @@ iPhone 客户端用 GBox 等工具自签安装，用不了苹果推送。锁屏�
 
 0.6.0 起（功能 id `markdown.doc`）`type` 不是 `text` / `image` 且正文非空的消息多两个字段：`preview`（纯文本预览，≤200 字）和 `doc`（服务端解析好的回笺 Markdown 结构，`{"v":1,"blocks":[…]}`，定义见 [markdown.md](markdown.md#给客户端开发者doc-结构)）。客户端按 `doc` 绘制，各端效果一致；没有 `doc` 时自己解析 `desp`。
 
-0.7.0 起加密消息带 `e2e`（信封），`type` 为 `e2e`，`text` 是占位文字；0.8.0 起服务器代加密的消息另外带 `"sealed": "server"`（见上文「服务器代加密」），发送端加密的没有这个字段。
+0.7.0 起加密消息带 `e2e`（信封），`type` 为 `e2e`，`text` 是占位文字；0.8.0 起服务器代加密的消息另外带 `"sealed": "server"`（见上文「普通 pushkey 发送」），客户端据此标「明文发送」；发送端加密的没有这个字段。
 
 0.5.4 起消息多一个 `archive` 字段（没有时为 0）：`0` 自动（客户端按「超过 N 天自动归档」显示）、`1` 已归档、`2` 保留在收件箱（不再自动归档）。
 
@@ -276,12 +314,12 @@ iPhone 客户端用 GBox 等工具自签安装，用不了苹果推送。锁屏�
 |---|---|---|
 | `channels` | 频道改名、隐藏、静音、置顶、排序、删除（0.5.x 起） | `GET /v1/channels` |
 | `keys` | pushkey 新建、改名、换 key、吊销、删除 | `GET /v1/keys` |
-| `devices` | 设备加入、改名、移除、管理权限 | `GET /v1/account` |
-| `account` | 用户名、密码（账号被停用时也会唤醒，接下来的请求返回 403） | `GET /v1/account` |
+| `devices` | 设备加入、改名、移除（包括管理后台「注销全部登录」） | `GET /v1/account` |
+| `account` | 用户名、密码；账号被停用时也会唤醒，接下来的请求返回 403 | `GET /v1/account` |
 
 每台设备自己的接收规则、离开静音、Bark 转发设置只有本机能改，不产生变更。
 
-管理后台和设备接口的修改都会产生这些变更，挂起的长轮询会立即返回。客户端要忽略不认识的 `kind`。
+管理后台（账号页）和设备接口的修改都会产生这些变更，挂起的长轮询会立即返回。客户端要忽略不认识的 `kind`。
 
 ### 频道设置（0.5.5 起，功能 id `channels`）
 
@@ -298,7 +336,7 @@ iPhone 客户端用 GBox 等工具自签安装，用不了苹果推送。锁屏�
 - **静音**：照常显示，P1–P4 标为静默（`silent_reason: "channel_muted"`），P5 紧急照常提醒。
 - 每次修改都会在变更里加一条 `{"kind": "channels", "id": 0}`，其他设备收到后重新调用 `GET /v1/channels`。
 
-管理后台的消息页也可以删除单条消息，同样会同步到客户端。注意：每日备份里的数据库快照（默认保留 14 天）和附件镜像不会因为删除而改变，需要彻底清除时手动处理备份目录。
+0.9.0 起管理后台不再显示、也不能删除消息，消息只能在客户端里删除。注意：每日备份里的数据库快照（默认保留 14 天）和附件镜像不会因为删除而改变，需要彻底清除时手动处理备份目录。
 
 ### `GET /v1/stream?since=<id>`
 SSE 实时流（`event: message`，`id:` 为消息 id），每 20 秒发一次心跳。网络环境干净时可以用；如果中间有会缓冲响应的代理，请改用长轮询。
@@ -319,16 +357,8 @@ SSE 实时流（`event: message`，`id:` 为消息 id），每 20 秒发一次�
 
 0.8.0 以前的服务端没有 `reason`，丢失文件的 410 只有 `code` 和 `error`。
 
-### 服务端存储与备份（需要「允许管理」）
-- `GET /v1/storage[?fresh=1]`：数据库、附件目录、备份目录的路径、占用、剩余空间，备份计划和上次结果。
-- `POST /v1/storage/backup`：在后台开始一次备份，返回 202。
-
-### `POST /v1/admin/link`
-设备在管理后台被授予「可进入管理后台」权限后，可以用它换取一个 60 秒内有效的一次性登录链接：
-```json
-{"url": "http://127.0.0.1:8791/auth/link?t=L_…", "expires_in": 60}
-```
-无权限时返回 403。
+### 服务端存储与备份、管理后台登录链接（0.9.0 已删除）
+`GET /v1/storage`、`POST /v1/storage/backup`、`POST /v1/admin/link` 在 0.9.0 删除，返回纯文本 404。存储占用、备份状态只在管理后台的「概览」「设置」页看；管理后台只能在服务器上进入（`huijian admin-link` 或管理令牌，见 [deploy.md](deploy.md#进入管理后台)）。
 
 ### `GET /v1/update?build=<当前构建号>`
 应用内更新。按设备平台返回比 `build` 新的最新版本，没有时返回 `{"update": null}`：
@@ -343,7 +373,7 @@ SSE 实时流（`event: message`，`id:` 为消息 id），每 20 秒发一次�
 ### `GET /v1/update/{id}`
 下载更新包（zip），支持 `Range`。
 
-客户端可以在请求头 `X-Huijian-Client` 里上报自己的版本（例如 `macos 0.4.0 (37)`），会显示在管理后台的设备列表里。
+客户端可以在请求头 `X-Huijian-Client` 里上报自己的版本（例如 `macos 0.4.0 (37)`），管理后台概览按平台和版本统计设备数（只有计数，不显示设备名），标出较旧的客户端。
 
 ### iPhone 安装包与 GBox 软件源（0.5.7 起，功能 id `ios.source`）
 不需要登录（GBox 拉取时不带 token）；设置 `HUIJIAN_IOS_SOURCE=0` 关闭。
@@ -367,6 +397,12 @@ SSE 实时流（`event: message`，`id:` 为消息 id），每 20 秒发一次�
 
 一般不直接调用，用 `huijian server-push -manifest update-server.json`（见部署指南「升级」）。
 
+### 管理端口 `/api/invites`（0.9.0 起）
+给服务器上的运营命令（`huijian invite new / list`）用，只在管理端口提供，需要 `Authorization: Bearer <管理令牌>`。管理令牌（包括上面的发布接口）只在开发机或服务器上使用，不要放进客户端。没有建账号的接口（账号只能注册产生）。
+
+- `POST /api/invites` `{"count", "uses", "days", "note"}`（都可省略：1 个、每个 1 次、7 天）→ `{"codes": [...], "uses", "expires_at", "register"}`。`count` 1–100，`uses` 1–1000，`days` 1–366。
+- `GET /api/invites` → `{"invites": [{"code", "note", "max_uses", "used", "expires_at", "status": "ok" | "used_up" | "expired" | "revoked", "uses": [{"username", "at", "deleted"}]}], "register"}`。账号已删除的使用记录 `username` 为空、`deleted: true`。
+
 ## 3. 命令行
 
 ```bash
@@ -377,6 +413,8 @@ echo "多行内容" | huijian push -
 HUIJIAN_PUSHKEY=PK_xxx.e2e.<公钥> huijian push …   # 加密发送密钥：标题、正文、附件在本机加密（0.7.0 起）
 huijian flush          # 立即补发 outbox 中积压的消息
 huijian admin-link     # 在服务器上生成一次性管理登录链接（忘记令牌时用）
+huijian invite new -n 3 -note 实验室   # 在服务器上生成邀请码（0.9.0 起；还有 invite list，见部署指南「运营命令」）
+echo 密码 | huijian register -u https://push.example.com -invite 邀请码 -token-out token.txt 张三   # 命令行注册（本机生成钥匙，注册即开启加密）
 
 # 客户端发布（在开发机上执行，私钥不离开开发机）
 huijian release-key ~/secrets/update.key        # 生成签名私钥，打印公钥
@@ -386,7 +424,7 @@ huijian release -key ~/secrets/update.key -version 0.4.1 -build 42 -notes "说�
 huijian server-push -manifest server/bin/release/update-server.json
 ```
 
-发送失败（网络错误或 5xx）时，消息会存入 `~/.huijian/outbox/`，下次执行发送或 `flush` 时自动补发。多个进程同时补发不会重复：outbox 通过原子改名认领任务，服务端再用幂等键去重。
+发送失败（网络错误或 5xx）时，消息会存入 `~/.huijian/outbox/`（附件复制一份进去，原文件之后被删也不影响），下次执行发送或 `flush` 时自动补发。多个进程同时补发不会重复：outbox 通过原子改名认领任务，服务端再用幂等键去重。0.9.0 修复：带附件的任务补发时一直报 `no such file`（认领时任务目录改了名，附件路径没跟着换），附件名也不再带 outbox 里的 `00_` 序号前缀；旧版本存下的任务照样能补发。
 
 ## 4. Python SDK
 

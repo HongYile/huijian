@@ -71,9 +71,8 @@ func TestSettingsChangesRecorded(t *testing.T) {
 	expect("接收规则不广播", func() { st.SetDeviceKeyMode(dev.ID, 1, "silent") })
 	expect("离开静音不广播", func() { st.SetAwaySilent(dev.ID, true) })
 	expect("Bark 设置不广播", func() { st.SetBarkConfig(dev.ID, barkConfig{URL: "https://api.day.app/x/"}) })
-	expect("管理权限", func() { st.SetDeviceAdmin(alice.ID, dev.ID, true) }, "devices")
 	expect("配对码配对", func() {
-		code, err := st.CreatePairCode(alice.ID, 60e9, false, "")
+		code, err := st.CreatePairCode(alice.ID, 60e9, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -83,6 +82,12 @@ func TestSettingsChangesRecorded(t *testing.T) {
 	}, "devices")
 	expect("移除设备", func() { st.RevokeDevice(alice.ID, dev.ID) }, "devices")
 	expect("重复移除不记变更", func() { st.RevokeDevice(alice.ID, dev.ID) })
+	expect("注销全部登录", func() {
+		if n, err := st.LogoutAccount(alice.ID); err != nil || n != 1 { // 还剩配对上的手机
+			t.Fatalf("注销全部登录：%d %v", n, err)
+		}
+	}, "devices")
+	expect("没有设备时注销不记变更", func() { st.LogoutAccount(alice.ID) })
 	expect("改密码", func() {
 		if err := st.SetCredentials(alice.ID, "alice", "alice-pass-2"); err != nil {
 			t.Fatal(err)

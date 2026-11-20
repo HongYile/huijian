@@ -37,7 +37,8 @@ type Job struct {
 	Topic    string   `json:"topic,omitempty"`
 	Thread   string   `json:"thread,omitempty"`
 	Files    []string `json:"files,omitempty"`
-	Idem     string   `json:"idem"` // 幂等键：同一任务重试/补发多少次，服务端只记一条
+	Names    []string `json:"names,omitempty"` // 附件显示名（outbox 里的副本带序号前缀，发送时用原来的名字）；空时用文件名
+	Idem     string   `json:"idem"`            // 幂等键：同一任务重试/补发多少次，服务端只记一条
 }
 
 var pushClient = &http.Client{Transport: &http.Transport{
@@ -164,6 +165,14 @@ func splitSendKeys(s string) (string, *ecdh.PublicKey, error) {
 	return strings.Join(keys, ","), pub, nil
 }
 
+// fileName：第 i 个附件发给服务器 / 写进信封的名字
+func (j Job) fileName(i int) string {
+	if i < len(j.Names) && j.Names[i] != "" {
+		return j.Names[i]
+	}
+	return filepath.Base(j.Files[i])
+}
+
 // e2eSeal：用加密发送密钥里的公钥把标题、正文、附件信息封进信封；返回信封和每个附件的密钥（顺序同 j.Files）
 func e2eSeal(pub *ecdh.PublicKey, j Job) (string, [][]byte, error) {
 	var atts []e2eAtt
@@ -177,7 +186,7 @@ func e2eSeal(pub *ecdh.PublicKey, j Job) (string, [][]byte, error) {
 		if _, err := rand.Read(keys[i]); err != nil {
 			return "", nil, err
 		}
-		atts = append(atts, e2eAtt{Name: filepath.Base(path), Mime: fileMime(path), Size: st.Size(), Key: b64.EncodeToString(keys[i])})
+		atts = append(atts, e2eAtt{Name: j.fileName(i), Mime: fileMime(path), Size: st.Size(), Key: b64.EncodeToString(keys[i])})
 	}
 	env, err := e2eSealPayload(pub, j.Text, j.Desp, j.Type, atts)
 	if err != nil {
@@ -236,7 +245,7 @@ func sendOnce(base string, j Job) (string, int, error) {
 				if err != nil {
 					return err
 				}
-				name := filepath.Base(p)
+				name := j.fileName(i)
 				if keys != nil {
 					name = fmt.Sprintf("encrypted-%d.bin", i+1) // 真实文件名在信封里
 				}
@@ -306,7 +315,13 @@ func saveOutbox(j Job) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	// 复制附件，避免原文件被训练脚本删除或覆盖
+	// 复制附件，避免原文件被训练脚本删除或覆盖。副本名带序号前缀（同名文件不冲突），原来的名字记在 names 里
+	j.Files = append([]string(nil), j.Files...)
+	if len(j.Names) == 0 {
+		for _, p := range j.Files {
+			j.Names = append(j.Names, filepath.Base(p))
+		}
+	}
 	for i, p := range j.Files {
 		dst := filepath.Join(dir, fmt.Sprintf("%02d_%s", i, filepath.Base(p)))
 		if err := copyFile(p, dst); err != nil {
@@ -377,6 +392,7 @@ func flushOutbox(quiet bool) (int, int) {
 			os.RemoveAll(claimed)
 			continue
 		}
+		claimedFiles(&j, claimed)
 		_, retryable, err := sendJob(j)
 		switch {
 		case err == nil:
@@ -398,6 +414,25 @@ func flushOutbox(quiet bool) (int, int) {
 		}
 	}
 	return ok, left
+}
+
+// claimedFiles：job.json 里记的附件路径指向认领前的目录（outbox/<id>/NN_名字），认领时目录改了名，
+// 附件要按文件名到认领后的目录里找；旧版本存的任务没有 names，去掉副本的序号前缀作为显示名
+func claimedFiles(j *Job, claimed string) {
+	if len(j.Names) == 0 {
+		j.Names = make([]string, len(j.Files))
+		for i, p := range j.Files {
+			j.Names[i] = filepath.Base(p)
+			if n := j.Names[i]; len(n) > 3 && n[0] >= '0' && n[0] <= '9' && n[1] >= '0' && n[1] <= '9' && n[2] == '_' {
+				j.Names[i] = n[3:]
+			}
+		}
+	}
+	for i, p := range j.Files {
+		if c := filepath.Join(claimed, filepath.Base(p)); fileExists(c) {
+			j.Files[i] = c
+		}
+	}
 }
 
 func runFlush() int {

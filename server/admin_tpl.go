@@ -210,6 +210,17 @@ details.edit form{margin-top:6px;gap:6px}
 .copyid{cursor:pointer;border-bottom:1px dashed var(--border)}
 .copyid:hover{color:var(--accent)}
 form.search{margin:0 0 12px;gap:6px}
+.cols2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+.chart.dense{gap:3px}.chart.dense .bar{max-width:18px}.chart.dense .lb{overflow:visible;height:14px;line-height:14px}
+.chart.cm .bar{background:#8758BF}.chart.cn .bar{background:var(--ok)}
+.chart .bar.zero,.chart.cm .bar.zero,.chart.cn .bar.zero{background:var(--surface2)}
+.tbl .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.tbl .nowrap{white-space:nowrap}
+.tblwrap{overflow-x:auto}
+@media (max-width:980px){.cols2{grid-template-columns:1fr}}
+.newcodes{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center}
+.newcodes .keyline{display:inline-flex;gap:6px;align-items:center;margin:0}
+.seg-form{gap:8px 18px}
 </style>{{end}}`
 
 const adminIcons = `
@@ -217,6 +228,10 @@ const adminIcons = `
 {{define "i-logo"}}<svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 1024 1024"><rect width="1024" height="1024" style="fill:var(--lg-bg)"/><g transform="translate(512 512) scale(1.1200) translate(-534 -470)"><rect x="476" y="404" width="420" height="304" rx="46" stroke-width="26" style="fill:var(--lg-env);stroke:var(--lg-line)"/><polyline points="500,446 686,572 872,446" fill="none" style="stroke:var(--lg-flap)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/><path d="M 118 566 C 130 330, 500.5 125.1, 627.0 317.2 L 578.6 349.1 C 474.1 190.5, 190 360, 118 566 Z" style="fill:var(--lg-arrow)"/><path d="M 660.0 420.0 L 557.7 362.9 L 647.9 303.4 Z" stroke-width="14" stroke-linejoin="round" paint-order="stroke" style="fill:var(--lg-arrow);stroke:var(--lg-bg)"/><line x1="812" y1="352" x2="784" y2="306" style="stroke:var(--lg-spark)" stroke-width="26" stroke-linecap="round"/><line x1="862" y1="334" x2="862" y2="272" style="stroke:var(--lg-spark)" stroke-width="26" stroke-linecap="round"/><line x1="912" y1="352" x2="940" y2="306" style="stroke:var(--lg-spark)" stroke-width="26" stroke-linecap="round"/></g></svg>{{end}}
 {{define "i-overview"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>{{end}}
 {{define "i-messages"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>{{end}}
+{{define "i-users"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18.5 14.2A6.5 6.5 0 0 1 21.5 20"/></svg>{{end}}
+{{define "i-active"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 8L9 4l-3 8H2"/></svg>{{end}}
+{{define "i-db"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>{{end}}
+{{define "i-ticket"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v3a2 2 0 0 0 0 4v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3a2 2 0 0 0 0-4z"/><path d="M14 5v2M14 11v2M14 17v2"/></svg>{{end}}
 {{define "i-keys"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></svg>{{end}}
 {{define "i-devices"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="14" height="10" rx="1.5"/><path d="M5 18h8"/><rect x="17" y="8" width="5" height="12" rx="1.2"/></svg>{{end}}
 {{define "i-settings"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>{{end}}
@@ -236,15 +251,12 @@ const adminTemplates = `
 <div class="brand"><div class="logo">{{template "i-logo"}}</div><span>回笺<small>Huijian · 消息中台</small></span></div>
 <nav class="nav">
 <a href="/" class="{{if eq .Nav "overview"}}on{{end}}">{{template "i-overview"}}<span class="lb">概览</span></a>
-<a href="/messages" class="{{if eq .Nav "messages"}}on{{end}}">{{template "i-messages"}}<span class="lb">消息</span></a>
-<a href="/keys" class="{{if eq .Nav "keys"}}on{{end}}">{{template "i-keys"}}<span class="lb">Pushkey</span></a>
-<a href="/devices" class="{{if eq .Nav "devices"}}on{{end}}">{{template "i-devices"}}<span class="lb">设备</span></a>
-<a href="/accounts" class="{{if eq .Nav "accounts"}}on{{end}}">{{template "i-keys"}}<span class="lb">账号</span></a>
+<a href="/accounts" class="{{if eq .Nav "accounts"}}on{{end}}">{{template "i-users"}}<span class="lb">账号</span></a>
+<a href="/invites" class="{{if eq .Nav "invites"}}on{{end}}">{{template "i-ticket"}}<span class="lb">邀请码</span></a>
 <a href="/settings" class="{{if eq .Nav "settings"}}on{{end}}">{{template "i-settings"}}<span class="lb">设置</span></a>
 </nav>
-<div class="foot"><div class="live"><span class="pulse{{if not .Online}} off{{end}}"></span><span class="tx">{{.Online}} 台设备在线</span></div>
-<span class="tx">回笺 v{{.Version}}</span></div>
-</aside><main class="main"><div class="wrap">{{if ne .Nav "accounts"}}{{if ne .Nav "settings"}}{{template "acctbar" .}}{{end}}{{end}}{{end}}
+<div class="foot"><span class="tx">回笺 v{{.Version}}</span></div>
+</aside><main class="main"><div class="wrap">{{end}}
 
 {{define "bottom"}}</div></main></div>
 <script>
@@ -261,22 +273,6 @@ var up=document.querySelector('[data-upd-poll]');if(up){(function(){var stg=docu
 if(location.search.indexOf('f=')>=0&&history.replaceState){var u=new URL(location.href);u.searchParams.delete('f');history.replaceState(null,'',u.pathname+(u.search||''))}
 </script></body></html>{{end}}
 
-{{define "msgrow"}}<div class="msg p{{.Priority}}{{if le .Priority 1}} dim{{end}}">
-<div class="body">
-<div class="t"><span class="badge p{{.Priority}}">P{{.Priority}} {{pname .Priority}}</span><span class="tt" title="{{.Text}}">{{.Text}}</span></div>
-<div class="meta"><span class="chip"># {{.Topic}}</span>{{if .Sealed}}<span class="chip" title="发送端用普通 pushkey 发来，服务器收到后立即加密保存；内容只能在已解锁的回笺客户端里看">🔐 服务器加密</span>{{else if .E2E}}<span class="chip" title="发送端加密，服务器看不到内容；请在已解锁的回笺客户端里看">🔒 端到端加密</span>{{end}}{{if .Thread}}<span class="chip">线程 · {{.Thread}}</span>{{end}}{{if .Source}}<span>来自 {{.Source}}</span>{{end}}</div>
-{{if .Desp}}{{if long .Desp}}<details class="desp md"><summary>{{snip (msgplain .) 160}}</summary>{{msgmd .}}</details>{{else}}<div class="desp md">{{msgmd .}}</div>{{end}}{{end}}
-{{if .Attachments}}<div class="atts">{{range .Attachments}}{{$k := kind .Mime .Name}}<a class="att k-{{$k.Class}}" href="/att/{{.ID}}" title="下载 {{.Name}}"><span class="ic">{{$k.Label}}</span><span class="nm"><span class="n">{{.Name}}</span><span class="s">{{size .Size}}</span></span></a>{{end}}</div>{{end}}
-</div>
-<div class="time"><span title="{{full .CreatedAt}}">{{rel .CreatedAt}}</span>
-<form class="inline del" method="post" action="/messages/{{.ID}}/delete" data-confirm="删除这条消息？这个账号的所有设备上都会消失，附件一起删除，无法恢复。"><input type="hidden" name="u" value="{{.Owner}}"><button class="btn sm danger" title="删除这条消息">删除</button></form></div>
-</div>{{end}}
-
-{{define "msgrowc"}}<div class="msg compact p{{.Priority}}{{if le .Priority 1}} dim{{end}}">
-<div class="body"><div class="t"><span class="badge p{{.Priority}}">P{{.Priority}} {{pname .Priority}}</span><span class="tt" title="{{.Text}}">{{.Text}}</span></div>
-<div class="meta"><span class="chip"># {{.Topic}}</span>{{if .Sealed}}<span class="chip" title="发送端用普通 pushkey 发来，服务器收到后立即加密保存；内容只能在已解锁的回笺客户端里看">🔐 服务器加密</span>{{else if .E2E}}<span class="chip" title="发送端加密，服务器看不到内容；请在已解锁的回笺客户端里看">🔒 端到端加密</span>{{end}}{{if .Thread}}<span class="chip">线程 · {{.Thread}}</span>{{end}}{{if .Attachments}}<span class="chip">📎 {{len .Attachments}} 个附件</span>{{end}}{{if .Desp}}<span class="sn">{{snip (msgplain .) 90}}</span>{{end}}</div></div>
-<div class="time" title="{{full .CreatedAt}}">{{rel .CreatedAt}}</div></div>{{end}}
-
 {{define "login"}}<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark"><link rel="icon" type="image/png" href="/favicon.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><title>登录 · 回笺</title>{{template "css"}}</head><body>
 <div class="login"><div class="card">
@@ -290,130 +286,51 @@ if(location.search.indexOf('f=')>=0&&history.replaceState){var u=new URL(locatio
 {{if eq .Err "rate"}}<div class="err">尝试太频繁，请一分钟后再试</div>{{end}}
 <button class="btn primary">登录</button>
 </form>
-<div class="hint">更方便的方式：在 Mac 菜单栏的回笺里点「管理后台」，一键登录。<br>
+<div class="hint">管理后台只能在服务器上进入，回笺客户端不能登录后台。<br>
 第一次登录或忘记令牌：在服务器上执行 <code>docker exec huijian huijian admin-link</code>，会给出一个一次性登录链接。</div>
 </div></div></body></html>{{end}}
 
 {{define "overview"}}{{template "top" .}}
-<div class="head"><div><h1>概览</h1><div class="sub">{{if .LastMsg}}最近一条消息 {{rel .LastMsg}}{{else}}还没有收到过消息{{end}}</div></div>
-<a class="btn" href="/messages">查看全部消息</a></div>
+<div class="head"><div><h1>概览</h1><div class="sub">全服务器的统计。只有计数，不含任何账号的消息内容、key 或设备信息。</div></div></div>
 
 <div class="grid4">
-<div class="card stat"><div class="k"><span class="ti" style="--c:var(--accent)">{{template "i-messages"}}</span>今日消息</div><div class="v">{{.Today}}</div><div class="d">近 24 小时 {{.Total24}} 条</div></div>
-<div class="card stat"><div class="k"><span class="ti" style="--c:var(--ok)">{{template "i-devices"}}</span>在线设备</div><div class="v">{{.Online}}<small> / {{.ActiveDevices}}</small></div><div class="d">正在等待新消息的设备</div></div>
-<div class="card stat"><div class="k"><span class="ti" style="--c:#8758BF">{{template "i-clip"}}</span>附件</div><div class="v">{{size .Stats.AttBytes}}</div><div class="d">{{.Stats.Attachments}} 个文件</div></div>
-<div class="card stat"><div class="k"><span class="ti" style="--c:var(--p4)">{{template "i-keys"}}</span>Pushkey</div><div class="v">{{.Stats.Pushkeys}}</div><div class="d">有效的发送凭证</div></div>
+<div class="card stat"><div class="k"><span class="ti" style="--c:var(--accent)">{{template "i-users"}}</span>账号</div><div class="v">{{.Accounts.Total}}</div><div class="d">已加密 {{.Accounts.Encrypted}}{{if .Accounts.Waiting}} · 未加密旧账号 {{.Accounts.Waiting}}{{end}}{{if .Accounts.Disabled}} · 停用 {{.Accounts.Disabled}}{{end}}</div>
+<div class="d"><a href="/invites">邀请码</a> 已发 {{.InvIssued}} · 已用 {{.InvUsed}}{{if eq .Mode "open"}} · 开放注册{{else if eq .Mode "closed"}} · 注册已关闭{{end}}</div></div>
+<div class="card stat"><div class="k"><span class="ti" style="--c:var(--ok)">{{template "i-active"}}</span>今天活跃</div><div class="v">{{.Active1}}</div><div class="d">7 天 {{.Active7}} · 30 天 {{.Active30}}</div></div>
+<div class="card stat"><div class="k"><span class="ti" style="--c:var(--p4)">{{template "i-devices"}}</span>设备</div><div class="v">{{.Devices}}<small> 台</small></div><div class="d">在线 {{.Online}}{{if .Outdated}} · 较旧 {{.Outdated}}{{end}}</div></div>
+<div class="card stat"><div class="k"><span class="ti" style="--c:#8758BF">{{template "i-db"}}</span>存储</div><div class="v">{{size .Storage.DBSize}}<small> + {{size .AttBytes}}</small></div><div class="d">数据库 + 附件 {{.AttCount}} 个</div></div>
 </div>
 
-<div class="cols">
-<div class="card"><div class="card-h"><h2>近 14 天消息量</h2><span class="aside">按天</span></div><div class="card-b">
-<div class="chart">{{range .Days}}<div class="col" title="{{.Label}}：{{.Count}} 条"><span class="n">{{if .Count}}{{.Count}}{{end}}</span><div class="bar{{if not .Count}} zero{{end}}" style="height:{{.Pct}}%"></div><span class="lb">{{.Label}}</span></div>{{end}}</div>
+<div class="card"><div class="card-h"><h2>近 30 天每日活跃账号</h2><span class="aside">有设备登录或访问过接口的账号</span></div><div class="card-b">
+<div class="chart dense">{{range .Days}}<div class="col" title="{{.Day}}：{{.Active}} 个账号"><span class="n">{{if .Tick}}{{if .Active}}{{.Active}}{{end}}{{end}}</span><div class="bar{{if not .Active}} zero{{end}}" style="height:{{pct .PctActive}}%"></div><span class="lb">{{if .Tick}}{{.Label}}{{end}}</span></div>{{end}}</div>
 </div></div>
-<div class="card"><div class="card-h"><h2>近 24 小时级别分布</h2><span class="aside">{{.Total24}} 条</span></div><div class="card-b">
-{{if .Segs}}<div class="stack">{{range .Segs}}<span class="c{{.P}}" style="width:{{pct .Pct}}%" title="P{{.P}} {{.Count}} 条"></span>{{end}}</div>
-<ul class="legend">{{range .Segs}}<li><span class="dot c{{.P}}"></span>P{{.P}} {{pname .P}}<b>{{.Count}}</b></li>{{end}}</ul>
-{{else}}<div class="muted">近 24 小时没有消息</div>{{end}}
+
+<div class="cols2">
+<div class="card"><div class="card-h"><h2>每日新消息</h2><span class="aside">全服务器合计 · 30 天 {{.Msgs30}} 条</span></div><div class="card-b">
+<div class="chart dense cm">{{range .Days}}<div class="col" title="{{.Day}}：{{.Messages}} 条，附件 {{size .AttBytes}}"><span class="n">{{if .Tick10}}{{if .Messages}}{{.Messages}}{{end}}{{end}}</span><div class="bar{{if not .Messages}} zero{{end}}" style="height:{{pct .PctMessages}}%"></div><span class="lb">{{if .Tick10}}{{.Label}}{{end}}</span></div>{{end}}</div>
+</div></div>
+<div class="card"><div class="card-h"><h2>每日新账号</h2><span class="aside">30 天 {{.New30}} 个</span></div><div class="card-b">
+<div class="chart dense cn">{{range .Days}}<div class="col" title="{{.Day}}：{{.NewAccounts}} 个"><span class="n">{{if .NewAccounts}}{{.NewAccounts}}{{end}}</span><div class="bar{{if not .NewAccounts}} zero{{end}}" style="height:{{pct .PctAccounts}}%"></div><span class="lb">{{if .Tick10}}{{.Label}}{{end}}</span></div>{{end}}</div>
 </div></div>
 </div>
 
-<div class="card"><div class="card-h"><h2>最近消息</h2><a class="small" href="/messages">全部 →</a></div>
-{{range .Recent}}{{template "msgrowc" .}}{{else}}<div class="empty"><div class="big">还没有消息</div>先到「Pushkey」新建一把 key，然后试一下：
-<pre>curl "{{.PublicURL}}/message/push?pushkey=PK_xxx&text=hello"</pre></div>{{end}}
-</div>
+<div class="cols2">
+<div class="card"><div class="card-h"><h2>设备平台与版本</h2><span class="aside">在用设备 {{.Devices}} 台{{if .Outdated}}，较旧 {{.Outdated}} 台{{end}}</span></div>
+<table class="tbl"><tr><th>平台</th><th class="num">设备</th><th class="num">较旧</th><th>版本</th></tr>
+{{range .Platforms}}<tr><td class="mono">{{.Platform}}</td><td class="num">{{.Total}}</td><td class="num">{{if .Outdated}}<span class="chip warn">{{.Outdated}}</span>{{else}}<span class="muted">0</span>{{end}}</td>
+<td>{{range .Versions}}<span class="chip small">{{.Version}} × {{.Count}}</span> {{end}}</td></tr>
+{{else}}<tr><td colspan="4"><div class="empty"><div class="big">还没有设备</div>用户在回笺客户端登录后出现在这里。</div></td></tr>{{end}}
+</table>
+<p class="muted small" style="margin:0;padding:10px 18px 14px">较旧：低于这个平台在「设置 → 客户端更新」里发布的最新版本，或没有上报版本号的旧客户端。</p></div>
 
-<div class="card"><div class="card-h"><h2>发送测试消息</h2><span class="aside">发给自己所有设备</span></div><div class="card-b">
-<form method="post" action="/test" class="row"><input type="hidden" name="u" value="{{$.Acct.ID}}"><input class="in" name="text" placeholder="标题" style="flex:2;min-width:180px">
-<input class="in" name="desp" placeholder="正文（可选，支持 Markdown）" style="flex:3;min-width:200px">
-<select class="in" name="priority"><option value="5">P5 紧急</option><option value="4">P4 重要</option><option value="3" selected>P3 普通</option><option value="2">P2 低</option></select>
-<button class="btn primary">发送</button></form></div></div>
-{{template "bottom" .}}{{end}}
-
-{{define "messages"}}{{template "top" .}}
-<div class="head"><div><h1>消息</h1><div class="sub">所有发给你的消息。附件可以直接点击下载。</div></div></div>
-<div class="card">
-<form class="filters" method="get" action="/messages">
-<div class="seg">{{range .PrioOpts}}<a href="{{.Href}}" class="{{if .On}}on{{end}}">{{if ge .P 0}}<span class="dot c{{.P}}"></span>{{end}}{{.Label}}</a>{{end}}</div>
-{{if ge .F.Priority 0}}<input type="hidden" name="p" value="{{.F.Priority}}">{{end}}
-<select class="in" name="topic" onchange="this.form.submit()"><option value="">全部频道</option>{{$t := .F.Topic}}{{range .Topics}}<option value="{{.Topic}}" {{if eq .Topic $t}}selected{{end}}># {{.Topic}}（{{.Count}}）</option>{{end}}</select>
-<input class="in" name="q" value="{{.F.Q}}" placeholder="搜索标题、正文、线程、来源" style="flex:1;min-width:180px">
-<label class="check"><input type="checkbox" name="att" value="1" {{if .F.HasAtt}}checked{{end}} onchange="this.form.submit()"> 只看有附件</label>
-<button class="btn">搜索</button>
-</form>
-{{range .Msgs}}{{template "msgrow" .}}{{else}}<div class="empty"><div class="big">没有符合条件的消息</div>换个筛选条件试试。</div>{{end}}
-{{if or .Paged .Next}}<div class="pager">{{if .Paged}}<a class="btn sm" href="/messages">← 回到最新</a>{{else}}<span></span>{{end}}{{if .Next}}<a class="btn sm" href="{{.Next}}">更早的消息 →</a>{{end}}</div>{{end}}
-</div>
-{{template "bottom" .}}{{end}}
-
-{{define "keys"}}{{template "top" .}}
-<div class="head"><div><h1>Pushkey <span class="chip acc" title="pushkey 属于账号，这个账号的所有设备看到的是同一组">账号「{{.Acct.Label}}」</span></h1><div class="sub">发送方用 pushkey 把消息发给账号「{{.Acct.Label}}」的所有设备。建议每台机器、每个项目各用一把，泄露时只吊销那一把即可。</div></div>
-<form method="post" action="/keys" class="row"><input type="hidden" name="u" value="{{$.Acct.ID}}"><input class="in" name="name" placeholder="备注，例如：PC 训练脚本" required maxlength="40" style="width:200px"{{if not .HasActiveKey}} value="default"{{end}}><input class="in mono" name="key" placeholder="自定义 key（可选）" pattern="[A-Za-z0-9_\-]{16,64}" title="16–64 位字母、数字、下划线或短横线" style="width:200px"><button class="btn primary">{{template "i-plus"}}新建</button></form></div>
-{{$pub := .PublicURL}}{{$new := .NewKey}}{{$sp := .SendPub}}
-{{if $sp}}<div class="card"><div class="card-b small muted keyhint"><b>加密发送密钥</b>（<code>&lt;pushkey&gt;.e2e.&lt;公钥&gt;</code>）给 huijian 命令行和 Python SDK 用：标题、正文、附件在发送端加密，服务器看不到内容。<br><b>普通 pushkey</b> 适合 curl 等无法加密的发送端，消息由服务器收到后立即用账号公钥加密再保存（服务器代加密，始终开启）：数据库和备份里没有明文，但服务器在收到的那一刻能看到内容。</div></div>{{end}}
-<div class="card">
-{{range $i, $k := .Keys}}<div class="key{{if $k.Revoked}} rev{{end}}">
-<div class="top"><span class="nm">{{$k.Name}}</span>{{if $k.Revoked}}<span class="chip bad">已吊销</span>{{else if eq $k.Key $new}}<span class="chip acc">刚创建</span>{{else}}<span class="chip ok">有效</span>{{end}}
-<span class="when"><span title="{{full $k.Created}}">创建于 {{rel $k.Created}}</span><span>{{if $k.LastUsed.Valid}}<span title="{{full $k.LastUsed.Int64}}">最近使用 {{rel $k.LastUsed.Int64}}</span>{{else}}从未使用{{end}}</span></span>
-{{if $k.Revoked}}<form class="inline" method="post" action="/keys/{{$k.ID}}/delete" data-confirm="彻底删除「{{$k.Name}}」？历史消息会保留。"><input type="hidden" name="u" value="{{$.Acct.ID}}"><button class="btn sm danger">删除</button></form>{{end}}</div>
-{{if not $k.Revoked}}
-{{$ek := $k.Key}}{{if $sp}}{{$ek = printf "%s.e2e.%s" $k.Key $sp}}
-<div class="keyline"><span class="kl">加密发送密钥</span><code id="e{{$k.ID}}" data-mask="{{mask $k.Key}}.e2e.{{$sp}}" data-full="{{$ek}}">{{if eq $k.Key $new}}{{$ek}}{{else}}{{mask $k.Key}}.e2e.{{$sp}}{{end}}</code>
-<button class="btn sm" data-reveal="e{{$k.ID}}">{{if eq $k.Key $new}}隐藏{{else}}显示{{end}}</button><button class="btn sm" data-copy="{{$ek}}">复制</button></div>{{end}}
-<div class="keyline">{{if $sp}}<span class="kl">普通 pushkey</span>{{end}}<code id="k{{$k.ID}}" data-mask="{{mask $k.Key}}" data-full="{{$k.Key}}">{{if eq $k.Key $new}}{{$k.Key}}{{else}}{{mask $k.Key}}{{end}}</code>
-<button class="btn sm" data-reveal="k{{$k.ID}}">{{if eq $k.Key $new}}隐藏{{else}}显示{{end}}</button><button class="btn sm" data-copy="{{$k.Key}}">复制</button>
-<form class="inline" method="post" action="/keys/{{$k.ID}}/revoke" data-confirm="吊销「{{$k.Name}}」后，使用它的发送方将无法再发送（加密发送密钥也一起失效）。确定吗？"><input type="hidden" name="u" value="{{$.Acct.ID}}"><button class="btn sm danger">吊销</button></form></div>
-<details class="edit"><summary class="muted small">改名 / 更换 key</summary>
-<form method="post" action="/keys/{{$k.ID}}/update" class="row" data-confirm="确定保存？如果更换了 key，旧 key 会立即失效。"><input type="hidden" name="u" value="{{$.Acct.ID}}">
-<input class="in" name="name" value="{{$k.Name}}" maxlength="40" style="width:180px">
-<input class="in mono" name="key" placeholder="新 key（留空不变）" pattern="[A-Za-z0-9_\-]{16,64}" title="16–64 位字母、数字、下划线或短横线" style="width:240px">
-<button class="btn sm">保存</button></form></details>
-<div class="snipbox{{if eq $k.Key $new}} hl{{end}}"><div class="tabs">
-<button type="button" data-tab="a" class="on">curl</button><button type="button" data-tab="b">curl + 附件</button><button type="button" data-tab="c">命令行</button><button type="button" data-tab="d">Python</button>
-<button type="button" class="btn ghost sm cp" data-copy-snip>复制</button></div>
-<pre class="snip" data-pane="a">curl "{{$pub}}/message/push?pushkey={{$k.Key}}&amp;text=训练完成"</pre>
-<pre class="snip" data-pane="b" hidden>curl -F pushkey={{$k.Key}} -F text="exp42 完成" -F priority=4 \
-     -F desp="val_loss **0.231**" -F file=@loss.png -F file=@report.pdf \
-     {{$pub}}/message/push</pre>
-<pre class="snip" data-pane="c" hidden>export HUIJIAN_URL={{$pub}}
-export HUIJIAN_PUSHKEY={{$ek}}
-huijian push -p 4 -topic train -f loss.png "exp42 完成"</pre>
-<pre class="snip" data-pane="d" hidden>import huijian   # sdk/python/huijian.py，单文件无依赖
-huijian.push("exp42 完成", "val_loss 0.231", files=["loss.png"], priority=4,
-            topic="train", pushkey="{{$ek}}")
-
-with huijian.run("exp42", pushkey="{{$ek}}"):   # 自动发送开始/完成/异常
-    train()</pre>
-</div>{{end}}
-</div>{{else}}<div class="empty"><div class="big">还没有 pushkey</div>在右上角填一个备注，新建第一把。</div>{{end}}
-</div>
-{{template "bottom" .}}{{end}}
-
-{{define "devices"}}{{template "top" .}}
-<div class="head"><div><h1>设备</h1><div class="sub">接收消息的设备。每台设备有自己的凭证，可以随时吊销，不影响其他设备。</div></div>
-<form method="post" action="/pair" class="row"><input type="hidden" name="u" value="{{$.Acct.ID}}"><span class="muted small">加入账号「{{.Acct.Label}}」</span><label class="check" title="允许后，这台设备可以一键登录管理后台、查看服务器存储与备份（服务器级权限，只给你自己的设备）"><input type="checkbox" name="can_admin" value="1"> 允许管理服务器</label><button class="btn primary">{{template "i-plus"}}添加设备</button></form></div>
-
-{{if .Code}}<div class="card hl"><div class="card-h"><h2>配对码</h2><span class="aside">只能使用一次</span></div><div class="card-b pair">
-<div><div class="paircode">{{.Code}}</div><div class="cd" data-expire="{{.CodeExp}}"></div></div>
-<ol class="steps"><li>打开回笺 App，在配对窗口输入这 6 位数字</li>
-<li>服务器地址：<code class="mono">{{.PublicURL}}</code>{{if .InternalURL}}（内网也可以填 <code class="mono">{{.InternalURL}}</code>）{{end}}</li>
-<li>配对后这台设备进入账号「{{.Acct.Label}}」，可以管理这个账号的 pushkey；{{if .CodeAdmin}}并且<b>可以</b>一键进入管理后台{{else}}没有服务器管理权限，需要时在下方打开「允许管理」{{end}}</li>
-<li>同一台设备再次配对或登录时会沿用原来的设备记录，不会重复出现</li></ol>
+{{with .Storage}}<div class="card"><div class="card-h"><h2>存储与备份</h2><a class="small" href="/settings">设置 →</a></div><div class="card-b">
+<dl class="kv"><dt>数据库</dt><dd>{{size .DBSize}}</dd>
+<dt>附件</dt><dd>{{$.AttCount}} 个，{{size $.AttBytes}}{{if .FilesOK}}<span class="muted small">（附件目录 {{.FilesCount}} 个文件，{{size .FilesSize}}{{if ge .FilesFree 0}}，剩余 {{size .FilesFree}}{{end}}）</span>{{else}} <span class="chip bad">附件目录不可用</span>{{end}}
+{{if .Pending}}<br><span class="chip warn">{{.Pending}} 个附件暂存在本地</span>{{end}}</dd>
+<dt>备份</dt><dd>{{if not .BackupOn}}<span class="muted">已关闭</span>{{else}}{{if not .BackupOK}}<span class="chip bad">备份目录不可用</span> {{end}}每天 {{.BackupAt}} · 下次 {{full .Next}}{{end}}</dd>
+<dt>上次备份</dt><dd>{{if .Running}}<span class="chip acc">备份中</span>{{else}}{{with .Last}}{{if .OK}}<span class="chip ok">成功</span>{{else}}<span class="chip bad">失败</span>{{end}} <span title="{{full .At}}">{{rel .At}}</span>{{if .OK}} · {{size .DBSize}}{{end}}{{if .Error}}<br><span class="small">{{.Error}}</span>{{end}}{{else}}<span class="muted">还没有备份过</span>{{end}}{{end}}</dd></dl>
 </div></div>{{end}}
-
-<form method="get" action="/devices" class="row search"><input class="in" type="search" name="q" value="{{.Q}}" placeholder="按名称或设备 ID 搜索" style="width:280px"><button class="btn sm">搜索</button>{{if .Q}}<a class="btn sm ghost" href="/devices">清除</a>{{end}}</form>
-<div class="card">{{$on := .OnlineMap}}
-<table class="tbl"><tr><th>设备</th><th>状态</th><th>配对</th><th title="服务器级权限：一键登录本管理后台、查看服务器存储与备份">允许管理</th><th class="r"></th></tr>
-{{range .Devices}}<tr class="{{if .Revoked}}rev{{end}}">
-<td><div class="dev"><div class="av">{{if eq .Platform "macos"}}{{template "i-laptop"}}{{else if eq .Platform "ios"}}{{template "i-phone"}}{{else}}{{template "i-box"}}{{end}}</div>
-<div><b>{{.Name}}</b><span class="muted small mono">{{if .Client}}{{.Client}}{{else}}{{.Platform}}{{end}}{{if and (not .Revoked) (index $.Outdated .ID)}} <span class="chip warn" title="客户端不是最新版本，部分新功能需要更新客户端后才能使用">较旧</span>{{end}} · <span class="copyid" data-copy="{{.ID}}" title="点击复制设备 ID">{{.ID}}</span></span>
-{{if $.AcctLabels}}<span class="chip acc small">{{index $.AcctLabels .UserID}}</span>{{end}}
-{{if not .Revoked}}<details class="edit"><summary class="muted small">改名</summary><form method="post" action="/devices/{{.ID}}/rename" class="row"><input class="in" name="name" value="{{.Name}}" maxlength="64" style="width:180px"><button class="btn sm">保存</button></form></details>{{end}}</div></div></td>
-<td>{{if .Revoked}}<span class="chip bad">已吊销</span>{{else if index $on .ID}}<span class="live"><span class="pulse"></span>在线</span>{{else}}<span class="muted" title="{{if .LastSeen.Valid}}{{full .LastSeen.Int64}}{{end}}">{{if .LastSeen.Valid}}{{rel .LastSeen.Int64}}在线{{else}}从未连接{{end}}</span>{{end}}</td>
-<td class="muted small"><span title="{{full .Created}}">首次 {{rel .Created}}</span>{{if gt .PairCount 1}}
-<details class="edit"><summary class="muted small">配对 {{.PairCount}} 次 · 最近 {{rel .LastPaired}}</summary><ul class="pairs">{{range index $.Pairings .ID}}<li title="{{.Client}}">{{full .At}} · {{.MethodLabel}}{{if .IP}} · {{.IP}}{{end}}</li>{{end}}</ul></details>{{end}}</td>
-<td>{{if not .Revoked}}<form class="inline" method="post" action="/devices/{{.ID}}/admin"><input type="hidden" name="on" value="{{if .CanAdmin}}0{{else}}1{{end}}"><button class="sw{{if .CanAdmin}} on{{end}}" title="{{if .CanAdmin}}已允许，点击关闭{{else}}未允许，点击开启{{end}}"></button></form>{{end}}</td>
-<td class="r">{{if not .Revoked}}<form class="inline" method="post" action="/devices/{{.ID}}/revoke" data-confirm="吊销「{{.Name}}」后它将无法再接收消息，需要重新配对。确定吗？"><button class="btn sm danger">吊销</button></form>{{end}}</td></tr>
-{{else}}<tr><td colspan="5"><div class="empty">{{if .Q}}<div class="big">没有匹配「{{.Q}}」的设备</div>{{else}}<div class="big">还没有设备</div>点右上角「添加设备」生成配对码。{{end}}</div></td></tr>{{end}}
-</table></div>
+</div>
 {{template "bottom" .}}{{end}}
 
 {{define "settings"}}{{template "top" .}}
@@ -431,8 +348,7 @@ with huijian.run("exp42", pushkey="{{$ek}}"):   # 自动发送开始/完成/异�
 <div class="card"><div class="card-h"><h2>如何登录</h2></div><div class="card-b">
 <ol class="steps">
 <li><b>记住此浏览器</b>：用令牌登录时勾选「记住」，一年内免登录，容器重启也不会掉。</li>
-<li><b>Mac 一键登录</b>：在「设备」页为你的 Mac 打开「管理后台」开关，然后在菜单栏回笺里点「管理后台」。</li>
-<li><b>忘记令牌</b>：在服务器上执行下面的命令，得到一个 5 分钟有效的一次性登录链接：</li></ol>
+<li><b>只能在服务器上进入</b>：任何账号都不能从回笺客户端进入管理后台。用管理令牌（数据目录里的 <code>admin.token</code>）登录，或者在服务器上执行下面的命令，得到一个 5 分钟有效的一次性登录链接：</li></ol>
 <div class="keyline"><code>docker exec huijian huijian admin-link</code><button class="btn sm" data-copy="docker exec huijian huijian admin-link">复制</button></div>
 </div></div>
 

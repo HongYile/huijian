@@ -37,7 +37,7 @@ type Hub struct {
 	maxUpload    int64
 	trustedProxy ipSet
 	adminDeny    ipSet
-	userID       int64 // 目前单用户
+	userID       int64 // 接收系统通知的账号；0 = 第一个账号（noticeUser）
 	st           *Store
 	br           *Broker
 	pushLimit    *Limiter
@@ -95,7 +95,7 @@ func runHub() {
 	st.notify = h.br.Notify
 	setPageProxy(st.GetKV(updProxyKey)) // 管理页设置的更新代理（见 selfupdate_net.go）
 	cleanUpdateTemps(data)
-	if h.userID, err = st.EnsureUser("me"); err != nil {
+	if err = st.EnsureLegacyOwner(); err != nil {
 		log.Fatal(err)
 	}
 	h.admin = newAdminState(data)
@@ -216,6 +216,23 @@ func (b *Broker) Online(userID int64) map[string]int {
 	return out
 }
 
+// OnlineCount：全服务器正在长轮询等消息的设备数（管理后台概览用，只是个数）
+func (b *Broker) OnlineCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for _, m := range b.subs {
+		seen := map[string]bool{}
+		for _, d := range m {
+			if !seen[d] {
+				seen[d] = true
+				n++
+			}
+		}
+	}
+	return n
+}
+
 func (b *Broker) CloseAll() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -259,7 +276,6 @@ func (h *Hub) publicMux() http.Handler {
 	m.HandleFunc("GET /v1/subscriptions", h.deviceAuth(h.handleSubscriptions))
 	m.HandleFunc("PUT /v1/subscriptions/{id}", h.deviceAuth(h.handleSetSubscription))
 	m.HandleFunc("POST /v1/presence", h.deviceAuth(h.handlePresence))
-	m.HandleFunc("POST /v1/admin/link", h.deviceAuth(h.handleAdminLink))
 	m.HandleFunc("GET /v1/messages", h.deviceAuth(h.handleMessages))
 	m.HandleFunc("GET /v1/messages/{id}", h.deviceAuth(h.handleMessage))
 	m.HandleFunc("GET /v1/stream", h.deviceAuth(h.handleStream))
@@ -273,9 +289,8 @@ func (h *Hub) publicMux() http.Handler {
 	m.HandleFunc("GET /ios/gbox.appsrc", h.handleGBoxSource)
 	m.HandleFunc("GET /ios/{file}", h.handleIPA)
 	m.HandleFunc("GET /icon.png", serveIcon(appleTouchIconPNG))
-	// 服务器级：需要设备被允许管理
-	m.HandleFunc("GET /v1/storage", h.adminDeviceAuth(h.handleStorage))
-	m.HandleFunc("POST /v1/storage/backup", h.adminDeviceAuth(h.handleStorageBackup))
+	// 0.9.0 起没有任何账号或设备能进入管理后台、查看服务器存储与备份：/v1/admin/link、/v1/storage* 已删除（404）。
+	// 管理后台只能在服务器上进入（huijian admin-link 或管理令牌登录）
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
 	m.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "not found", 404) })
 	return m
@@ -305,6 +320,7 @@ func (h *Hub) deviceAuth(next func(http.ResponseWriter, *http.Request, *Device))
 			apiErr(w, 403, errDisabled.Error())
 			return
 		}
+		h.st.markActive(d.UserID) // 统计：今天活跃的账号（内存去重，一天只写一次库）
 		if !d.LastSeen.Valid || now()-d.LastSeen.Int64 > 60 {
 			h.st.TouchDevice(d.ID)
 			if fp := clientHeader(r.Header, "Fingerprint"); fp != "" {
@@ -491,7 +507,13 @@ func (h *Hub) handlePush(w http.ResponseWriter, r *http.Request) {
 		pk, err := h.st.PushkeyByKey(k)
 		if err != nil || pk.Revoked {
 			time.Sleep(300 * time.Millisecond) // 拖慢暴力猜测
-			apiErr(w, 403, "pushkey 无效或已吊销")
+			msg := "pushkey 无效或已吊销"
+			if err != nil { // 墓碑只影响提示文字，查询出错时用通用提示
+				if retired, _ := keyRetired(h.st.db, k); retired {
+					msg = "pushkey 已停用（所属账号已删除，或已换成新的 key）"
+				}
+			}
+			apiErr(w, 403, msg)
 			return
 		}
 		if h.st.AccountDisabled(pk.UserID) {
@@ -531,14 +553,8 @@ func (h *Hub) handlePush(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		if sendKey { // 用了加密发送密钥却没加密：多半是旧版命令行 / SDK 或 curl，不能让人以为发出去的是加密的
-			apiErr(w, 400, "这是加密发送密钥，但消息没有加密：请用新版 huijian 命令行或 Python SDK 发送；只能用 curl 时请改用普通 pushkey（明文发到服务器，开启了加密的账号由服务器收到后代为加密）")
+			apiErr(w, 400, "这是加密发送密钥，但消息没有加密：请用新版 huijian 命令行或 Python SDK 发送；只能用 curl 时请改用普通 pushkey（明文发送：服务器收到时能看到内容，随后立即加密保存）")
 			return
-		}
-		for _, pk := range pks {
-			if h.st.E2EOnly(pk.UserID) {
-				apiErr(w, 403, "这个账号只接受加密消息：请在回笺的 Pushkey 页复制「加密发送密钥」，用 huijian 命令行或 SDK 发送")
-				return
-			}
 		}
 	}
 	if text == "" && len(files) == 0 {
@@ -591,7 +607,8 @@ func (h *Hub) handlePush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 每个账号一条消息（同一账号的多个 pushkey 只投递一次）：
-	// 发送端加密的原样保存；开启了加密的账号由服务器用各自的公钥加密（代加密始终开启）；还没有钥匙的账号先存明文，开启后补加密
+	// 发送端加密的原样保存；明文发来的由服务器用各自的公钥加密（代加密始终开启）。
+	// 0.9.0 起服务器不再保存明文：明文发给还没有钥匙的账号时整条推送返回 403，什么都不存
 	type target struct {
 		pk   *Pushkey
 		seal *ecdh.PublicKey
@@ -612,6 +629,10 @@ func (h *Hub) handlePush(w http.ResponseWriter, r *http.Request) {
 			if err != nil { // 读不到公钥时不能当成「没开启」存明文
 				log.Printf("读取账号 #%d 的公钥失败：%v", pk.UserID, err)
 				apiErr(w, 503, "服务器暂时无法加密这条消息，请稍后重试")
+				return
+			}
+			if pub == nil {
+				apiErr(w, 403, errNoE2E.Error())
 				return
 			}
 			t.seal = pub
@@ -647,7 +668,7 @@ func (h *Hub) handlePush(w http.ResponseWriter, r *http.Request) {
 		sent(t.pk.UserID, id, dup, &barkPlain{Text: text, Desp: desp, Type: typ}) // Bark 照旧转发明文（Bark 本来就由服务器转发明文）
 	}
 
-	// 2. 明文（还没有钥匙的账号）和发送端密文：附件落盘一次（年/月/日/时分秒_标题/文件名，同样内容只存一份），各账号共用
+	// 2. 发送端密文：附件（已是密文）落盘一次（年/月/日/时分秒_标题/文件名，同样内容只存一份），各账号共用
 	var rels []string
 	var atts []Attachment
 	needFiles := false
@@ -665,7 +686,7 @@ func (h *Hub) handlePush(w http.ResponseWriter, r *http.Request) {
 			atts = append(atts, Attachment{Name: f.name, Mime: f.mime, Size: f.size, Sha256: f.sha256, blob: rels[i]})
 		}
 	}
-	removeTemps(files) // 明文临时文件：用完立即删除
+	removeTemps(files) // 临时文件：用完立即删除
 	used := false      // 落盘的附件有没有被写进库（全是幂等重复或写库失败时删掉）
 	defer func() {
 		if !used {
@@ -678,6 +699,10 @@ func (h *Hub) handlePush(w http.ResponseWriter, r *http.Request) {
 		}
 		t.msg.Files = atts
 		id, dup, err := h.st.InsertMessage(t.msg)
+		if errors.Is(err, errAccountGone) { // 推送途中账号被删除：不写库，落盘的附件由上面的 defer 删掉
+			apiErr(w, 403, err.Error())
+			return
+		}
 		if err != nil {
 			log.Printf("写入消息失败: %v", err)
 			apiErr(w, 500, "写入消息失败")
@@ -686,11 +711,6 @@ func (h *Hub) handlePush(w http.ResponseWriter, r *http.Request) {
 		used = used || !dup
 		ids[i] = strconv.FormatInt(id, 10)
 		sent(t.pk.UserID, id, dup, nil)
-		if env == "" && !dup { // 读公钥之后、写库之前账号刚开启加密：这条明文交给补加密
-			if pub, err := h.st.E2EActivePub(t.pk.UserID); err != nil || pub != nil {
-				h.startSealBacklog(t.pk.UserID)
-			}
-		}
 	}
 	writeJSON(w, 200, map[string]any{"code": 0, "content": map[string]any{"result": ids}})
 }
@@ -732,24 +752,9 @@ func (h *Hub) handlePair(w http.ResponseWriter, r *http.Request) {
 
 func (h *Hub) handleMe(w http.ResponseWriter, r *http.Request, d *Device) {
 	writeJSON(w, 200, map[string]any{"device_id": d.ID, "name": d.Name, "platform": d.Platform,
-		"can_admin": d.CanAdmin, "admin_url": adminURL(r), "account": h.accountJSON(d), "away_silent": d.AwaySilent,
+		"can_admin": false, "admin_url": "", // 0.9.0 起恒为 false / 空：没有账号能进入管理后台，保留字段兼容旧客户端
+		"account": h.accountJSON(d), "away_silent": d.AwaySilent,
 		"bark": h.st.BarkConfig(d.ID).json()})
-}
-
-// handleAdminLink：已授权的设备（例如 Mac App）换取 60 秒一次性管理登录链接。
-// 链接只能在管理端口（仅 WG 可达）使用。
-func (h *Hub) handleAdminLink(w http.ResponseWriter, r *http.Request, d *Device) {
-	if !d.CanAdmin {
-		apiErr(w, 403, "该设备没有管理权限：请在管理网页的「设备」页为它打开「允许管理」")
-		return
-	}
-	raw, err := h.st.CreateAdminLink(d.ID, 60*time.Second)
-	if err != nil {
-		apiErr(w, 500, "生成链接失败")
-		return
-	}
-	log.Printf("设备 %s 申请了一次性管理登录链接", d.ID)
-	writeJSON(w, 200, map[string]any{"url": adminURL(r) + "/auth/link?t=" + raw, "expires_in": 60})
 }
 
 // adminURL：浏览器访问管理后台的地址（一次性登录链接的前缀）。管理端口本身只说 http。按优先级：
@@ -950,6 +955,16 @@ func (h *Hub) handleMessages(w http.ResponseWriter, r *http.Request, d *Device) 
 			case _, open := <-ch:
 				if !open { // 服务端正在关闭
 					break wait
+				}
+				// 唤醒时先确认这台设备还有效：注销全部登录、移除设备、删除账号、停用账号后，
+				// 挂着的长轮询不能再带回新消息（和 /v1/stream 一样）
+				if !h.st.DeviceActive(d.ID) {
+					if h.st.AccountDisabled(d.UserID) {
+						apiErr(w, 403, errDisabled.Error())
+					} else {
+						apiErr(w, 401, "设备已失效，请重新登录")
+					}
+					return
 				}
 				// 先取变更再查消息（和第一次查询顺序一致）：同一个响应里不会出现「消息还在、删除它的变更却漏掉」
 				if err := fetchChanges(); err != nil {

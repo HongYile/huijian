@@ -47,7 +47,7 @@ const (
 	changeKeys    = "keys"    // pushkey 新建、改名、换 key、吊销、删除
 	changeDevices = "devices" // 设备加入、改名、移除、管理权限（只有本机能改的接收规则、离开静音、Bark 设置不广播）
 	changeAccount = "account" // 用户名、密码、账号停用
-	changeE2E     = "e2e"     // 端到端加密：开启、设备请求批准 / 已批准、只接受加密消息（0.7.0 起）
+	changeE2E     = "e2e"     // 端到端加密：开启、设备请求批准 / 已批准（0.7.0 起）
 )
 
 // settingsChanged：账号的 key / 设备 / 账户设置改了以后记一条变更（id 0），并唤醒这个账号在线设备的长轮询，

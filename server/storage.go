@@ -455,12 +455,29 @@ func (h *Hub) notice(kind string, prio int, title, body string) {
 	}
 	noticeLast[kind] = time.Now()
 	noticeMu.Unlock()
-	if _, _, err := h.insertServerMessage(NewMessage{UserID: h.userID, Topic: "huijian", Priority: prio, Type: "markdown",
+	uid := h.noticeUser()
+	if uid == 0 { // 新部署还没有人注册
+		log.Printf("系统通知「%s」已丢弃：还没有账号", kind)
+		return
+	}
+	if _, _, err := h.insertServerMessage(NewMessage{UserID: uid, Topic: "huijian", Priority: prio, Type: "markdown",
 		Text: title, Desp: body, Source: "回笺服务端"}); err != nil {
+		if errors.Is(err, errNoE2E) { // 接收通知的账号还没开启加密：丢弃（服务器不存明文），只记日志
+			log.Printf("系统通知「%s」已丢弃：第一个账号还没开启加密", kind)
+			return
+		}
 		log.Printf("发送系统通知失败: %v", err)
 		return
 	}
 	if h.br != nil {
-		h.br.Notify(h.userID)
+		h.br.Notify(uid)
 	}
+}
+
+// noticeUser：接收系统通知的账号——第一个账号（id 最小）。0.9.0 起新部署不再预建账号，第一个注册的人就是它
+func (h *Hub) noticeUser() int64 {
+	if h.userID != 0 { // 测试里可以指定
+		return h.userID
+	}
+	return h.st.OwnerID()
 }

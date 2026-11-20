@@ -55,16 +55,30 @@ func isUniqueErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNIQUE")
 }
 
-// CreatePushkeyWith 创建 pushkey；key 为空时自动生成
+// CreatePushkeyWith 创建 pushkey；key 为空时自动生成。
+// 自定义 key 不能和已删除账号的 key、换掉的旧 key 重复（retired_pushkeys），检查和写入在同一个事务里
 func (s *Store) CreatePushkeyWith(userID int64, name, key string) (*Pushkey, error) {
 	if key == "" {
 		return s.CreatePushkey(userID, name)
 	}
-	res, err := s.db.Exec(`INSERT INTO pushkeys(user_id,key,name,created_at) VALUES(?,?,?,?)`, userID, key, name, now())
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if retired, err := keyRetired(tx, key); err != nil {
+		return nil, err
+	} else if retired {
+		return nil, errKeyTaken
+	}
+	res, err := tx.Exec(`INSERT INTO pushkeys(user_id,key,name,created_at) VALUES(?,?,?,?)`, userID, key, name, now())
 	if isUniqueErr(err) {
 		return nil, errKeyTaken
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
@@ -74,26 +88,43 @@ func (s *Store) CreatePushkeyWith(userID int64, name, key string) (*Pushkey, err
 
 var errKeyRevoked = errors.New("已吊销的 pushkey 不能修改")
 
-// UpdatePushkey 改名和/或换 key 内容（空字符串表示不改），一条语句完成，不会只改一半。已吊销的不能改。
+// UpdatePushkey 改名和/或换 key 内容（空字符串表示不改），在一个事务里完成，不会只改一半。已吊销的不能改。
+// 换掉的旧 key 字符串留墓碑：还在用旧 key 的脚本收到 403，别的账号也不能认领它
 func (s *Store) UpdatePushkey(userID, id int64, name, key string) error {
-	res, err := s.db.Exec(`UPDATE pushkeys SET name=COALESCE(NULLIF(?,''),name), key=COALESCE(NULLIF(?,''),key)
-		WHERE id=? AND user_id=? AND revoked=0`, name, key, id, userID)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var old string
+	var revoked int
+	switch err := tx.QueryRow(`SELECT key, revoked FROM pushkeys WHERE id=? AND user_id=? AND deleted=0`, id, userID).Scan(&old, &revoked); {
+	case errors.Is(err, sql.ErrNoRows):
+		return sql.ErrNoRows
+	case err != nil:
+		return err
+	case revoked != 0:
+		return errKeyRevoked
+	}
+	if key != "" && key != old {
+		if retired, err := keyRetired(tx, key); err != nil {
+			return err
+		} else if retired {
+			return errKeyTaken
+		}
+		if err := retireKey(tx, old); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(`UPDATE pushkeys SET name=COALESCE(NULLIF(?,''),name), key=COALESCE(NULLIF(?,''),key) WHERE id=? AND user_id=?`, name, key, id, userID)
 	if isUniqueErr(err) {
 		return errKeyTaken
 	}
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		var revoked int
-		switch err := s.db.QueryRow(`SELECT revoked FROM pushkeys WHERE id=? AND user_id=? AND deleted=0`, id, userID).Scan(&revoked); {
-		case errors.Is(err, sql.ErrNoRows):
-			return sql.ErrNoRows
-		case err != nil:
-			return err
-		default:
-			return errKeyRevoked
-		}
+	if err := tx.Commit(); err != nil {
+		return err
 	}
 	s.settingsChanged(userID, changeKeys)
 	return nil
@@ -213,17 +244,6 @@ func (h *Hub) handleMeUpdate(w http.ResponseWriter, r *http.Request, d *Device) 
 		d.AwaySilent = *in.AwaySilent
 	}
 	h.handleMe(w, r, d)
-}
-
-// adminDeviceAuth：服务器级操作（存储、备份、进入管理后台）需要设备被允许管理（can_admin）
-func (h *Hub) adminDeviceAuth(next func(http.ResponseWriter, *http.Request, *Device)) http.HandlerFunc {
-	return h.deviceAuth(func(w http.ResponseWriter, r *http.Request, d *Device) {
-		if !d.CanAdmin {
-			apiErr(w, 403, "这台设备没有服务器管理权限：请在管理后台的「设备」页为它打开「允许管理」")
-			return
-		}
-		next(w, r, d)
-	})
 }
 
 func (h *Hub) handleKeysList(w http.ResponseWriter, r *http.Request, d *Device) {

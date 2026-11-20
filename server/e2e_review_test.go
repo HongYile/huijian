@@ -55,9 +55,7 @@ func TestReviewSealedAttachmentID(t *testing.T) {
 	pk, _ := e.h.st.CreatePushkey(u.ID, "a")
 	_, tok, _, _ := e.h.st.LoginDevice(pairReq{UserID: u.ID, Name: "old-phone", Platform: "ios", Fingerprint: "fp-rv-00001"})
 	plain := bytes.Repeat([]byte("PDF-PLAINTEXT "), 1000)
-	if c, out := e.pushFiles(map[string]string{"pushkey": pk.Key, "text": "报告"}, map[string][]byte{"report.pdf": plain}, []string{"report.pdf"}); c != 200 {
-		t.Fatal(c, out)
-	}
+	e.legacyPlain(pk.Key, map[string]string{"text": "报告"}, map[string][]byte{"report.pdf": plain}, "report.pdf") // 0.9.0 以前的明文历史
 	before := e.messages(tok)[0]
 	msgID := int64(before["id"].(float64))
 	oldAtt := before["attachments"].([]any)[0].(map[string]any)["id"].(string)
@@ -189,9 +187,7 @@ func TestReviewPendingUnlink(t *testing.T) {
 	u, _ := e.h.st.CreateAccount("rv2", "rv2-pass-0001")
 	pk, _ := e.h.st.CreatePushkey(u.ID, "a")
 	_, tok, _, _ := e.h.st.LoginDevice(pairReq{UserID: u.ID, Name: "m", Platform: "macos", Fingerprint: "fp-rv-00002"})
-	if c, out := e.pushFiles(map[string]string{"pushkey": pk.Key, "text": "ORPHAN-TITLE"}, map[string][]byte{"ORPHAN-NAME.txt": []byte("ORPHAN-CONTENT")}, []string{"ORPHAN-NAME.txt"}); c != 200 {
-		t.Fatal(c, out)
-	}
+	e.legacyPlain(pk.Key, map[string]string{"text": "ORPHAN-TITLE"}, map[string][]byte{"ORPHAN-NAME.txt": []byte("ORPHAN-CONTENT")}, "ORPHAN-NAME.txt")
 	var blob string
 	e.h.st.db.QueryRow(`SELECT blob FROM attachments`).Scan(&blob)
 	p, _ := e.h.files.find(blob)
@@ -250,11 +246,17 @@ func TestReviewIdemRaceOrphans(t *testing.T) {
 	if msgs != 1 || rows != 1 || files != 1 {
 		t.Fatalf("消息 %d 条，附件记录 %d 条，附件文件 %d 个（应各 1）", msgs, rows, files)
 	}
-	// 明文账号：全是重复时落盘的附件也删掉
+	// 发送端加密（附件共用落盘的那条路径）：全是重复时落盘的附件也删掉
 	bob, _ := e.h.st.CreateAccount("bob", "bob-pass-1234")
 	pkBob, _ := e.h.st.CreatePushkey(bob.ID, "b")
+	_, tokBob, _, _ := e.h.st.LoginDevice(pairReq{UserID: bob.ID, Name: "b", Platform: "macos", Fingerprint: "fp-rv-00013"})
+	enableE2E(t, e, bob.ID, tokBob, "bob-pass-1234")
+	bobPub, _ := e.h.st.E2EActivePub(bob.ID)
+	env, _ := e2eSealMessage(bobPub, []byte(`{"v":1,"text":"y"}`))
 	for i := 0; i < 2; i++ {
-		e.pushFiles(map[string]string{"pushkey": pkBob.Key, "text": "y", "idem": "bob-idem"}, map[string][]byte{"b.bin": []byte(fmt.Sprintf("B%d", i))}, []string{"b.bin"})
+		if c, out := e.pushFiles(map[string]string{"pushkey": pkBob.Key, "e2e": env, "idem": "bob-idem"}, map[string][]byte{"b.bin": []byte(fmt.Sprintf("B%d", i))}, []string{"b.bin"}); c != 200 {
+			t.Fatal(c, out)
+		}
 	}
 	files = 0
 	filepath.WalkDir(e.h.paths.files, func(p string, d fs.DirEntry, err error) error {
@@ -264,7 +266,7 @@ func TestReviewIdemRaceOrphans(t *testing.T) {
 		return nil
 	})
 	if files != 2 {
-		t.Fatalf("明文账号重复发送后附件文件 %d 个（应 2：rv3 一个、bob 一个）", files)
+		t.Fatalf("发送端加密重复发送后附件文件 %d 个（应 2：rv3 一个、bob 一个）", files)
 	}
 }
 
@@ -275,7 +277,7 @@ func TestReviewKeyChangedMidway(t *testing.T) {
 	pk, _ := e.h.st.CreatePushkey(u.ID, "a")
 	_, tok, _, _ := e.h.st.LoginDevice(pairReq{UserID: u.ID, Name: "m", Platform: "macos", Fingerprint: "fp-rv-00004"})
 	for i := 0; i < 3; i++ {
-		e.push(map[string]string{"pushkey": pk.Key, "text": fmt.Sprintf("OLD-%d", i)})
+		e.legacyPlain(pk.Key, map[string]string{"text": fmt.Sprintf("OLD-%d", i)}, nil)
 	}
 	sk1 := newKey(t)
 	body, _, _ := keyBody(t, sk1, "rv4-pass-0001")

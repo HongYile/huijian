@@ -152,9 +152,16 @@ func TestE2EFlow(t *testing.T) {
 	tokA := login(200, map[string]any{"password_key": b64of(pwKey), "fingerprint": "fp-a-000001"})["token"].(string)
 	login(200, map[string]any{"password": pw, "fingerprint": "fp-a-000001"}) // 旧客户端照常
 	tokA = login(200, map[string]any{"password_key": b64of(pwKey), "fingerprint": "fp-a-000001"})["token"].(string)
-	if c, out := e.push(map[string]string{"pushkey": pk.Key, "text": "plain-1"}); c != 200 {
-		t.Fatalf("明文发送失败：%d %v", c, out)
+	// 0.9.0：还没有钥匙的账号不收明文——403，什么都不存（附件也不落盘）
+	if c, out := e.push(map[string]string{"pushkey": pk.Key, "text": "NOKEY-PLAIN", "desp": "NOKEY-BODY"}, []byte("NOKEY-FILE")); c != 403 ||
+		out["code"].(float64) != 403 || out["error"] != "账号还没开启加密：请先在回笺客户端用密码登录一次（之后服务器只保存密文）" {
+		t.Fatalf("没有钥匙时明文推送应 403：%d %v", c, out)
 	}
+	if len(e.messages(tokA)) != 0 {
+		t.Fatal("被拒的明文推送写进了库")
+	}
+	scanLeaks(t, e, "NOKEY-PLAIN", "NOKEY-BODY", "NOKEY-FILE")
+	e.legacyPlain(pk.Key, map[string]string{"text": "plain-1"}, nil) // 0.9.0 以前存下的明文历史，开启后补加密
 
 	// 开启加密
 	sk, _ := ecdh.X25519().GenerateKey(rand.Reader)
@@ -250,21 +257,26 @@ func TestE2EFlow(t *testing.T) {
 		}
 	}
 
-	// 只接受加密消息
-	e.must(200, "PATCH", "/v1/e2e", tokA, map[string]any{"e2e_only": true})
-	if c, _ := e.push(map[string]string{"pushkey": pk.Key, "text": "plain-2"}); c != 403 {
-		t.Fatalf("只收加密时明文没被拒：%d", c)
+	// 0.9.0 取消「只接受加密消息」：PATCH 传 e2e_only 忽略（响应恒 false）；旧库里 e2e_only=1 也当 0，普通 pushkey 照常由服务器代加密
+	if out := e.must(200, "PATCH", "/v1/e2e", tokA, map[string]any{"e2e_only": true}); out["e2e_only"] != false {
+		t.Fatalf("PATCH e2e_only 应被忽略：%v", out)
+	}
+	e.h.st.db.Exec(`UPDATE users SET e2e_only=1 WHERE id=?`, alice.ID)
+	if st := e.must(200, "GET", "/v1/e2e", tokA, nil); st["e2e_only"] != false {
+		t.Fatalf("GET /v1/e2e 的 e2e_only 应恒为 false：%v", st["e2e_only"])
+	}
+	if c, _ := e.push(map[string]string{"pushkey": pk.Key, "text": "plain-2"}); c != 200 {
+		t.Fatalf("普通 pushkey 应由服务器代加密：%d", c)
 	}
 	if c, _ := e.push(map[string]string{"pushkey": pk.Key, "e2e": env}); c != 200 {
-		t.Fatalf("只收加密时加密消息被拒：%d", c)
+		t.Fatalf("加密消息被拒：%d", c)
 	}
-	// 一次发给多个账号：任何一个开了只收加密都要拒收
+	// 一次发给多个账号：其中一个还没有钥匙时整条拒收
 	bob, _ := e.h.st.CreateAccount("bob", "bob-pass-1234")
 	pkBob, _ := e.h.st.CreatePushkey(bob.ID, "b")
 	if c, _ := e.push(map[string]string{"pushkey": pkBob.Key + "," + pk.Key, "text": "plain-3"}); c != 403 {
-		t.Fatalf("多个 pushkey 绕过了只收加密：%d", c)
+		t.Fatalf("有账号没开启加密时应 403：%d", c)
 	}
-	e.must(200, "PATCH", "/v1/e2e", tokA, map[string]any{"e2e_only": false})
 	// 加密发送密钥没带信封（旧命令行 / curl）：拒收，不让人以为发出去的是加密的
 	if c, _ := e.push(map[string]string{"pushkey": sendKey, "text": "plain-4"}); c != 400 {
 		t.Fatalf("加密发送密钥发明文：%d", c)
@@ -452,30 +464,76 @@ func TestE2EFlow(t *testing.T) {
 	login(200, map[string]any{"auth_key": b64of(auth3)})
 }
 
-// 新协议注册：服务端从头到尾拿不到密码
+// 0.9.0 注册即开启加密：一个事务里建账号、存钥匙、发设备 token；服务端从头到尾拿不到密码和私钥。旧客户端注册返回 400
 func TestE2ERegisterAuth(t *testing.T) {
 	e := newE2EEnv(t)
-	body := map[string]any{"username": "bob", "auth_key": b64of(make([]byte, 32)), "auth_salt": "zz", "name": "d"}
-	e.must(403, "POST", "/v1/register", "", body)
-	e.h.st.SetKV("register_open", "1")
-	e.must(400, "POST", "/v1/register", "", body)
-	salt, saltHex := newSalt(t)
-	auth, _ := e2ePasswordKeys("bob-password-1", salt)
-	body["auth_salt"], body["auth_key"] = saltHex, b64of(auth)
+	body, sk, err := registerBody("bob", "bob-password-1", "", "d", "macos", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.must(403, "POST", "/v1/register", "", body) // 新部署需要邀请码
+	e.h.st.SetRegisterMode(regOpen)
+	// 旧客户端：密码原文 / 只有登录凭证没有钥匙 → 400「请更新回笺客户端后注册」，什么都不建
+	for _, old := range []map[string]any{
+		{"username": "bob", "password": "bob-password-1", "name": "d"},
+		{"username": "bob", "auth_key": body["auth_key"], "auth_salt": body["auth_salt"], "name": "d"},
+		{"username": "bob", "auth_key": body["auth_key"], "auth_salt": body["auth_salt"], "pub": body["pub"], "name": "d"},
+	} {
+		if c, out := e.call("POST", "/v1/register", "", old); c != 400 || out["error"] != errRegisterOldClient.Error() {
+			t.Fatalf("旧客户端注册：%d %v", c, out)
+		}
+	}
+	// 格式不对 → 400
+	for k, v := range map[string]string{"auth_salt": "zz", "pub": "short", "password_wrap": "hjx1.abc", "recovery_wrap": "nope", "auth_key": "bad"} {
+		b := map[string]any{}
+		for kk, vv := range body {
+			b[kk] = vv
+		}
+		b[k] = v
+		if c, _ := e.call("POST", "/v1/register", "", b); c != 400 {
+			t.Fatalf("%s 格式不对应 400，实际 %d", k, c)
+		}
+	}
+	var n int
+	e.h.st.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("失败的注册不该建账号：%d", n)
+	}
 	out := e.must(200, "POST", "/v1/register", "", body)
-	if out["e2e"].(map[string]any)["enabled"] != false {
+	info := out["e2e"].(map[string]any)
+	if info["enabled"] != true || info["password_wrap"] == "" {
 		t.Fatalf("注册响应：%v", out)
 	}
-	if out := e.must(200, "GET", "/v1/prelogin?username=bob", "", nil); out["salt"] != saltHex {
+	tok := out["token"].(string)
+	// 账号从诞生起就有钥匙：马上能收消息（服务器代加密），用注册时的私钥能解开
+	st := e.must(200, "GET", "/v1/e2e", tok, nil)
+	keys := st["keys"].([]any)
+	if st["enabled"] != true || len(keys) != 1 || keys[0].(map[string]any)["pub"] != b64of(sk.PublicKey().Bytes()) {
+		t.Fatalf("/v1/e2e：%v", st)
+	}
+	pk := e.must(200, "POST", "/v1/keys", tok, map[string]any{"name": "default"})["key"].(string)
+	e.must(200, "GET", "/message/push?pushkey="+pk+"&text=注册后第一条", "", nil)
+	msgs := e.must(200, "GET", "/v1/messages?since=0", tok, nil)["messages"].([]any)
+	m := msgs[0].(map[string]any)
+	if pt, err := e2eOpenMessage(sk, m["e2e"].(string)); err != nil || !strings.Contains(string(pt), `"text":"注册后第一条"`) {
+		t.Fatalf("解不开：%s %v", pt, err)
+	}
+	// 新设备用密码登录（新协议），拿到同一把钥匙的密码副本
+	if out := e.must(200, "GET", "/v1/prelogin?username=bob", "", nil); out["salt"] != body["auth_salt"] || out["kdf"] != "argon2id" {
 		t.Fatalf("prelogin = %v", out)
 	}
 	e.must(426, "POST", "/v1/login", "", map[string]any{"username": "bob", "password": "bob-password-1"})
-	e.must(200, "POST", "/v1/login", "", map[string]any{"username": "bob", "auth_key": b64of(auth)})
+	lo := e.must(200, "POST", "/v1/login", "", map[string]any{"username": "bob", "auth_key": body["auth_key"]})
+	if lo["e2e"].(map[string]any)["password_wrap"] != body["password_wrap"] {
+		t.Fatal("登录拿到的密码副本不对")
+	}
 	var ph string
 	e.h.st.db.QueryRow(`SELECT pass_hash FROM users WHERE username='bob'`).Scan(&ph)
 	if ph != "" {
 		t.Fatal("新协议注册不该有密码哈希")
 	}
+	// setup 不能再用（已经开启）
+	e.must(409, "POST", "/v1/e2e/setup", tok, map[string]any{})
 }
 
 // huijian push 用加密发送密钥：服务器上只有信封和密文附件，接收端解开后和原文一致

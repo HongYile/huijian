@@ -149,19 +149,29 @@ func (h *Hub) pushSealed(pub *ecdh.PublicKey, m NewMessage, sealText string, fil
 		if err == nil {
 			return id, true, nil
 		}
+		if errors.Is(err, errAccountGone) {
+			return 0, false, &pushError{403, err.Error()}
+		}
 		if !errors.Is(err, errKeyChanged) {
 			log.Printf("写入消息失败（账号 #%d）：%v", m.UserID, err)
 			return 0, false, &pushError{500, "写入消息失败"}
 		}
-		if pub, err = h.st.E2EActivePub(m.UserID); err != nil || pub == nil {
+		if pub, err = h.st.E2EActivePub(m.UserID); err != nil {
 			return 0, false, &pushError{503, errKeyChanged.Error()}
+		}
+		if pub == nil { // 钥匙被撤掉了：和没开启加密一样拒收，不存明文
+			return 0, false, &pushError{403, errNoE2E.Error()}
 		}
 	}
 	return 0, false, &pushError{503, errKeyChanged.Error()}
 }
 
-// insertServerMessage：服务端自己生成的消息（管理后台的测试消息、系统通知）。账号开启了加密时同样代加密；
-// 读不到公钥（数据库出错）时返回错误，不存明文
+// errNoE2E：账号还没有加密钥匙。0.9.0 起服务器不再保存明文：发给这种账号的消息直接拒收（推送返回 403），
+// 服务端自己的系统通知直接丢弃
+var errNoE2E = errors.New("账号还没开启加密：请先在回笺客户端用密码登录一次（之后服务器只保存密文）")
+
+// insertServerMessage：服务端自己生成的消息（系统通知），和推送一样由服务器用账号的公钥加密。
+// 账号还没有钥匙时返回 errNoE2E（调用方丢弃这条通知）；读不到公钥（数据库出错）时返回错误。都不存明文
 func (h *Hub) insertServerMessage(m NewMessage) (int64, bool, error) {
 	if m.E2E != "" {
 		return h.st.InsertMessage(m)
@@ -171,11 +181,12 @@ func (h *Hub) insertServerMessage(m NewMessage) (int64, bool, error) {
 		if err != nil {
 			return 0, false, err
 		}
+		if pub == nil {
+			return 0, false, errNoE2E
+		}
 		msg := m
-		if pub != nil {
-			if err := sealNewMessage(pub, &msg, m.Text, nil); err != nil {
-				return 0, false, err
-			}
+		if err := sealNewMessage(pub, &msg, m.Text, nil); err != nil {
+			return 0, false, err
 		}
 		id, dup, err := h.st.InsertMessage(msg)
 		if !errors.Is(err, errKeyChanged) {

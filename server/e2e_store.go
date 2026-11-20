@@ -48,7 +48,7 @@ func (s *Store) migrateE2E() error {
 		// 新登录协议：客户端用 Argon2id 从密码派生登录凭证，服务端只存凭证的哈希，拿不到密码（见 docs/e2ee.md）
 		{"users", "auth_salt", "TEXT NOT NULL DEFAULT ''"},
 		{"users", "auth_hash", "TEXT NOT NULL DEFAULT ''"},
-		{"users", "e2e_only", "INTEGER NOT NULL DEFAULT 0"},
+		{"users", "e2e_only", "INTEGER NOT NULL DEFAULT 0"}, // 0.9.0 起不再使用（取消「只接受加密消息」）
 		// 0.8.0：代加密的消息记 "server"；发送端加密的、明文的为空
 		{"messages", "sealed", "TEXT NOT NULL DEFAULT ''"},
 		// 设备自己的 X25519 公钥（转交钥匙时加密给它），以及请求批准的时间
@@ -241,20 +241,6 @@ func (s *Store) E2EHasKID(userID int64, kid string) bool {
 	var n int
 	s.db.QueryRow(`SELECT COUNT(*) FROM e2e_keys WHERE user_id=? AND kid=? AND active=1`, userID, kid).Scan(&n) // 已停用（更换掉）的钥匙不再接收新消息
 	return n > 0
-}
-
-func (s *Store) E2EOnly(userID int64) bool {
-	var v int
-	s.db.QueryRow(`SELECT e2e_only FROM users WHERE id=?`, userID).Scan(&v)
-	return v == 1
-}
-
-func (s *Store) SetE2EOnly(userID int64, on bool) error {
-	_, err := s.db.Exec(`UPDATE users SET e2e_only=? WHERE id=?`, boolInt(on), userID)
-	if err == nil {
-		s.settingsChanged(userID, changeE2E)
-	}
-	return err
 }
 
 var errE2EEnabled = errors.New("这个账号已经开启了端到端加密")

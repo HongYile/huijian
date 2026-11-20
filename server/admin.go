@@ -2,8 +2,6 @@ package main
 
 import (
 	"crypto/subtle"
-	"database/sql"
-	"errors"
 	"fmt"
 	"html/template"
 	"log"
@@ -19,10 +17,9 @@ import (
 
 // ======================= 认证 =======================
 //
-// 三种进入方式：
-//  1. 管理令牌登录（勾选"记住此浏览器"则一年有效、访问即顺延，会话存在 SQLite，重启不丢）
-//  2. 一次性登录链接：Mac App 用设备凭证换取（需设备开启"可进入管理后台"），或在服务器上
-//     `docker exec huijian huijian admin-link` 生成
+// 只能在服务器上进入（0.9.0 起任何账号、设备都不能从客户端进入）：
+//  1. 管理令牌登录（数据目录里的 admin.token；勾选"记住此浏览器"则一年有效、访问即顺延，会话存在 SQLite，重启不丢）
+//  2. 一次性登录链接：在服务器上执行 `huijian admin-link`（docker：`docker exec huijian huijian admin-link`）
 //  3. 会话随时可在「设置」里注销
 
 type adminState struct {
@@ -116,25 +113,8 @@ func (h *Hub) adminMux() http.Handler {
 	m.HandleFunc("GET /auth/link", h.adminLinkLogin)
 	m.HandleFunc("POST /logout", h.adminAuth(h.adminLogout))
 
+	// 0.9.0：管理后台只管账号——不看消息、不管某个账号的 pushkey 和设备（这些只能由用户在自己的客户端管理）
 	m.HandleFunc("GET /{$}", h.adminAuth(h.pageOverview))
-	m.HandleFunc("GET /messages", h.adminAuth(h.pageMessages))
-	m.HandleFunc("POST /messages/{id}/delete", h.adminAuth(h.adminDeleteMessage))
-	m.HandleFunc("GET /att/{id}", h.adminAuth(h.adminAtt))
-	m.HandleFunc("POST /test", h.adminAuth(h.adminTest))
-
-	m.HandleFunc("GET /keys", h.adminAuth(h.pageKeys))
-	m.HandleFunc("POST /keys", h.adminAuth(h.adminCreateKey))
-	m.HandleFunc("POST /keys/{id}/revoke", h.adminAuth(h.adminRevokeKey))
-	m.HandleFunc("POST /pushkeys", h.adminAuth(h.adminCreateKey)) // 兼容旧路径
-	m.HandleFunc("POST /pushkeys/{id}/revoke", h.adminAuth(h.adminRevokeKey))
-
-	m.HandleFunc("GET /devices", h.adminAuth(h.pageDevices))
-	m.HandleFunc("POST /pair", h.adminAuth(h.adminPair))
-	m.HandleFunc("POST /devices/{id}/revoke", h.adminAuth(h.adminRevokeDevice))
-	m.HandleFunc("POST /devices/{id}/admin", h.adminAuth(h.adminDeviceAdmin))
-	m.HandleFunc("POST /devices/{id}/rename", h.adminAuth(h.adminRenameDevice))
-	m.HandleFunc("POST /keys/{id}/update", h.adminAuth(h.adminUpdateKey))
-	m.HandleFunc("POST /keys/{id}/delete", h.adminAuth(h.adminDeleteKey))
 
 	m.HandleFunc("GET /settings", h.adminAuth(h.pageSettings))
 	m.HandleFunc("POST /sessions/{id}/revoke", h.adminAuth(h.adminRevokeSession))
@@ -146,16 +126,20 @@ func (h *Hub) adminMux() http.Handler {
 	m.HandleFunc("POST /update/proxy", h.adminAuth(h.adminSetUpdateProxy))
 	m.HandleFunc("GET /update/status", h.adminAuth(h.adminUpdateStatus))
 	m.HandleFunc("GET /accounts", h.adminAuth(h.pageAccounts))
-	m.HandleFunc("POST /accounts", h.adminAuth(h.adminCreateAccount))
 	m.HandleFunc("POST /accounts/register", h.adminAuth(h.adminRegisterToggle))
-	m.HandleFunc("POST /accounts/{id}/credentials", h.adminAuth(h.adminSetCredentials))
 	m.HandleFunc("POST /accounts/{id}/disable", h.adminAuth(h.adminDisableAccount))
-	m.HandleFunc("GET /switch", h.adminAuth(h.adminSwitch))
+	m.HandleFunc("POST /accounts/{id}/logout", h.adminAuth(h.adminLogoutAccount))
+	m.HandleFunc("POST /accounts/{id}/delete", h.adminAuth(h.adminDeleteAccount))
+	m.HandleFunc("GET /invites", h.adminAuth(h.pageInvites))
+	m.HandleFunc("POST /invites", h.adminAuth(h.adminCreateInvites))
+	m.HandleFunc("POST /invites/{code}/revoke", h.adminAuth(h.adminRevokeInvite))
 
 	// 给脚本用的 API：Bearer 管理令牌
 	m.HandleFunc("POST /api/releases", h.adminBearer(h.apiPublishRelease))
 	m.HandleFunc("GET /api/server-update", h.adminBearer(h.apiServerUpdateInfo))  // server-push：对方的平台和版本
 	m.HandleFunc("POST /api/server-update", h.adminBearer(h.apiServerUpdatePush)) // server-push：上传签名的程序
+	m.HandleFunc("POST /api/invites", h.adminBearer(h.apiCreateInvites))          // huijian invite new
+	m.HandleFunc("GET /api/invites", h.adminBearer(h.apiListInvites))             // huijian invite list
 	return h.adminGuard(m)
 }
 
@@ -287,16 +271,10 @@ func publicURL(r *http.Request) string {
 }
 
 func (h *Hub) base(r *http.Request, nav, title string) map[string]any {
-	uid := h.acct(r)
-	cur, _ := h.st.AccountByID(uid)
-	list, _ := h.st.ListAccounts()
 	return map[string]any{
 		"Nav": nav, "Title": title, "Version": version,
-		"Flash":    r.URL.Query().Get("f"),
-		"Online":   len(h.br.Online(uid)),
-		"Path":     r.URL.Path,
-		"Acct":     cur,
-		"AcctList": list,
+		"Flash": r.URL.Query().Get("f"),
+		"Path":  r.URL.Path,
 	}
 }
 
@@ -310,315 +288,6 @@ func redirectFlash(w http.ResponseWriter, r *http.Request, path, msg string) {
 		sep = "&"
 	}
 	http.Redirect(w, r, path+sep+"f="+url.QueryEscape(msg)+frag, http.StatusSeeOther)
-}
-
-type prioSeg struct {
-	P     int
-	Count int64
-	Pct   float64
-}
-
-func (h *Hub) pageOverview(w http.ResponseWriter, r *http.Request) {
-	d := h.base(r, "overview", "概览")
-	t := time.Now()
-	midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local).Unix()
-	pc := h.st.PriorityCounts(h.acct(r), t.Add(-24*time.Hour).Unix())
-	var total int64
-	for _, c := range pc {
-		total += c
-	}
-	var segs []prioSeg
-	for p := 5; p >= 0; p-- {
-		if pc[p] > 0 {
-			segs = append(segs, prioSeg{P: p, Count: pc[p], Pct: float64(pc[p]) * 100 / float64(total)})
-		}
-	}
-	var today int64
-	for _, c := range h.st.PriorityCounts(h.acct(r), midnight) {
-		today += c
-	}
-	devs, _ := h.st.ListDevices(h.acct(r))
-	active := 0
-	for _, dv := range devs {
-		if !dv.Revoked {
-			active++
-		}
-	}
-	recent, _ := h.st.AdminMessages(h.acct(r), MsgFilter{Priority: -1}, 8)
-	d["Today"] = today
-	d["Total24"] = total
-	d["Segs"] = segs
-	d["Days"] = h.st.DailyCounts(h.acct(r), 14)
-	d["Stats"] = h.st.Stats(h.acct(r))
-	d["ActiveDevices"] = active
-	d["Recent"] = recent
-	d["LastMsg"] = h.st.LatestMessageTime(h.acct(r))
-	d["PublicURL"] = publicURL(r)
-	render(w, "overview", d)
-}
-
-func (h *Hub) pageMessages(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	f := MsgFilter{Priority: -1, Topic: q.Get("topic"), Q: strings.TrimSpace(q.Get("q")), HasAtt: q.Get("att") == "1"}
-	if p, err := strconv.Atoi(q.Get("p")); err == nil && p >= 0 && p <= 5 {
-		f.Priority = p
-	}
-	f.Before, _ = strconv.ParseInt(q.Get("before"), 10, 64)
-	const pageSize = 50
-	msgs, _ := h.st.AdminMessages(h.acct(r), f, pageSize)
-	for i := range msgs {
-		msgs[i].userID = h.acct(r)
-	}
-	d := h.base(r, "messages", "消息")
-	d["Msgs"] = msgs
-	d["F"] = f
-	d["Topics"] = h.st.Topics(h.acct(r))
-	d["Paged"] = f.Before > 0
-	if len(msgs) == pageSize {
-		next := url.Values{}
-		for k, v := range q {
-			next[k] = v
-		}
-		next.Set("before", strconv.FormatInt(msgs[len(msgs)-1].ID, 10))
-		next.Del("f")
-		d["Next"] = "/messages?" + next.Encode()
-	}
-	// 优先级筛选链接（保留其他条件）
-	type opt struct {
-		Label, Href string
-		On          bool
-		P           int
-	}
-	var opts []opt
-	for _, p := range []int{-1, 5, 4, 3} {
-		v := url.Values{}
-		if f.Topic != "" {
-			v.Set("topic", f.Topic)
-		}
-		if f.Q != "" {
-			v.Set("q", f.Q)
-		}
-		if f.HasAtt {
-			v.Set("att", "1")
-		}
-		label := "全部"
-		if p >= 0 {
-			v.Set("p", strconv.Itoa(p))
-			label = map[int]string{5: "仅紧急", 4: "重要及以上", 3: "普通及以上"}[p]
-		}
-		opts = append(opts, opt{Label: label, Href: "/messages?" + v.Encode(), On: f.Priority == p, P: p})
-	}
-	d["PrioOpts"] = opts
-	render(w, "messages", d)
-}
-
-func (h *Hub) adminAtt(w http.ResponseWriter, r *http.Request) {
-	h.serveAttachment(w, r, h.acct(r), r.PathValue("id"))
-}
-
-func (h *Hub) adminTest(w http.ResponseWriter, r *http.Request) {
-	prio, err := strconv.Atoi(r.FormValue("priority"))
-	if err != nil || prio < 0 || prio > 5 {
-		prio = 3
-	}
-	text := strings.TrimSpace(r.FormValue("text"))
-	if text == "" {
-		text = "来自管理网页的测试消息"
-	}
-	uid, ok := h.writeAcct(w, r)
-	if !ok {
-		return
-	}
-	if _, _, err := h.insertServerMessage(NewMessage{Idem: "adm_" + randHex(8), UserID: uid, Topic: "admin", Priority: prio, Type: "markdown",
-		Text: text, Desp: r.FormValue("desp"), Source: "管理网页", SrcIP: hostOf(r.RemoteAddr)}); err != nil {
-		log.Printf("发送测试消息失败: %v", err)
-	}
-	h.br.Notify(uid)
-	back := r.FormValue("back")
-	if back != "/messages" {
-		back = "/"
-	}
-	redirectFlash(w, r, back, "测试消息已发送")
-}
-
-func (h *Hub) pageKeys(w http.ResponseWriter, r *http.Request) {
-	keys, _ := h.st.ListPushkeys(h.acct(r))
-	d := h.base(r, "keys", "Pushkey")
-	d["Keys"] = keys
-	active := false
-	for _, k := range keys {
-		if !k.Revoked {
-			active = true
-			break
-		}
-	}
-	d["HasActiveKey"] = active // 还没有有效的 key 时，新建表单的名称默认填 default
-	// 账号开启了加密：每把 key 同时给出加密发送密钥 <key>.e2e.<公钥>（管理后台就是服务器，直接用数据库里的 active 公钥）
-	if pub, _ := h.st.E2EActivePub(h.acct(r)); pub != nil {
-		d["SendPub"] = b64.EncodeToString(pub.Bytes())
-	}
-	d["NewKey"] = r.URL.Query().Get("key")
-	d["PublicURL"] = publicURL(r)
-	render(w, "keys", d)
-}
-
-func (h *Hub) adminCreateKey(w http.ResponseWriter, r *http.Request) {
-	name := cleanLabel(r.FormValue("name"), 40)
-	if name == "" {
-		name = "未命名"
-	}
-	key := strings.TrimSpace(r.FormValue("key"))
-	if key != "" && !reCustomKey.MatchString(key) {
-		redirectFlash(w, r, "/keys", keyRule)
-		return
-	}
-	uid, ok := h.writeAcct(w, r)
-	if !ok {
-		return
-	}
-	pk, err := h.st.CreatePushkeyWith(uid, name, key)
-	if errors.Is(err, errKeyTaken) {
-		redirectFlash(w, r, "/keys", err.Error())
-		return
-	}
-	if err != nil {
-		http.Error(w, "创建失败", 500)
-		return
-	}
-	http.Redirect(w, r, "/keys?key="+url.QueryEscape(pk.Key)+"&f="+url.QueryEscape("已创建 pushkey「"+name+"」"), http.StatusSeeOther)
-}
-
-func (h *Hub) adminRevokeKey(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	uid, ok := h.writeAcct(w, r)
-	if !ok {
-		return
-	}
-	h.st.RevokePushkey(uid, id)
-	redirectFlash(w, r, "/keys", "已吊销，使用该 key 的发送方将无法再发送")
-}
-
-// POST /messages/{id}/delete：删除当前账号的一条消息（所有设备同步消失，附件一起删除）
-func (h *Hub) adminDeleteMessage(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	uid, ok := h.writeAcct(w, r)
-	if !ok {
-		return
-	}
-	back := "/messages"
-	if ref, err := url.Parse(r.Header.Get("Referer")); err == nil && ref.Path == "/messages" {
-		q := ref.Query()
-		q.Del("f")
-		if e := q.Encode(); e != "" {
-			back += "?" + e // 保留筛选条件
-		}
-	}
-	n, err := h.deleteMessages(uid, []int64{id})
-	switch {
-	case err != nil:
-		redirectFlash(w, r, back, "删除失败")
-	case n == 0:
-		redirectFlash(w, r, back, "消息不存在（可能已被删除）")
-	default:
-		redirectFlash(w, r, back, "已删除")
-	}
-}
-
-func (h *Hub) adminDeleteKey(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	uid, ok := h.writeAcct(w, r)
-	if !ok {
-		return
-	}
-	if err := h.st.DeletePushkey(uid, id); err != nil {
-		msg := "删除失败"
-		if errors.Is(err, errKeyNotRevoked) {
-			msg = err.Error()
-		}
-		redirectFlash(w, r, "/keys", msg)
-		return
-	}
-	redirectFlash(w, r, "/keys", "已删除（历史消息保留）")
-}
-
-func (h *Hub) pageDevices(w http.ResponseWriter, r *http.Request) {
-	uid := h.acct(r)
-	devs, _ := h.st.ListDevices(uid)
-	d := h.base(r, "devices", "设备")
-	online := map[string]int{}
-	for k, v := range h.br.Online(uid) {
-		online[k] = v
-	}
-	// 按名称或设备 ID 搜索：跨所有账号（名称可以重名，ID 唯一）
-	if q := strings.TrimSpace(r.URL.Query().Get("q")); q != "" {
-		devs, _ = h.st.SearchDevices(q)
-		d["Q"] = q
-		d["AcctLabels"] = h.accountLabels()
-		for _, x := range devs {
-			if x.UserID != uid {
-				for k, v := range h.br.Online(x.UserID) {
-					online[k] = v
-				}
-			}
-		}
-	}
-	pairs := map[string][]Pairing{}
-	for _, x := range devs {
-		if x.PairCount > 1 {
-			pairs[x.ID] = h.st.Pairings(x.ID, 10)
-		}
-	}
-	outdated := map[string]bool{}
-	for _, x := range devs {
-		outdated[x.ID] = h.clientOutdated(x.Client)
-	}
-	d["Devices"] = devs
-	d["Pairings"] = pairs
-	d["Outdated"] = outdated
-	d["OnlineMap"] = online
-	q := r.URL.Query()
-	if c := q.Get("code"); len(c) == 6 {
-		d["Code"] = c
-		d["CodeExp"] = q.Get("exp")
-		d["CodeAdmin"] = q.Get("adm") == "1"
-	}
-	d["PublicURL"] = publicURL(r)
-	d["InternalURL"] = env("HUIJIAN_INTERNAL_URL", "")
-	render(w, "devices", d)
-}
-
-func (h *Hub) adminPair(w http.ResponseWriter, r *http.Request) {
-	canAdmin := r.FormValue("can_admin") != ""
-	ttl := pairCodeTTL
-	uid, ok := h.writeAcct(w, r)
-	if !ok {
-		return
-	}
-	code, err := h.st.CreatePairCode(uid, ttl, canAdmin, "")
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	adm := "0"
-	if canAdmin {
-		adm = "1"
-	}
-	http.Redirect(w, r, fmt.Sprintf("/devices?code=%s&exp=%d&adm=%s", code, time.Now().Add(ttl).Unix(), adm), http.StatusSeeOther)
-}
-
-func (h *Hub) adminRevokeDevice(w http.ResponseWriter, r *http.Request) {
-	h.st.RevokeDevice(h.st.DeviceOwner(r.PathValue("id")), r.PathValue("id"))
-	redirectFlash(w, r, "/devices", "设备已吊销")
-}
-
-func (h *Hub) adminDeviceAdmin(w http.ResponseWriter, r *http.Request) {
-	on := r.FormValue("on") == "1"
-	h.st.SetDeviceAdmin(h.st.DeviceOwner(r.PathValue("id")), r.PathValue("id"), on)
-	msg := "已关闭该设备的管理权限"
-	if on {
-		msg = "已允许该设备管理：在 App 里管理 Pushkey、一键进入管理后台"
-	}
-	redirectFlash(w, r, "/devices", msg)
 }
 
 func (h *Hub) pageSettings(w http.ResponseWriter, r *http.Request) {
@@ -714,81 +383,12 @@ func humanSize(n int64) string {
 	return strconv.FormatInt(n, 10) + " B"
 }
 
-var prioNames = map[int]string{5: "紧急", 4: "重要", 3: "普通", 2: "低", 1: "日志", 0: "调试"}
-
-type kindInfo struct{ Class, Label string }
-
-func fileKind(mime, name string) kindInfo {
-	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))
-	switch {
-	case strings.HasPrefix(mime, "image/"):
-		return kindInfo{"img", "IMG"}
-	case mime == "application/pdf" || ext == "pdf":
-		return kindInfo{"pdf", "PDF"}
-	case ext == "doc" || ext == "docx":
-		return kindInfo{"doc", "DOC"}
-	case ext == "xls" || ext == "xlsx" || ext == "csv":
-		return kindInfo{"xls", strings.ToUpper(ext)}
-	case ext == "ppt" || ext == "pptx":
-		return kindInfo{"ppt", "PPT"}
-	case ext == "zip" || ext == "tar" || ext == "gz" || ext == "tgz" || ext == "7z" || ext == "rar":
-		return kindInfo{"zip", "ZIP"}
-	case strings.HasPrefix(mime, "text/") || ext == "log" || ext == "json" || ext == "py" || ext == "md" || ext == "txt" || ext == "yaml" || ext == "yml":
-		return kindInfo{"txt", strings.ToUpper(firstN(ext, 4))}
-	}
-	if ext == "" {
-		return kindInfo{"oth", "FILE"}
-	}
-	return kindInfo{"oth", strings.ToUpper(firstN(ext, 4))}
-}
-
-func firstN(s string, n int) string {
-	if r := []rune(s); len(r) > n {
-		return string(r[:n])
-	}
-	if s == "" {
-		return "TXT"
-	}
-	return s
-}
-
-func maskKey(k string) string {
-	if len(k) <= 12 {
-		return k
-	}
-	return k[:7] + "••••••••" + k[len(k)-4:]
-}
-
 var funcs = template.FuncMap{
-	"rel":  relTime,
-	"full": fullTime,
-	"size": humanSize,
-	"pname": func(p int) string {
-		return prioNames[p]
-	},
-	"kind": fileKind,
-
-	"mask": maskKey,
-	"snip": func(s string, n int) string {
-		r := []rune(strings.TrimSpace(s))
-		if len(r) > n {
-			return string(r[:n]) + "…"
-		}
-		return string(r)
-	},
-	"long":     func(s string) bool { return len([]rune(s)) > 280 || strings.Count(s, "\n") > 6 },
-	"md":       mdToHTML,
-	"msgmd":    msgHTML,
-	"msgplain": msgPlain,
-	"plain":    mdPlain,
+	"rel":      relTime,
+	"full":     fullTime,
+	"size":     humanSize,
 	"pct":      func(f float64) string { return strconv.FormatFloat(f, 'f', 1, 64) },
-	"first": func(s string) string {
-		r := []rune(s)
-		if len(r) == 0 {
-			return "?"
-		}
-		return string(r[0])
-	},
+	"regmodes": func() []regModeOpt { return regModeOpts },
 }
 
 func render(w http.ResponseWriter, name string, data any) {
@@ -798,43 +398,4 @@ func render(w http.ResponseWriter, name string, data any) {
 	}
 }
 
-var tpl = template.Must(template.New("").Funcs(funcs).Parse(adminCSS + adminIcons + adminTemplates + adminAccountTemplates))
-
-func (h *Hub) adminRenameDevice(w http.ResponseWriter, r *http.Request) {
-	name := cleanLabel(r.FormValue("name"), 64)
-	if name == "" {
-		redirectFlash(w, r, "/devices", "名称不能为空")
-		return
-	}
-	if err := h.st.RenameDevice(h.st.DeviceOwner(r.PathValue("id")), r.PathValue("id"), name); err != nil {
-		redirectFlash(w, r, "/devices", "设备不存在或已吊销")
-		return
-	}
-	redirectFlash(w, r, "/devices", "已改名为「"+name+"」")
-}
-
-func (h *Hub) adminUpdateKey(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	name, key := cleanLabel(r.FormValue("name"), 40), strings.TrimSpace(r.FormValue("key"))
-	if key != "" && !reCustomKey.MatchString(key) {
-		redirectFlash(w, r, "/keys", keyRule)
-		return
-	}
-	uid, ok := h.writeAcct(w, r)
-	if !ok {
-		return
-	}
-	if err := h.st.UpdatePushkey(uid, id, name, key); err != nil {
-		msg := err.Error()
-		if errors.Is(err, sql.ErrNoRows) {
-			msg = "pushkey 不存在"
-		}
-		redirectFlash(w, r, "/keys", msg)
-		return
-	}
-	if key != "" {
-		redirectFlash(w, r, "/keys", "已更新，旧 key 立即失效")
-		return
-	}
-	redirectFlash(w, r, "/keys", "已更新")
-}
+var tpl = template.Must(template.New("").Funcs(funcs).Parse(adminCSS + adminIcons + adminTemplates + adminAccountTemplates + adminInviteTemplates))

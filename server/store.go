@@ -17,6 +17,7 @@ type Store struct {
 	db *sql.DB
 	// notify：账号的设置（key、设备、账户）变了以后调用，唤醒这个账号在线设备的长轮询；由 Hub 设置
 	notify func(userID int64)
+	active activeMemo // 今天已记过活跃的账号（stats.go）
 }
 
 const schema = `
@@ -105,10 +106,35 @@ CREATE INDEX IF NOT EXISTS idx_att_sha ON attachments(sha256);` + releaseSchema)
 	if err := st.migrateE2E(); err != nil {
 		return nil, fmt.Errorf("迁移加密结构: %w", err)
 	}
+	if err := st.migrateStats(); err != nil {
+		return nil, fmt.Errorf("迁移统计: %w", err)
+	}
+	if err := st.migrateRetired(); err != nil {
+		return nil, err
+	}
+	if err := st.migrateInvites(); err != nil {
+		return nil, fmt.Errorf("迁移邀请码: %w", err)
+	}
 	return st, nil
 }
 
 func now() int64 { return time.Now().Unix() }
+
+// EnsureLegacyOwner：0.5.0 以前的数据（消息、pushkey、设备）没有账号，归到第一个账号「me」名下。
+// 0.9.0 起全新的数据库不再预建账号：账号只能注册产生，第一个注册的人就是第一个账号（接收系统通知）
+func (s *Store) EnsureLegacyOwner() error {
+	var users, data int
+	s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&users)
+	if users > 0 {
+		return nil
+	}
+	s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM messages)+(SELECT COUNT(*) FROM pushkeys)+(SELECT COUNT(*) FROM devices)`).Scan(&data)
+	if data == 0 {
+		return nil
+	}
+	_, err := s.EnsureUser("me")
+	return err
+}
 
 // EnsureUser 保证默认用户存在，返回其 id。
 func (s *Store) EnsureUser(name string) (int64, error) {
@@ -208,7 +234,6 @@ type Device struct {
 	Created  int64
 	LastSeen sql.NullInt64
 	Revoked  bool
-	CanAdmin bool
 	Client   string // 客户端上报的版本，例如 "macos 0.4.0 (37)"
 	// 0.5.0 起
 	AwaySilent bool  // 其他设备在用时本机静默
@@ -216,29 +241,30 @@ type Device struct {
 	LastPaired int64 // 最近一次配对 / 登录
 }
 
-const deviceCols = `id,user_id,name,platform,created_at,last_seen,revoked,can_admin,client,away_silent,pair_count,last_paired`
+// 0.9.0 起没有任何账号或设备能进入管理后台：devices.can_admin、pair_codes.can_admin、users.is_admin 是旧数据，不再读取
+const deviceCols = `id,user_id,name,platform,created_at,last_seen,revoked,client,away_silent,pair_count,last_paired`
 
 func scanDevice(sc interface{ Scan(...any) error }) (*Device, error) {
 	d := &Device{}
-	var rev, adm, away int
-	if err := sc.Scan(&d.ID, &d.UserID, &d.Name, &d.Platform, &d.Created, &d.LastSeen, &rev, &adm, &d.Client, &away, &d.PairCount, &d.LastPaired); err != nil {
+	var rev, away int
+	if err := sc.Scan(&d.ID, &d.UserID, &d.Name, &d.Platform, &d.Created, &d.LastSeen, &rev, &d.Client, &away, &d.PairCount, &d.LastPaired); err != nil {
 		return nil, err
 	}
-	d.Revoked, d.CanAdmin, d.AwaySilent = rev != 0, adm != 0, away != 0
+	d.Revoked, d.AwaySilent = rev != 0, away != 0
 	return d, nil
 }
 
 // CreatePairCode 生成一次性配对码。createdBy 为生成它的设备 ID（管理后台生成时为空）：
 // 同一台设备「重新生成」时，它之前没用掉的配对码立即作废，同一时间只有最新的一个有效。
 // 已用 / 过期的配对码保留一小时，供生成它的设备查询「已被哪台设备使用」。
-func (s *Store) CreatePairCode(userID int64, ttl time.Duration, canAdmin bool, createdBy string) (string, error) {
+func (s *Store) CreatePairCode(userID int64, ttl time.Duration, createdBy string) (string, error) {
 	s.db.Exec(`DELETE FROM pair_codes WHERE expires_at < ?`, now()-3600)
 	if createdBy != "" {
 		s.db.Exec(`UPDATE pair_codes SET expires_at=? WHERE user_id=? AND created_by=? AND used=0 AND expires_at>=?`, now()-1, userID, createdBy, now())
 	}
 	for i := 0; i < 5; i++ {
 		code := randDigits(6)
-		_, err := s.db.Exec(`INSERT INTO pair_codes(code,user_id,expires_at,can_admin,created_by) VALUES(?,?,?,?,?)`, code, userID, time.Now().Add(ttl).Unix(), b2i(canAdmin), createdBy)
+		_, err := s.db.Exec(`INSERT INTO pair_codes(code,user_id,expires_at,created_by) VALUES(?,?,?,?)`, code, userID, time.Now().Add(ttl).Unix(), createdBy)
 		if err == nil {
 			return code, nil
 		}
@@ -253,8 +279,7 @@ func (s *Store) Pair(code string, p pairReq) (*Device, string, bool, error) {
 		return nil, "", false, err
 	}
 	defer tx.Rollback()
-	var canAdmin int
-	err = tx.QueryRow(`SELECT user_id, can_admin FROM pair_codes WHERE code=? AND used=0 AND expires_at>=?`, code, now()).Scan(&p.UserID, &canAdmin)
+	err = tx.QueryRow(`SELECT user_id FROM pair_codes WHERE code=? AND used=0 AND expires_at>=?`, code, now()).Scan(&p.UserID)
 	if err != nil {
 		return nil, "", false, errors.New("配对码无效或已过期")
 	}
@@ -266,7 +291,7 @@ func (s *Store) Pair(code string, p pairReq) (*Device, string, bool, error) {
 	if _, err := tx.Exec(`UPDATE pair_codes SET used=1 WHERE code=?`, code); err != nil {
 		return nil, "", false, err
 	}
-	p.CanAdmin, p.Method = canAdmin != 0, "code"
+	p.Method = "code"
 	d, token, reused, err := attachDevice(tx, p)
 	if err != nil {
 		return nil, "", false, err
@@ -278,6 +303,7 @@ func (s *Store) Pair(code string, p pairReq) (*Device, string, bool, error) {
 		return nil, "", false, err
 	}
 	s.settingsChanged(p.UserID, changeDevices)
+	s.markActive(p.UserID) // 登录 / 配对也算当天活跃
 	return d, token, reused, nil
 }
 
@@ -333,16 +359,6 @@ func (s *Store) queryDevices(q string, args ...any) ([]Device, error) {
 		out = append(out, *d)
 	}
 	return out, rows.Err()
-}
-
-func (s *Store) SetDeviceAdmin(userID int64, id string, on bool) error {
-	res, err := s.db.Exec(`UPDATE devices SET can_admin=? WHERE id=? AND user_id=? AND revoked=0`, b2i(on), id, userID)
-	if err == nil {
-		if n, _ := res.RowsAffected(); n > 0 {
-			s.settingsChanged(userID, changeDevices)
-		}
-	}
-	return err
 }
 
 func (s *Store) RevokeDevice(userID int64, id string) error {
@@ -418,12 +434,22 @@ type NewMessage struct {
 }
 
 // InsertMessage 写入消息；若 idem 已存在则返回原消息 id 且 dup=true。
+// errAccountGone：账号在推送处理途中被删除（messages 没有外键，要自己核对，否则会留下孤儿消息和附件）
+var errAccountGone = errors.New("pushkey 所属账号已删除")
+
 func (s *Store) InsertMessage(m NewMessage) (id int64, dup bool, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, false, err
 	}
 	defer tx.Rollback()
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM users WHERE id=?`, m.UserID).Scan(&n); err != nil {
+		return 0, false, err
+	}
+	if n == 0 {
+		return 0, false, errAccountGone
+	}
 	if m.Idem != "" {
 		if err := tx.QueryRow(`SELECT id FROM messages WHERE user_id=? AND idem=?`, m.UserID, m.Idem).Scan(&id); err == nil {
 			return id, true, nil
@@ -442,11 +468,16 @@ func (s *Store) InsertMessage(m NewMessage) (id int64, dup bool, err error) {
 		return 0, false, err
 	}
 	id, _ = res.LastInsertId()
+	var size int64
 	for _, f := range m.Files {
 		if _, err := tx.Exec(`INSERT INTO attachments(id,message_id,blob,name,mime,size,sha256) VALUES(?,?,?,?,?,?,?)`,
 			"a_"+randHex(16), id, f.blob, f.Name, f.Mime, f.Size, f.Sha256); err != nil {
 			return 0, false, err
 		}
+		size += f.Size
+	}
+	if err := bumpStats(tx, 1, size, 0); err != nil { // 全服务器每天的消息数、附件大小（只记数字）
+		return 0, false, err
 	}
 	return id, false, tx.Commit()
 }
@@ -522,19 +553,6 @@ func (s *Store) AttachmentFor(userID int64, attID string) (*Attachment, error) {
 		return nil, err
 	}
 	return a, nil
-}
-
-type Stats struct {
-	Messages, Attachments, AttBytes, Devices, Pushkeys int64
-}
-
-func (s *Store) Stats(userID int64) Stats {
-	var st Stats
-	s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE user_id=?`, userID).Scan(&st.Messages)
-	s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(a.size),0) FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.user_id=?`, userID).Scan(&st.Attachments, &st.AttBytes)
-	s.db.QueryRow(`SELECT COUNT(*) FROM devices WHERE user_id=? AND revoked=0`, userID).Scan(&st.Devices)
-	s.db.QueryRow(`SELECT COUNT(*) FROM pushkeys WHERE user_id=? AND revoked=0`, userID).Scan(&st.Pushkeys)
-	return st
 }
 
 func b2i(b bool) int {
@@ -671,11 +689,4 @@ func (s *Store) BlobBySha(sha string) string {
 	var b string
 	s.db.QueryRow(`SELECT blob FROM attachments WHERE sha256=? ORDER BY rowid DESC LIMIT 1`, sha).Scan(&b)
 	return b
-}
-
-// DeviceOwner 返回设备所属账号（管理后台对搜索结果里其他账号的设备操作时用）
-func (s *Store) DeviceOwner(id string) int64 {
-	var uid int64
-	s.db.QueryRow(`SELECT user_id FROM devices WHERE id=?`, id).Scan(&uid)
-	return uid
 }

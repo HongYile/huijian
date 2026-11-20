@@ -107,9 +107,9 @@ func (h *Hub) handleE2EState(w http.ResponseWriter, r *http.Request, d *Device) 
 	}
 	writeJSON(w, 200, map[string]any{
 		"enabled":     enabled,
-		"keys":        keys, // 含已停用的旧钥匙（active=false）：重置加密后，还留着旧私钥的设备靠它们解旧消息
-		"e2e_only":    h.st.E2EOnly(d.UserID),
-		"server_seal": true, // 0.8.0 起服务器代加密始终开启（没有开关）；客户端据此显示只读说明
+		"keys":        keys,  // 含已停用的旧钥匙（active=false）：重置加密后，还留着旧私钥的设备靠它们解旧消息
+		"e2e_only":    false, // 0.9.0 起取消「只接受加密消息」：所有消息都加密，恒为 false（保留字段兼容旧客户端）
+		"server_seal": true,  // 0.8.0 起服务器代加密始终开启（没有开关）；客户端据此显示只读说明
 		// 0.8.0：服务器上还有几条明文消息。enabled 为假（还没有钥匙，等待第一次用密码登录）时收到的消息只能先存明文，
 		// 开启后由服务器补加密；补加密跳过的（附件读不到）也计在这里
 		"plain_messages":    h.st.PlainCount(d.UserID),
@@ -515,8 +515,9 @@ func (h *Hub) handleE2ERecovery(w http.ResponseWriter, r *http.Request, d *Devic
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
-// PATCH /v1/e2e {e2e_only}：只接受加密消息（打开后明文发送会被拒收）。
-// 服务器代加密始终开启：server_seal 只接受 true（不改任何东西），false 返回 400
+// PATCH /v1/e2e：0.9.0 起没有可以改的设置了，只为旧客户端保留。
+//   - e2e_only（只接受加密消息）已取消：所有消息都加密，普通 pushkey 由服务器代加密；传了忽略，响应里恒为 false
+//   - server_seal 只接受 true（不改任何东西），false 返回 400
 func (h *Hub) handleE2EUpdate(w http.ResponseWriter, r *http.Request, d *Device) {
 	var in struct {
 		E2EOnly    *bool `json:"e2e_only"`
@@ -526,24 +527,14 @@ func (h *Hub) handleE2EUpdate(w http.ResponseWriter, r *http.Request, d *Device)
 		return
 	}
 	if in.E2EOnly == nil && in.ServerSeal == nil {
-		apiErr(w, 400, "缺少 e2e_only 或 server_seal")
+		apiErr(w, 400, "缺少 server_seal")
 		return
 	}
 	if in.ServerSeal != nil && !*in.ServerSeal {
 		apiErr(w, 400, "服务器代加密始终开启，不能关闭（想让服务器完全看不到内容，请用加密发送密钥）")
 		return
 	}
-	if in.E2EOnly != nil && *in.E2EOnly && !h.st.E2EEnabled(d.UserID) {
-		apiErr(w, 409, "请先开启加密")
-		return
-	}
-	if in.E2EOnly != nil {
-		if err := h.st.SetE2EOnly(d.UserID, *in.E2EOnly); err != nil {
-			apiErr(w, 500, "保存失败")
-			return
-		}
-	}
-	writeJSON(w, 200, map[string]any{"e2e_only": h.st.E2EOnly(d.UserID), "server_seal": true})
+	writeJSON(w, 200, map[string]any{"e2e_only": false, "server_seal": true})
 }
 
 // POST /v1/e2e/delete-plain {confirm:true}：删除服务器上这个账号的全部明文消息（加密消息不动；各设备本地已同步的照常保留）

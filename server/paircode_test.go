@@ -18,7 +18,7 @@ func TestPairCodeLifecycle(t *testing.T) {
 	if pairCodeTTL != 3*time.Minute {
 		t.Fatalf("配对码有效期应为 3 分钟，现在是 %v", pairCodeTTL)
 	}
-	c1, err := st.CreatePairCode(alice.ID, pairCodeTTL, false, "d_mac")
+	c1, err := st.CreatePairCode(alice.ID, pairCodeTTL, "d_mac")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestPairCodeLifecycle(t *testing.T) {
 	}
 
 	// 同一台设备重新生成：旧码立即作废，新码有效
-	c2, _ := st.CreatePairCode(alice.ID, pairCodeTTL, false, "d_mac")
+	c2, _ := st.CreatePairCode(alice.ID, pairCodeTTL, "d_mac")
 	if s, _, _, _, _ := st.PairCodeStatus(alice.ID, c1); s != "expired" {
 		t.Fatalf("重新生成后旧码应作废：%s", s)
 	}
@@ -38,7 +38,7 @@ func TestPairCodeLifecycle(t *testing.T) {
 		t.Fatal("作废的配对码不应能配对")
 	}
 	// 另一台设备生成的码不受影响
-	c3, _ := st.CreatePairCode(alice.ID, pairCodeTTL, false, "d_other")
+	c3, _ := st.CreatePairCode(alice.ID, pairCodeTTL, "d_other")
 	if s, _, _, _, _ := st.PairCodeStatus(alice.ID, c2); s != "waiting" {
 		t.Fatalf("别的设备生成新码不应作废这台设备的码：%s", s)
 	}
@@ -62,7 +62,7 @@ func TestPairCodeLifecycle(t *testing.T) {
 	}
 	// 过期超过一小时的记录被清理（生成新码时顺带清理）
 	st.db.Exec(`UPDATE pair_codes SET expires_at=? WHERE code=?`, now()-4000, c3)
-	st.CreatePairCode(alice.ID, pairCodeTTL, false, "")
+	st.CreatePairCode(alice.ID, pairCodeTTL, "")
 	if _, _, _, _, err := st.PairCodeStatus(alice.ID, c3); err == nil {
 		t.Fatal("过期一小时以上的配对码应被清理")
 	}

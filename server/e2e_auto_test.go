@@ -19,7 +19,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -354,25 +353,19 @@ func TestE2EServerSeal(t *testing.T) {
 	}
 	scanLeaks(t, e, "SEAL-FILE-MARKER", "SEAL-NAME")
 
-	// 一次发给两个账号：开了加密的那个代加密，另一个照旧明文（附件各存各的）
+	// 一次发给两个账号，其中一个还没有钥匙：整条推送 403，两个账号都不存（0.9.0 起服务器不保存明文）
 	bob, _ := e.h.st.CreateAccount("bob", "bob-pass-1234")
 	pkBob, _ := e.h.st.CreatePushkey(bob.ID, "b")
 	_, tokBob, _, _ := e.h.st.LoginDevice(pairReq{UserID: bob.ID, Name: "b", Platform: "macos", Fingerprint: "fp-s-000002"})
-	if c, out := e.pushFiles(map[string]string{"pushkey": pk.Key + "," + pkBob.Key, "text": "MIX-TITLE"}, map[string][]byte{"mix.txt": []byte("MIX-FILE")}, []string{"mix.txt"}); c != 200 {
-		t.Fatalf("混合发送：%d %v", c, out)
+	before := len(e.messages(tok))
+	if c, out := e.pushFiles(map[string]string{"pushkey": pk.Key + "," + pkBob.Key, "text": "MIX-TITLE"}, map[string][]byte{"mix.txt": []byte("MIX-FILE")}, []string{"mix.txt"}); c != 403 || out["error"] != errNoE2E.Error() {
+		t.Fatalf("混合发送（一个账号没有钥匙）应 403：%d %v", c, out)
 	}
-	mb := e.messages(tokBob)
-	if mb[0]["text"] != "MIX-TITLE" || mb[0]["sealed"] != nil || string(e.download(tokBob, mb[0]["attachments"].([]any)[0].(map[string]any)["id"].(string))) != "MIX-FILE" {
-		t.Fatalf("没开加密的账号应收到明文：%v", mb[0])
+	if len(e.messages(tokBob)) != 0 || len(e.messages(tok)) != before {
+		t.Fatal("被拒的推送不应写进任何账号")
 	}
+	scanLeaks(t, e, "MIX-TITLE", "MIX-FILE")
 	ms = e.messages(tok)
-	m = ms[len(ms)-1]
-	if m["sealed"] != "server" || openPayload(t, sk, m["e2e"].(string)).Text != "MIX-TITLE" {
-		t.Fatalf("混合发送时开了加密的账号：%v", m)
-	}
-	if ct := e.download(tok, m["attachments"].([]any)[0].(map[string]any)["id"].(string)); bytes.Contains(ct, []byte("MIX-FILE")) {
-		t.Fatal("开了加密的账号拿到了明文附件")
-	}
 
 	// 发送端加密的消息没有 sealed 字段
 	senderEnv, _ := e2eSealMessage(sk.PublicKey(), []byte(`{"v":1,"text":"x"}`))
@@ -382,53 +375,17 @@ func TestE2EServerSeal(t *testing.T) {
 		t.Fatalf("发送端加密的消息：%v", m)
 	}
 
-	// 管理后台测试消息、系统通知同样代加密；管理后台页面只显示占位文字
-	adm := httptest.NewServer(e.h.adminMux())
-	defer adm.Close()
-	sess, _ := e.h.st.CreateSession("test", time.Hour, false)
-	admReq := func(method, path string, form url.Values) string {
-		req, _ := http.NewRequest(method, adm.URL+path, strings.NewReader(form.Encode()))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.AddCookie(&http.Cookie{Name: cookieName, Value: sess})
-		req.AddCookie(&http.Cookie{Name: acctCookie, Value: strconv.FormatInt(u.ID, 10)})
-		resp, err := noRedirect.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
-		return string(b)
-	}
-	admReq("POST", "/test", url.Values{"text": {"ADMIN-TEST-TITLE"}, "desp": {"ADMIN-TEST-BODY"}, "u": {strconv.FormatInt(u.ID, 10)}})
+	// 系统通知同样代加密
 	e.h.userID = u.ID
 	e.h.notice("seal-test", 4, "NOTICE-TITLE", "NOTICE-BODY")
 	ms = e.messages(tok)
-	for _, m := range ms[len(ms)-2:] {
-		if m["sealed"] != "server" {
-			t.Fatalf("服务端生成的消息没有代加密：%v", m)
-		}
+	if m := ms[len(ms)-1]; m["sealed"] != "server" {
+		t.Fatalf("服务端生成的消息没有代加密：%v", m)
 	}
-	if p := openPayload(t, sk, ms[len(ms)-2]["e2e"].(string)); p.Text != "ADMIN-TEST-TITLE" || p.Desp != "ADMIN-TEST-BODY" || p.Type != "markdown" {
-		t.Fatalf("管理后台测试消息载荷：%+v", p)
-	}
-	if p := openPayload(t, sk, ms[len(ms)-1]["e2e"].(string)); p.Text != "NOTICE-TITLE" {
+	if p := openPayload(t, sk, ms[len(ms)-1]["e2e"].(string)); p.Text != "NOTICE-TITLE" || p.Desp != "NOTICE-BODY" || p.Type != "markdown" {
 		t.Fatalf("系统通知载荷：%+v", p)
 	}
-	page := admReq("GET", "/messages", nil)
-	if !strings.Contains(page, "服务器加密") || !strings.Contains(page, "端到端加密") {
-		t.Fatal("管理后台消息页应标出加密消息")
-	}
-	for _, leak := range []string{"SEAL-", "ADMIN-TEST", "NOTICE-", "MIX-TITLE"} {
-		if strings.Contains(page, leak) {
-			t.Fatalf("管理后台消息页出现了明文 %q", leak)
-		}
-	}
-	// Pushkey 页同时显示普通 key 和加密发送密钥（用数据库里的 active 公钥）
-	keysPage := admReq("GET", "/keys", nil)
-	if !strings.Contains(keysPage, pk.Key+e2eSendKeySep+b64of(sk.PublicKey().Bytes())) || !strings.Contains(keysPage, "普通 pushkey") {
-		t.Fatal("Pushkey 页没有加密发送密钥")
-	}
-	scanLeaks(t, e, "SEAL-TITLE", "SEAL-BODY", "SEAL-FILE-MARKER", "SEAL-NAME", "ADMIN-TEST", "NOTICE-TITLE", "NOTICE-BODY")
+	scanLeaks(t, e, "SEAL-TITLE", "SEAL-BODY", "SEAL-FILE-MARKER", "SEAL-NAME", "NOTICE-TITLE", "NOTICE-BODY")
 
 	// 设置：GET 返回 server_seal；PATCH 至少要一项
 	if st := e.must(200, "GET", "/v1/e2e", tok, nil); st["server_seal"] != true {
@@ -436,12 +393,10 @@ func TestE2EServerSeal(t *testing.T) {
 	}
 	e.must(400, "PATCH", "/v1/e2e", tok, map[string]any{})
 
-	// 只接受加密消息：明文直接拒收，不走代加密
-	e.must(200, "PATCH", "/v1/e2e", tok, map[string]any{"e2e_only": true})
-	if c, _ := e.push(map[string]string{"pushkey": pk.Key, "text": "ONLY-PLAIN"}); c != 403 {
-		t.Fatalf("只收加密时明文应被拒：%d", c)
+	// 0.9.0 取消「只接受加密消息」：传了忽略
+	if out := e.must(200, "PATCH", "/v1/e2e", tok, map[string]any{"e2e_only": true}); out["e2e_only"] != false {
+		t.Fatalf("e2e_only 应被忽略：%v", out)
 	}
-	e.must(200, "PATCH", "/v1/e2e", tok, map[string]any{"e2e_only": false})
 
 	// 代加密始终开启：server_seal 不能关，传 true 不改任何东西
 	e.must(400, "PATCH", "/v1/e2e", tok, map[string]any{"server_seal": false})
@@ -454,8 +409,18 @@ func TestE2EServerSeal(t *testing.T) {
 		t.Fatalf("代加密应始终开启：%v", m)
 	}
 	// 账号页标出是否加密：erin 已加密，bob 没有钥匙
-	acc := admReq("GET", "/accounts", nil)
-	if !strings.Contains(acc, "已加密") || !strings.Contains(acc, "尚未加密（等待首次登录）") {
+	adm := httptest.NewServer(e.h.adminMux())
+	defer adm.Close()
+	sess, _ := e.h.st.CreateSession("test", time.Hour, false)
+	req, _ := http.NewRequest("GET", adm.URL+"/accounts", nil)
+	req.AddCookie(&http.Cookie{Name: cookieName, Value: sess})
+	resp, err := noRedirect.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acc, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(acc), "已加密") || !strings.Contains(string(acc), "未加密（旧账号") {
 		t.Fatal("账号页没有标出加密状态")
 	}
 }
@@ -532,7 +497,7 @@ func TestE2EServerSealVectors(t *testing.T) {
 func TestInfoE2EAuto(t *testing.T) {
 	e := newE2EEnv(t)
 	out := e.must(200, "GET", "/v1/info", "", nil)
-	if out["version"] != version || version != "0.8.0" {
+	if out["version"] != version || version != "0.9.0" {
 		t.Fatalf("版本：%v", out["version"])
 	}
 	found := false
@@ -561,10 +526,7 @@ func TestE2ESealBacklog(t *testing.T) {
 	own := bytes.Repeat([]byte("OLD-FILE-MARKER "), 5000)
 	send := func(key string, fields map[string]string, files map[string][]byte, order ...string) {
 		t.Helper()
-		fields["pushkey"] = key
-		if c, out := e.pushFiles(fields, files, order); c != 200 {
-			t.Fatalf("%d %v", c, out)
-		}
+		e.legacyPlain(key, fields, files, order...) // 0.9.0 以前存下的明文历史
 	}
 	send(pkBob.Key, map[string]string{"text": "bob 的消息"}, map[string][]byte{"shared.bin": shared}, "shared.bin")
 	send(pk.Key, map[string]string{"text": "OLD-TITLE-1", "desp": "OLD-BODY **粗体**", "priority": "4"},
@@ -637,7 +599,7 @@ func TestE2ESealBacklog(t *testing.T) {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
 		return string(b)
-	}(), "明文 1 条") {
+	}(), "补加密中 1 条") {
 		t.Fatal("账号页应显示还剩 1 条明文")
 	}
 	// bob 共用同一份内容的附件不受影响

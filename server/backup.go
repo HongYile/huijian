@@ -464,7 +464,7 @@ func openCore() (*Hub, error) {
 	}
 	h := &Hub{dataDir: data, paths: resolvePaths(data), st: st,
 		tmpDir: filepath.Join(data, "tmp"), releaseDir: filepath.Join(data, "releases")}
-	if h.userID, err = st.EnsureUser("me"); err != nil {
+	if err = st.EnsureLegacyOwner(); err != nil {
 		return nil, err
 	}
 	h.files = newFileStore(h, h.paths.files)

@@ -1,10 +1,12 @@
 package main
 
-// 管理后台的账号管理。
+// 管理后台的账号管理（0.9.0：管理后台只管账号）。
 //
-// 管理后台是服务器级的（管理员看得到所有账号）。页面上方可以切换「当前账号」，
-// 概览、消息、Pushkey、设备页显示的都是当前账号的数据；切换记在 cookie 里。
-// 设备页按名称或设备 ID 搜索时跨所有账号查找（客户报设备 ID 时不用先知道是哪个账号）。
+// 管理后台是服务器级的，但只能管理账号本身：停用 / 启用、注销全部登录、删除，以及注册模式。
+// 不能建账号（账号只能注册产生），也不能改任何账号的用户名和密码（改了密码就能登录进别人的账号）。
+// 任何账号（包括第一个账号）都不能从客户端进入管理后台：后台只能在服务器上用 huijian admin-link 或管理令牌进入。
+// 看不到任何账号的消息内容、pushkey、设备名和 IP，也不能切换到某个账号去操作——
+// pushkey 和设备只能由用户在自己的客户端里管理（/v1/keys、/v1/pair 等自助接口）。
 
 import (
 	"net/http"
@@ -12,107 +14,12 @@ import (
 	"strings"
 )
 
-const acctCookie = "huijian_acct"
-
-// acct：管理后台当前查看的账号（默认第一个账号）
-func (h *Hub) acct(r *http.Request) int64 {
-	if c, err := r.Cookie(acctCookie); err == nil {
-		if id, err := strconv.ParseInt(c.Value, 10, 64); err == nil {
-			if _, err := h.st.AccountByID(id); err == nil {
-				return id
-			}
-		}
-	}
-	return h.st.OwnerID()
-}
-
-// writeAcct：写操作的目标账号。表单里带着页面显示时的账号 id（隐藏字段 u），
-// 和当前 cookie 不一致说明在另一个标签页切换过账号，拒绝，避免把配对码 / key 建到别的账号里
-func (h *Hub) writeAcct(w http.ResponseWriter, r *http.Request) (int64, bool) {
-	cur := h.acct(r)
-	if u := r.FormValue("u"); u != "" && u != strconv.FormatInt(cur, 10) {
-		back := r.Header.Get("Referer")
-		if i := strings.Index(back, "://"); i >= 0 {
-			if j := strings.Index(back[i+3:], "/"); j >= 0 {
-				back = back[i+3+j:]
-			} else {
-				back = "/"
-			}
-		}
-		if !strings.HasPrefix(back, "/") || strings.HasPrefix(back, "//") {
-			back = "/"
-		}
-		if k := strings.Index(back, "?"); k >= 0 {
-			back = back[:k]
-		}
-		redirectFlash(w, r, back, "当前账号已在另一个标签页切换，页面已刷新，请确认账号后再操作")
-		return 0, false
-	}
-	return cur, true
-}
-
-func setAcctCookie(w http.ResponseWriter, id int64) {
-	http.SetCookie(w, &http.Cookie{Name: acctCookie, Value: strconv.FormatInt(id, 10), Path: "/", HttpOnly: true,
-		SameSite: http.SameSiteStrictMode, MaxAge: 365 * 24 * 3600})
-}
-
-// GET /switch?u=<id>&back=<路径>：切换当前账号
-func (h *Hub) adminSwitch(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(r.URL.Query().Get("u"), 10, 64)
-	a, err := h.st.AccountByID(id)
-	if err != nil {
-		redirectFlash(w, r, "/accounts", "账号不存在")
-		return
-	}
-	setAcctCookie(w, id)
-	back := r.URL.Query().Get("back")
-	if !strings.HasPrefix(back, "/") || strings.HasPrefix(back, "//") {
-		back = "/"
-	}
-	redirectFlash(w, r, back, "当前账号："+a.Label())
-}
-
 func (h *Hub) pageAccounts(w http.ResponseWriter, r *http.Request) {
 	d := h.base(r, "accounts", "账号")
 	d["Accounts"], _ = h.st.ListAccounts()
-	d["RegisterOpen"] = h.registerOpen()
+	d["Mode"] = h.st.RegisterMode()
 	d["Owner"] = h.st.OwnerID()
-	d["Enc"], d["Plain"] = h.st.E2EStatus() // 所有账号都应加密：标出还没开启的，以及开启后还剩的明文
 	render(w, "accounts", d)
-}
-
-// POST /accounts：新建账号（不预置 pushkey）
-func (h *Hub) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
-	a, err := h.st.CreateAccount(r.FormValue("username"), r.FormValue("password"))
-	if err != nil {
-		redirectFlash(w, r, "/accounts", err.Error())
-		return
-	}
-	redirectFlash(w, r, "/accounts", "已创建账号「"+a.Username+"」")
-}
-
-// POST /accounts/{id}/credentials：设置用户名 / 重设密码（密码留空表示只改用户名）
-func (h *Hub) adminSetCredentials(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	a, err := h.st.AccountByID(id)
-	if err != nil {
-		redirectFlash(w, r, "/accounts", "账号不存在")
-		return
-	}
-	pw := r.FormValue("password")
-	if !a.HasPassword && pw == "" {
-		redirectFlash(w, r, "/accounts", "这个账号还没有密码，请同时设置密码（"+passwordRule+"）")
-		return
-	}
-	if err := h.st.SetCredentials(id, r.FormValue("username"), pw); err != nil {
-		redirectFlash(w, r, "/accounts", err.Error())
-		return
-	}
-	msg := "已保存"
-	if pw != "" {
-		msg = "已保存，新密码立即生效（已登录的设备不受影响）"
-	}
-	redirectFlash(w, r, "/accounts", msg)
 }
 
 // POST /accounts/{id}/disable  on=1 停用 / on=0 启用
@@ -134,60 +41,64 @@ func (h *Hub) adminDisableAccount(w http.ResponseWriter, r *http.Request) {
 	redirectFlash(w, r, "/accounts", "已启用")
 }
 
-// POST /accounts/register  on=1 开放注册 / on=0 关闭
-func (h *Hub) adminRegisterToggle(w http.ResponseWriter, r *http.Request) {
-	on := r.FormValue("on") == "1"
-	h.st.SetKV("register_open", b2i(on))
-	if on {
-		redirectFlash(w, r, "/accounts", "已开放注册：任何知道服务器地址的人都可以在客户端注册账号")
+// POST /accounts/{id}/logout：注销全部登录（吊销这个账号所有设备的 token）
+func (h *Hub) adminLogoutAccount(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	a, err := h.st.AccountByID(id)
+	if err != nil {
+		redirectFlash(w, r, "/accounts", "账号不存在")
 		return
 	}
-	redirectFlash(w, r, "/accounts", "已关闭注册")
+	n, err := h.st.LogoutAccount(id)
+	if err != nil {
+		redirectFlash(w, r, "/accounts", "操作失败")
+		return
+	}
+	h.br.Notify(id) // 正在长轮询的设备立刻醒来，下一次请求就是 401
+	redirectFlash(w, r, "/accounts", "已注销「"+a.Label()+"」的全部登录（"+strconv.Itoa(n)+" 台设备），用户用密码重新登录即可")
 }
 
-// accountLabels：id → 显示名（设备搜索结果里标出所属账号）
-func (h *Hub) accountLabels() map[int64]string {
-	out := map[int64]string{}
-	accts, _ := h.st.ListAccounts()
-	for _, a := range accts {
-		out[a.ID] = a.Label()
+// POST /accounts/register  mode=closed / invite / open（兼容旧表单 on=1 开放 / on=0 关闭）
+func (h *Hub) adminRegisterToggle(w http.ResponseWriter, r *http.Request) {
+	mode := r.FormValue("mode")
+	if mode == "" {
+		mode = map[bool]string{true: regOpen, false: regClosed}[r.FormValue("on") == "1"]
 	}
-	return out
+	back := "/accounts"
+	if strings.HasSuffix(r.Referer(), "/invites") || strings.Contains(r.Referer(), "/invites?") {
+		back = "/invites"
+	}
+	if err := h.st.SetRegisterMode(mode); err != nil {
+		redirectFlash(w, r, back, err.Error())
+		return
+	}
+	msg := map[string]string{
+		regOpen:   "已开放注册：任何知道服务器地址的人都可以在客户端注册账号",
+		regInvite: "已改为需要邀请码：在「邀请码」页生成后发给要注册的人",
+		regClosed: "已关闭注册：不再产生新账号",
+	}[mode]
+	redirectFlash(w, r, back, msg)
 }
 
 const adminAccountTemplates = `
-{{define "acctbar"}}{{if gt (len .AcctList) 1}}<form method="get" action="/switch" class="acctbar"><input type="hidden" name="back" value="{{.Path}}">
-<span class="muted small">当前账号</span><select name="u" class="in sm" onchange="this.form.submit()">{{range .AcctList}}<option value="{{.ID}}"{{if eq .ID $.Acct.ID}} selected{{end}}>{{.Label}}{{if .Disabled}}（已停用）{{end}}</option>{{end}}</select></form>{{end}}{{end}}
-
 {{define "accounts"}}{{template "top" .}}
-<div class="head"><div><h1>账号</h1><div class="sub">一个账号 = 一个人，有自己的 pushkey、设备和消息历史。设备用账号配对码或用户名密码加入账号。</div></div></div>
+<div class="head"><div><h1>账号</h1><div class="sub">一个账号 = 一个人，只能由用户在回笺客户端里注册产生（注册时就开启加密）。这里只能停用、注销登录和删除账号，不能改用户名和密码（改了密码就能登录进别人的账号）；pushkey、设备和消息由用户在自己的回笺客户端里管理，服务器上的消息只有密文。</div></div></div>
 
-<div class="card"><div class="card-h"><h2>所有账号</h2></div>
-<table class="tbl"><tr><th>账号</th><th>设备</th><th>Pushkey</th><th>消息</th><th>加密</th><th>创建时间</th><th>状态</th><th class="r"></th></tr>
+<div class="card"><div class="card-h"><h2>所有账号</h2><span class="aside">{{len .Accounts}} 个</span></div>
+<div class="tblwrap"><table class="tbl accts"><tr><th>用户名</th><th>创建时间</th><th>最后活跃</th><th class="num">设备</th><th class="num">消息</th><th class="num">占用空间</th><th>加密</th><th>状态</th><th class="r"></th></tr>
 {{range .Accounts}}<tr class="{{if .Disabled}}rev{{end}}">
 <td><b>{{.Label}}</b>{{if eq .ID $.Owner}} <span class="chip acc" title="服务器自己的通知（备份失败、附件目录不可用）发给这个账号">第一个账号</span>{{end}}
-{{if not .HasPassword}}<div class="small muted">还没有密码：设置后可以在其他设备上用密码登录</div>{{end}}
-<details class="edit"><summary class="muted small">{{if .HasPassword}}改用户名 / 重设密码{{else}}设置用户名和密码{{end}}</summary>
-<form method="post" action="/accounts/{{.ID}}/credentials" class="row"><input class="in" name="username" value="{{.Username}}" placeholder="用户名" required maxlength="64" style="width:140px">
-<input class="in" type="password" name="password" placeholder="{{if .HasPassword}}新密码（留空不改）{{else}}密码，至少 8 位{{end}}" minlength="8" autocomplete="new-password" style="width:180px"{{if not .HasPassword}} required{{end}}><button class="btn sm">保存</button></form></details></td>
-<td>{{.Devices}}</td><td>{{.Keys}}</td><td>{{.Messages}}</td>
-<td>{{$pl := index $.Plain .ID}}{{if index $.Enc .ID}}<span class="chip ok" title="消息在服务器上只有密文（发送端加密，或服务器收到后代为加密）">已加密</span>{{if $pl}} <span class="chip warn" title="开启加密以前的明文消息，服务器正在补加密；附件读不到的会跳过，下次启动再试">明文 {{$pl}} 条</span>{{end}}{{else}}<span class="chip warn" title="还没有加密钥匙：{{if .HasPassword}}用户第一次用密码登录新版客户端时自动开启{{else}}先设置密码，用户用密码登录新版客户端时自动开启{{end}}。在那之前收到的消息先以明文保存，开启后由服务器补加密">尚未加密（等待首次登录）</span>{{if $pl}} <span class="chip warn">明文 {{$pl}} 条</span>{{end}}{{end}}</td>
+{{if ne .ID $.Owner}}<details class="edit"><summary class="small" style="color:var(--p5)">删除账号</summary>
+<form method="post" action="/accounts/{{.ID}}/delete" class="row" data-confirm="彻底删除「{{.Label}}」？消息、附件、pushkey、设备和加密钥匙全部删除，无法恢复。"><input class="in" name="confirm" placeholder="输入「{{.Label}}」确认" required autocomplete="off" style="width:180px"><button class="btn sm danger">删除</button></form></details>{{end}}</td>
 <td class="muted" title="{{full .Created}}">{{rel .Created}}</td>
+<td class="muted">{{if .LastActive}}<span title="{{full .LastActive}}">{{rel .LastActive}}</span>{{else}}从未{{end}}</td>
+<td class="num">{{.Devices}}</td><td class="num">{{.Messages}}</td><td class="num">{{size .Bytes}}</td>
+<td>{{if .Encrypted}}<span class="chip ok" title="服务器上只保存密文">已加密</span>{{if .Plain}} <span class="chip warn" title="开启加密以前的明文消息，服务器正在补加密">补加密中 {{.Plain}} 条</span>{{end}}{{else}}<span class="chip warn" title="0.9 以前建的旧账号还没有加密钥匙：用户用密码登录新版客户端时自动开启。在那之前发给这个账号的消息会被拒收（服务器不保存明文）">未加密（旧账号，登录后自动开启）</span>{{end}}</td>
 <td>{{if .Disabled}}<span class="chip bad">已停用</span>{{else}}<span class="chip ok">正常</span>{{end}}</td>
-<td class="r"><a class="btn sm" href="/switch?u={{.ID}}&back=/devices">查看</a>
+<td class="r nowrap">{{if .Devices}}<form class="inline" method="post" action="/accounts/{{.ID}}/logout" data-confirm="注销「{{.Label}}」的全部登录？它的 {{.Devices}} 台设备都要用密码重新登录（消息和 pushkey 保留）。"><button class="btn sm">注销全部登录</button></form>{{end}}
 {{if ne .ID $.Owner}}<form class="inline" method="post" action="/accounts/{{.ID}}/disable"{{if not .Disabled}} data-confirm="停用「{{.Label}}」？它的设备将无法接收消息，pushkey 无法发送。"{{end}}><input type="hidden" name="on" value="{{if .Disabled}}0{{else}}1{{end}}"><button class="btn sm{{if not .Disabled}} danger{{end}}">{{if .Disabled}}启用{{else}}停用{{end}}</button></form>{{end}}</td></tr>{{end}}
-</table></div>
+</table></div></div>
 
-<div class="card"><div class="card-h"><h2>新建账号</h2><span class="aside">不预置 pushkey，由账号自己新建</span></div><div class="card-b">
-<form method="post" action="/accounts" class="row"><input class="in" name="username" placeholder="用户名，例如 Alex Chen" required maxlength="64" style="width:180px">
-<input class="in" type="password" name="password" placeholder="初始密码，至少 8 位" required minlength="8" autocomplete="new-password" style="width:200px">
-<button class="btn primary">{{template "i-plus"}}创建</button></form>
-<p class="muted small" style="margin:10px 0 0">把服务器地址、用户名和密码告诉对方，在回笺客户端里选「账号登录」即可；也可以切换到该账号后在「设备」页生成配对码。</p>
-</div></div>
-
-<div class="card"><div class="card-h"><h2>开放注册</h2></div><div class="card-b row" style="justify-content:space-between">
-<div class="small">{{if .RegisterOpen}}<b>已开放</b>：任何知道服务器地址的人都可以在客户端注册账号。{{else}}<b>已关闭</b>（推荐）：只有管理员能创建账号。{{end}}</div>
-<form method="post" action="/accounts/register"><input type="hidden" name="on" value="{{if .RegisterOpen}}0{{else}}1{{end}}"><button class="btn sm{{if not .RegisterOpen}} danger{{end}}">{{if .RegisterOpen}}关闭注册{{else}}开放注册{{end}}</button></form>
-</div></div>
+<div class="card"><div class="card-h"><h2>注册</h2><a class="small" href="/invites">邀请码 →</a></div><div class="card-b">{{template "regmode" .}}</div></div>
 {{template "bottom" .}}{{end}}
 `

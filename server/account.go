@@ -3,14 +3,16 @@ package main
 // 账号、设备身份、按设备接收规则、在用设备优先。
 //
 // 账号：一个账号 = 一个人，拥有自己的 pushkey、设备和消息历史。
-//   - 管理员在管理后台创建账号；也可以打开「开放注册」让别人自己注册（默认关闭）。
-//   - 0.5.0 以前的数据属于第一个账号（id 最小），它最初没有用户名和密码，
-//     在客户端「账户」页或管理后台设置后，就能在别的电脑上用密码登录。
-//   - 新账号自动带一把名为 default 的 pushkey。
+//   - 0.9.0 起账号只能由用户在客户端注册产生（POST /v1/register）：注册即登录、注册即开启加密，
+//     注册模式 closed / invite（默认）/ open，见 invites.go。管理后台和命令行都不能建账号，
+//     也不能改任何账号的用户名和密码（改了密码运营方就能登录进别人的账号）。
+//   - 第一个账号（id 最小）接收服务器自己的通知；新部署里就是第一个注册的人。账号 id 不复用（account_delete.go）。
+//   - 0.5.0 以前的数据属于第一个账号，它最初没有用户名和密码，由这个账号已登录的设备在客户端里设置。
+//   - 新账号不预置 pushkey，由用户自己新建（客户端新建第一把时名称默认填 default）。
 //
 // 设备加入账号的两种方式：
-//   - 账号配对码：管理后台或该账号已登录的设备生成，新设备输入后直接进入这个账号；
-//   - 用户名 + 密码登录（POST /v1/login）。
+//   - 用户名 + 密码登录（POST /v1/login，主要方式；新协议用 auth_key）；
+//   - 配对码：该账号已登录的设备生成，新设备输入后直接进入这个账号。
 //
 // 设备身份：客户端上报硬件指纹（本机硬件 UUID 加盐后的哈希）。同一账号下指纹相同的设备
 // 重新配对 / 登录时复用原来的设备记录（ID、名称、接收规则不变），旧 token 作废，并记一条配对记录。
@@ -81,8 +83,12 @@ type Account struct {
 	AuthKey  bool
 	Disabled bool
 	Created  int64
-	// 统计（列表页用）
-	Devices, Keys, Messages int64
+	// 管理后台账号列表用的统计（只有数字，不含 key、设备名、IP、消息内容）
+	Devices, Messages int64
+	LastActive        int64 // 设备最后一次访问接口或登录的时间，0 = 从未
+	Bytes             int64 // 占用空间：消息（密文 / 明文）加附件
+	Encrypted         bool  // 有 active 加密钥匙
+	Plain             int64 // 服务器上还没补加密的明文消息
 }
 
 // Label 用于显示：有用户名显示用户名，否则「第一个账号」/「账号 #id」
@@ -211,8 +217,12 @@ func (s *Store) AccountByID(id int64) (*Account, error) {
 func (s *Store) ListAccounts() ([]Account, error) {
 	rows, err := s.db.Query(`SELECT u.id,u.username,(u.pass_hash!='' OR u.auth_hash!=''),u.disabled,u.created_at,
 		(SELECT COUNT(*) FROM devices d WHERE d.user_id=u.id AND d.revoked=0),
-		(SELECT COUNT(*) FROM pushkeys k WHERE k.user_id=u.id AND k.revoked=0),
-		(SELECT COUNT(*) FROM messages m WHERE m.user_id=u.id)
+		(SELECT COUNT(*) FROM messages m WHERE m.user_id=u.id),
+		(SELECT COALESCE(MAX(max(COALESCE(d.last_seen,0),COALESCE(d.last_paired,0))),0) FROM devices d WHERE d.user_id=u.id),
+		(SELECT COALESCE(SUM(length(CAST(m.text AS BLOB))+length(CAST(m.desp AS BLOB))+length(CAST(m.e2e AS BLOB))),0) FROM messages m WHERE m.user_id=u.id)
+		 + (SELECT COALESCE(SUM(a.size),0) FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.user_id=u.id),
+		EXISTS(SELECT 1 FROM e2e_keys k WHERE k.user_id=u.id AND k.active=1),
+		(SELECT COUNT(*) FROM messages m WHERE m.user_id=u.id AND m.e2e='')
 		FROM users u ORDER BY u.id`)
 	if err != nil {
 		return nil, err
@@ -221,53 +231,122 @@ func (s *Store) ListAccounts() ([]Account, error) {
 	var out []Account
 	for rows.Next() {
 		var a Account
-		var hp, dis int
-		if err := rows.Scan(&a.ID, &a.Username, &hp, &dis, &a.Created, &a.Devices, &a.Keys, &a.Messages); err != nil {
+		var hp, dis, enc int
+		if err := rows.Scan(&a.ID, &a.Username, &hp, &dis, &a.Created, &a.Devices, &a.Messages,
+			&a.LastActive, &a.Bytes, &enc, &a.Plain); err != nil {
 			return nil, err
 		}
-		a.HasPassword, a.Disabled = hp != 0, dis != 0
+		a.HasPassword, a.Disabled, a.Encrypted = hp != 0, dis != 0, enc != 0
 		out = append(out, a)
 	}
 	return out, rows.Err()
 }
 
-// CreateAccount 新建账号，并自动生成一把名为 default 的 pushkey
-func (s *Store) CreateAccount(username, password string) (*Account, error) {
-	if err := checkCredentials(username, password); err != nil {
-		return nil, err
+// LogoutAccount：注销账号的全部登录——吊销所有设备 token（转交给设备的私钥副本一并删除），
+// 没用过的配对码作废。返回吊销的设备数。账号、pushkey 和消息保留，用户用密码重新登录即可
+func (s *Store) LogoutAccount(userID int64) (int, error) {
+	rows, err := s.db.Query(`SELECT id FROM devices WHERE user_id=? AND revoked=0`, userID)
+	if err != nil {
+		return 0, err
 	}
-	return s.createAccount(username, hashPassword(password), "", "")
+	var ids []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	n := 0
+	for _, id := range ids {
+		res, err := s.db.Exec(`UPDATE devices SET revoked=1 WHERE id=? AND user_id=? AND revoked=0`, id, userID)
+		if err != nil {
+			return n, err
+		}
+		if k, _ := res.RowsAffected(); k > 0 {
+			s.dropDeviceWrap(userID, id)
+			n++
+		}
+	}
+	s.db.Exec(`DELETE FROM pair_codes WHERE user_id=? AND used=0`, userID)
+	if n > 0 {
+		s.settingsChanged(userID, changeDevices)
+	}
+	return n, nil
 }
 
-// CreateAccountAuth：用新登录协议注册（客户端只发登录凭证，服务端从头到尾拿不到密码；密码强度由客户端检查）
-func (s *Store) CreateAccountAuth(username, salt string, authKey []byte) (*Account, error) {
-	if !validUsername(normUsername(username)) {
-		return nil, errBadUsername
-	}
-	return s.createAccount(username, "", salt, authHash(authKey))
+// RegisterInput：注册（0.9.0）——账号、加密钥匙、第一台设备一次建好
+type RegisterInput struct {
+	Username string
+	Invite   string // 规范化后的邀请码；空表示不用（开放注册）
+	E2E      E2ESetupInput
+	Device   pairReq
 }
 
-func (s *Store) createAccount(username, passHash, authSalt, authHashV string) (*Account, error) {
-	username = normUsername(username)
+// Register：一个事务里用掉邀请码、建账号（新登录协议）、写入账号公钥和锁住的私钥、把设备加入账号
+func (s *Store) Register(in RegisterInput) (*Account, *Device, string, error) {
+	username := normUsername(in.Username)
 	tx, err := s.db.Begin()
 	if err != nil {
-		return nil, err
+		return nil, nil, "", err
 	}
 	defer tx.Rollback()
-	res, err := tx.Exec(`INSERT INTO users(name,created_at,username,username_key,pass_hash,auth_salt,auth_hash) VALUES(?,?,?,?,?,?,?)`,
-		"u_"+randHex(8), now(), username, usernameKey(username), passHash, authSalt, authHashV)
+	// 检查顺序：邀请码 → 用户名格式 → 用户名占用（拿不到有效邀请码的人探不到用户名规则和占用情况）
+	if in.Invite != "" {
+		if err := consumeInvite(tx, in.Invite); err != nil {
+			return nil, nil, "", err
+		}
+	}
+	if !validUsername(username) {
+		return nil, nil, "", errBadUsername
+	}
+	id, err := nextUserID(tx) // 删除过的账号 id 不复用
+	if err != nil {
+		return nil, nil, "", err
+	}
+	_, err = tx.Exec(`INSERT INTO users(id,name,created_at,username,username_key,pass_hash,auth_salt,auth_hash) VALUES(?,?,?,?,?,'',?,?)`,
+		id, "u_"+randHex(8), now(), username, usernameKey(username), in.E2E.Salt, authHash(in.E2E.AuthKey))
 	if isUniqueErr(err) {
-		return nil, errUsernameTaken
+		return nil, nil, "", errUsernameTaken
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, "", err
 	}
-	id, _ := res.LastInsertId()
-	// 不自动生成 pushkey：用户自己新建（客户端新建第一把时名字默认填 default）
+	if err := bumpUserHighWater(tx, id); err != nil {
+		return nil, nil, "", err
+	}
+	if in.Invite != "" {
+		if err := recordInvite(tx, in.Invite, id, username); err != nil {
+			return nil, nil, "", err
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO e2e_keys(user_id,kid,pub,created_at,active) VALUES(?,?,?,?,1)`,
+		id, e2eKID(in.E2E.Pub), b64.EncodeToString(in.E2E.Pub), now()); err != nil {
+		return nil, nil, "", err
+	}
+	for kind, blob := range map[string]string{wrapPassword: in.E2E.PasswordWrap, wrapRecovery: in.E2E.RecoveryWrap} {
+		if blob == "" {
+			continue
+		}
+		if err := putWrap(tx, id, kind, "", blob); err != nil {
+			return nil, nil, "", err
+		}
+	}
+	if err := bumpStats(tx, 0, 0, 1); err != nil {
+		return nil, nil, "", err
+	}
+	dev := in.Device
+	dev.UserID = id
+	d, tok, _, err := attachDevice(tx, dev)
+	if err != nil {
+		return nil, nil, "", err
+	}
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return nil, nil, "", err
 	}
-	return s.AccountByID(id)
+	s.markActive(id)
+	a, err := s.AccountByID(id)
+	return a, d, tok, err
 }
 
 // SetCredentials 设置 / 修改用户名和密码（password 为空表示只改用户名）
@@ -390,7 +469,6 @@ type pairReq struct {
 	Name        string
 	Platform    string
 	Fingerprint string
-	CanAdmin    bool
 	Method      string // code / password / register
 	IP, Client  string
 }
@@ -407,16 +485,13 @@ func attachDevice(tx *sql.Tx, p pairReq) (*Device, string, bool, error) {
 	d := &Device{UserID: p.UserID, Platform: p.Platform}
 	reused := false
 	if p.Fingerprint != "" {
-		var adm int
-		err := tx.QueryRow(`SELECT id,name,created_at,can_admin FROM devices WHERE user_id=? AND fingerprint=? ORDER BY created_at DESC LIMIT 1`,
-			p.UserID, p.Fingerprint).Scan(&d.ID, &d.Name, &d.Created, &adm)
+		err := tx.QueryRow(`SELECT id,name,created_at FROM devices WHERE user_id=? AND fingerprint=? ORDER BY created_at DESC LIMIT 1`,
+			p.UserID, p.Fingerprint).Scan(&d.ID, &d.Name, &d.Created)
 		if err == nil {
 			reused = true
-			// 服务器管理权限只来自管理员勾了「允许管理」的配对码：指纹不是秘密（硬件 UUID 能从别处看到），
-			// 不能让「本账号的密码 / 普通配对码 + 别人的指纹」继承原记录的管理权限；被吊销后登录回来也要重新授权
-			d.CanAdmin = p.CanAdmin
-			if _, err := tx.Exec(`UPDATE devices SET token_hash=?, revoked=0, platform=?, can_admin=?, pair_count=pair_count+1, last_paired=?, client=? WHERE id=?`,
-				sha256Hex(token), p.Platform, b2i(d.CanAdmin), at, p.Client, d.ID); err != nil {
+			// can_admin 是 0.9.0 以前的设备级管理权限：复用旧记录时清掉（0.9.0 起没有设备能进入管理后台）
+			if _, err := tx.Exec(`UPDATE devices SET token_hash=?, revoked=0, platform=?, can_admin=0, pair_count=pair_count+1, last_paired=?, client=? WHERE id=?`,
+				sha256Hex(token), p.Platform, at, p.Client, d.ID); err != nil {
 				return nil, "", false, err
 			}
 		} else if !errors.Is(err, sql.ErrNoRows) {
@@ -424,11 +499,11 @@ func attachDevice(tx *sql.Tx, p pairReq) (*Device, string, bool, error) {
 		}
 	}
 	if !reused {
-		d.Name, d.Created, d.CanAdmin = p.Name, at, p.CanAdmin
+		d.Name, d.Created = p.Name, at
 		for i := 0; ; i++ { // ID 由时间戳 + 随机后缀组成，同一秒内撞上的概率极低，撞上就重试
 			d.ID = newDeviceID()
-			_, err := tx.Exec(`INSERT INTO devices(id,user_id,name,platform,token_hash,created_at,can_admin,fingerprint,last_paired,client) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-				d.ID, d.UserID, d.Name, d.Platform, sha256Hex(token), d.Created, b2i(d.CanAdmin), p.Fingerprint, at, p.Client)
+			_, err := tx.Exec(`INSERT INTO devices(id,user_id,name,platform,token_hash,created_at,fingerprint,last_paired,client) VALUES(?,?,?,?,?,?,?,?,?)`,
+				d.ID, d.UserID, d.Name, d.Platform, sha256Hex(token), d.Created, p.Fingerprint, at, p.Client)
 			if err == nil {
 				break
 			}
@@ -459,6 +534,7 @@ func (s *Store) LoginDevice(p pairReq) (*Device, string, bool, error) {
 		return nil, "", false, err
 	}
 	s.settingsChanged(p.UserID, changeDevices)
+	s.markActive(p.UserID) // 登录 / 配对也算当天活跃
 	return d, tok, reused, nil
 }
 
@@ -605,7 +681,8 @@ func (h *Hub) decorate(d *Device, msgs []Message) {
 
 // ---------- 设备端接口 ----------
 
-func (h *Hub) registerOpen() bool { return h.st.GetKV("register_open") == "1" }
+// registerOpen：开放注册（旧字段 register_open；需要邀请码时为 false，客户端看 /v1/info 的 register）
+func (h *Hub) registerOpen() bool { return h.st.RegisterMode() == regOpen }
 
 type loginBody struct {
 	Username, Password, Name, Platform, Fingerprint string
@@ -613,6 +690,12 @@ type loginBody struct {
 	// 注册时还要带 auth_salt（客户端随机生成的盐，十六进制）
 	AuthKey  string `json:"auth_key"`
 	AuthSalt string `json:"auth_salt"`
+	// 注册时的邀请码（0.9.0，注册模式为 invite 时必填）
+	InviteCode string `json:"invite_code"`
+	// 注册时一起开启端到端加密（0.9.0 起必填，格式同 /v1/e2e/setup）：账号公钥、用密码锁住的私钥、可选的恢复码副本
+	Pub          string `json:"pub"`
+	PasswordWrap string `json:"password_wrap"`
+	RecoveryWrap string `json:"recovery_wrap"`
 	// 旧账号用新客户端登录：PBKDF2(密码, prelogin 给的盐, 轮数) 的 32 字节结果（base64url），代替密码原文
 	PasswordKey string `json:"password_key"`
 }
@@ -698,14 +781,36 @@ func (h *Hub) handleLogin(w http.ResponseWriter, r *http.Request) {
 	h.finishLogin(w, r, in, uid, "password")
 }
 
-// POST /v1/register（管理员打开「开放注册」后才可用）
+var errRegisterOldClient = errors.New("请更新回笺客户端后注册（新版注册时同时开启端到端加密）")
+
+// POST /v1/register（0.9.0 起，功能 id register.e2e）：注册即登录、注册即开启加密。
+// 请求体同 /v1/login 的新协议（auth_key + auth_salt），另外必带 pub、password_wrap（recovery_wrap 可选），
+// 在一个事务里：用掉邀请码、建账号、存账号公钥和锁住的私钥、把这台设备加入账号。账号从诞生起就有钥匙，服务器从头到尾拿不到密码。
+// 旧客户端（发密码原文、或不带加密字段）返回 400「请更新回笺客户端后注册」，什么都不建
 func (h *Hub) handleRegister(w http.ResponseWriter, r *http.Request) {
 	in, ok := h.readLogin(w, r)
 	if !ok {
 		return
 	}
-	if !h.registerOpen() {
-		apiErr(w, 403, "这个服务器没有开放注册，请联系管理员创建账号")
+	invite := ""
+	switch h.st.RegisterMode() {
+	case regOpen:
+	case regInvite:
+		// 邀请码按来源 IP 限速，防止穷举（和配对码共用一个限速器，每个 IP 每分钟 10 次）
+		if !h.pairLimit.Allow("invite:" + h.realIP(r)) {
+			apiErr(w, 429, "尝试太频繁，请稍后再试")
+			return
+		}
+		if invite = normInvite(in.InviteCode); invite == "" {
+			apiErr(w, 403, errInviteMissing.Error())
+			return
+		}
+	default:
+		apiErr(w, 403, "这个服务器没有开放注册，请联系管理员")
+		return
+	}
+	if in.AuthKey == "" || in.Pub == "" || in.PasswordWrap == "" {
+		apiErr(w, 400, errRegisterOldClient.Error())
 		return
 	}
 	ak, err := authKeyOf(in.AuthKey)
@@ -713,28 +818,48 @@ func (h *Hub) handleRegister(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 400, err.Error())
 		return
 	}
-	if ak != nil && !validSalt(in.AuthSalt) {
+	if !validSalt(in.AuthSalt) {
 		apiErr(w, 400, "auth_salt 格式不对（16 字节十六进制）")
 		return
 	}
-	var a *Account
-	if ak != nil {
-		a, err = h.st.CreateAccountAuth(in.Username, in.AuthSalt, ak)
-	} else {
-		a, err = h.st.CreateAccount(in.Username, in.Password)
-	}
-	if err != nil {
-		code := 400
-		if errors.Is(err, errUsernameTaken) {
-			code = 409
-		} else if !errors.Is(err, errBadUsername) && !errors.Is(err, errBadPassword) {
-			code = 500
-		}
-		apiErr(w, code, err.Error())
+	pub, err := b64.DecodeString(in.Pub)
+	if err != nil || len(pub) != 32 {
+		apiErr(w, 400, "公钥格式不对")
 		return
 	}
-	log.Printf("新账号注册: #%d %s", a.ID, a.Username)
-	h.finishLogin(w, r, in, a.ID, "register")
+	if !e2eValidWrap("hjp1", in.PasswordWrap, 4096) {
+		apiErr(w, 400, "password_wrap 格式不对（hjp1.…）")
+		return
+	}
+	if in.RecoveryWrap != "" && !e2eValidWrap("hjr1", in.RecoveryWrap, 4096) {
+		apiErr(w, 400, "recovery_wrap 格式不对（hjr1.…）")
+		return
+	}
+	a, d, tok, err := h.st.Register(RegisterInput{Username: in.Username, Invite: invite,
+		E2E: E2ESetupInput{Salt: in.AuthSalt, AuthKey: ak, Pub: pub, PasswordWrap: in.PasswordWrap, RecoveryWrap: in.RecoveryWrap},
+		Device: pairReq{Name: in.Name, Platform: in.Platform, Fingerprint: in.Fingerprint, Method: "register",
+			IP: h.realIP(r), Client: clientLabel(clientHeader(r.Header, "Client"))}})
+	if err != nil {
+		code := 400
+		if isInviteErr(err) {
+			time.Sleep(300 * time.Millisecond)
+			code = 403
+		} else if errors.Is(err, errUsernameTaken) {
+			code = 409
+		} else if !errors.Is(err, errBadUsername) {
+			code = 500
+			log.Printf("注册失败：%v", err)
+		}
+		msg := err.Error()
+		if code == 500 {
+			msg = "注册失败"
+		}
+		apiErr(w, code, msg)
+		return
+	}
+	log.Printf("新账号注册: #%d %s（设备 %s，已开启加密）", a.ID, a.Username, d.ID)
+	writeJSON(w, 200, map[string]any{"device_id": d.ID, "name": d.Name, "token": tok, "reused": false,
+		"e2e": h.e2eLoginInfo(a.ID)})
 }
 
 // POST /v1/logout：注销本机（token 立即失效；设备记录保留，下次登录按指纹复用）
@@ -817,18 +942,9 @@ func (h *Hub) handleCredentials(w http.ResponseWriter, r *http.Request, d *Devic
 		apiErr(w, 426, errNeedNewClient.Error())
 		return
 	}
-	switch {
-	case !a.HasPassword && !d.CanAdmin:
-		// 升级前的第一个账号没有密码：只有服务器管理员的设备（或管理后台）能设置初始密码，
-		// 避免 0.4.x 时有意不给管理权限的设备抢先设置
-		apiErr(w, 403, "这个账号还没有密码：请在「允许管理」的设备上或管理后台的「账号」页设置")
+	// 还没有密码（升级前的第一个账号）：本账号的任何设备都可以设置初始密码；已有密码时一律要核对当前密码
+	if a.HasPassword && !h.checkCurrent(w, a, in.Current_Password, in.CurrentAuthKey, in.CurrentPasswordKey) {
 		return
-	case a.HasPassword && d.CanAdmin:
-		// 服务器管理员的设备可以直接重设（管理后台本来就能重设）
-	case a.HasPassword:
-		if !h.checkCurrent(w, a, in.Current_Password, in.CurrentAuthKey, in.CurrentPasswordKey) {
-			return
-		}
 	}
 	if !a.HasPassword && in.Password == "" {
 		apiErr(w, 400, "请设置密码（"+passwordRule+"）")
@@ -859,7 +975,7 @@ func (h *Hub) handleCreatePairCode(w http.ResponseWriter, r *http.Request, d *De
 		apiErr(w, 429, "这个账号已有 5 个未使用的配对码，请先用掉或等它们过期（3 分钟）")
 		return
 	}
-	code, err := h.st.CreatePairCode(d.UserID, pairCodeTTL, false, d.ID)
+	code, err := h.st.CreatePairCode(d.UserID, pairCodeTTL, d.ID)
 	if err != nil {
 		apiErr(w, 500, "生成失败")
 		return
@@ -884,25 +1000,18 @@ func (h *Hub) handlePairCodeStatus(w http.ResponseWriter, r *http.Request, d *De
 // POST /v1/devices/{id}/revoke：移除本账号的另一台设备
 func (h *Hub) handleRevokeOwnDevice(w http.ResponseWriter, r *http.Request, d *Device) {
 	id := r.PathValue("id")
-	// 没有服务器管理权限的设备不能移除有管理权限的设备
-	adminOnly := ""
-	if !d.CanAdmin {
-		adminOnly = " AND can_admin=0"
-	}
-	res, err := h.st.db.Exec(`UPDATE devices SET revoked=1 WHERE id=? AND user_id=? AND revoked=0`+adminOnly, id, d.UserID)
+	// 0.9.0 起管理权限按账号，同一账号的设备权限相同，不再区分
+	res, err := h.st.db.Exec(`UPDATE devices SET revoked=1 WHERE id=? AND user_id=? AND revoked=0`, id, d.UserID)
 	if err != nil {
 		apiErr(w, 500, "操作失败")
 		return
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		var revoked int
-		switch err := h.st.db.QueryRow(`SELECT revoked FROM devices WHERE id=? AND user_id=?`, id, d.UserID).Scan(&revoked); {
-		case err != nil:
+		if err := h.st.db.QueryRow(`SELECT revoked FROM devices WHERE id=? AND user_id=?`, id, d.UserID).Scan(&revoked); err != nil {
 			apiErr(w, 404, "设备不存在")
-		case revoked != 0: // 已经移除过：幂等返回成功，不再记变更
+		} else { // 已经移除过：幂等返回成功，不再记变更
 			writeJSON(w, 200, map[string]any{"ok": true})
-		default:
-			apiErr(w, 403, "这台设备有服务器管理权限，只能在「允许管理」的设备上或管理后台移除")
 		}
 		return
 	}

@@ -31,12 +31,10 @@ type feature struct {
 var serverFeatures = []feature{
 	{"push", "发送消息与附件", "0.1.0"},
 	{"stream", "实时接收（长轮询）", "0.1.0"},
-	{"admin.link", "客户端一键进入管理后台", "0.3.0"},
 	{"update", "客户端应用内更新", "0.4.0"},
 	{"me.rename", "在客户端修改设备名称", "0.4.2"},
 	{"keys", "在客户端管理 pushkey", "0.4.2"},
 	{"info", "版本与功能协商", "0.5.0"},
-	{"storage", "查看服务端存储与备份、立即备份", "0.5.0"},
 	{"account", "账号：密码登录、换设备找回 pushkey 和历史", "0.5.0"},
 	{"devices", "设备身份：重新配对不重复，查看配对记录", "0.5.0"},
 	{"subscriptions", "按设备设置每把 pushkey 提醒 / 静默 / 不接收", "0.5.0"},
@@ -53,11 +51,15 @@ var serverFeatures = []feature{
 	{"poll.long", "长轮询可以挂起超过 55 秒（上限见 /v1/info 的 long_poll_max），客户端按网络自适应等待时长，更省电", "0.6.4"},
 	{"e2e", "端到端加密（docs/e2ee.md）：/v1/prelogin + auth_key 登录、/v1/e2e 钥匙管理和设备批准；消息带 e2e 信封时 type=e2e、text 是占位文字、附件是密文", "0.7.0"},
 	{"e2e.auto", "默认自动加密：开启加密时恢复码可选、POST /v1/e2e/reset 重置加密、服务器代加密明文消息并补加密开启以前的历史（sealed: \"server\"，始终开启；补加密的消息记 kind \"sealed\" 变更、附件换新 id，用 GET /v1/messages/{id} 重新拉取）；上传 wrap / grant 带 kid", "0.8.0"},
+	{"admin.accounts", "管理后台只管账号：不显示消息、pushkey 和设备，只有统计数字；任何账号都不能从客户端进入管理后台（/v1/admin/link、/v1/storage 已删除，/v1/me 的 can_admin 恒为 false）", "0.9.0"},
+	{"register.invite", "注册模式和邀请码：/v1/info 的 register 为 closed / invite / open；invite 时 POST /v1/register 要带 invite_code", "0.9.0"},
+	{"register.e2e", "注册即开启加密：POST /v1/register 必须带 pub、password_wrap、auth_salt、auth_key（格式同 /v1/e2e/setup），返回设备 token 和 e2e；不带的旧客户端注册返回 400「请更新回笺客户端后注册」", "0.9.0"},
+	{"push.e2e", "服务器不保存明文：账号还没有加密钥匙时，明文推送返回 403（先在回笺客户端用密码登录一次），服务端系统通知直接丢弃", "0.9.0"},
 }
 
 func (h *Hub) handleInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"name": "huijian", "version": version, "api": apiLevel, "features": serverFeatures,
-		"register_open": h.registerOpen(), "long_poll_max": longPollMax()})
+		"register_open": h.registerOpen(), "register": h.st.RegisterMode(), "long_poll_max": longPollMax()})
 }
 
 // withServerHeader 给所有响应加上服务端版本
@@ -212,24 +214,6 @@ func (h *Hub) storageInfo(fresh bool) storageInfo {
 	in.Running = b.Running()
 	in.Last = b.Last()
 	return in
-}
-
-// GET /v1/storage（需要允许管理）
-func (h *Hub) handleStorage(w http.ResponseWriter, r *http.Request, d *Device) {
-	writeJSON(w, 200, h.storageInfo(r.URL.Query().Get("fresh") == "1"))
-}
-
-// POST /v1/storage/backup（需要允许管理）：后台开始一次备份
-func (h *Hub) handleStorageBackup(w http.ResponseWriter, r *http.Request, d *Device) {
-	if err := h.backup.Start("客户端 " + d.Name); err != nil {
-		code := 409
-		if !h.backup.enabled() {
-			code = 400
-		}
-		apiErr(w, code, err.Error())
-		return
-	}
-	writeJSON(w, 202, h.storageInfo(false))
 }
 
 // POST /backup/run（管理后台）
