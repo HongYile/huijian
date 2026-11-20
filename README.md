@@ -46,6 +46,7 @@
 - **频道**：按来源分类。可以改名、置顶、静音、隐藏，设置在所有设备之间同步。
 - **不丢不重**：发送失败的消息会自动补发，重试也不会重复。
 - **给 AI agent 用**：附带一份 [skill 文档](skills/huijian/SKILL.md)。对 Claude Code 等 agent 说一句「跑完通知我」就行。
+- **agent 能问你、你能直接回**：agent 需要你拍板时，把问题发到手机上，你点快捷按钮或打字回复，agent 收到后接着干；回复送达后显示 ✓✓。支持命令行和 MCP，消息和回复都端到端加密，agent 每次登录都要你在设备上核对批准。
 
 ### 🔐 加密
 
@@ -122,6 +123,17 @@ huijian.push("exp42 完成", "val_loss 0.231", files=["loss.png"], priority=4)
 with huijian.run("exp42"):   # 自动发送：开始 / 完成（含用时）/ 出错（紧急 + 报错信息）
     train()
 ```
+
+**agent 提问、等你回复**（服务端 0.10.0 起）：在客户端「设置 → Agent」新建 Agent key，agent 登录时在设备上核对 6 位核对码批准。
+
+```bash
+export HUIJIAN_AGENT_KEY=AK_xxx
+huijian agent login -name "家里 Claude Code"          # 显示核对码，等你在手机上批准
+huijian agent ask -choice 删 -choice 保留 "要不要删掉 3 个异常样本？"   # 回复打印到标准输出
+claude mcp add huijian -- huijian mcp                 # 或者作为 MCP 工具：notify / ask / check_replies
+```
+
+设计和格式见 [agent 双向](docs/agent-mcp.md)。
 
 优先级、频道、Markdown 写法和完整接口，见[使用指南](docs/guide.md)、[回笺 Markdown](docs/markdown.md) 和 [API 参考](docs/api.md)。
 
