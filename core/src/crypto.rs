@@ -243,6 +243,13 @@ pub fn recovery_key(code: &[u8]) -> [u8; 32] {
     k
 }
 
+/// 配对码带钥匙（e2ee-client.md §12）：一次性钥匙 S（16 字节）派生锁住私钥的 AES 钥匙
+pub fn pair_key(secret: &[u8]) -> [u8; 32] {
+    let mut k = [0u8; 32];
+    Hkdf::<Sha256>::new(Some(b"huijian pair v1"), secret).expand(b"", &mut k).unwrap();
+    k
+}
+
 pub fn wrap(prefix: &str, key: &[u8; 32], pt: &[u8], nonce: Option<[u8; 12]>) -> Result<String> {
     let nonce = match nonce {
         Some(n) => n,

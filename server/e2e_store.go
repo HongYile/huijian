@@ -312,6 +312,8 @@ func (s *Store) ResetE2E(userID int64, in E2ESetupInput) (string, error) {
 		`UPDATE e2e_keys SET active=0 WHERE user_id=?`,
 		`DELETE FROM e2e_wraps WHERE user_id=?`,
 		`UPDATE devices SET e2e_req=0, e2e_commit='', e2e_na='', e2e_nb='' WHERE user_id=?`,
+		// 带钥匙、还没用掉的配对码锁的是旧钥匙：一起作废
+		`UPDATE pair_codes SET expires_at=0, key_wrap='' WHERE user_id=? AND key_wrap!='' AND used=0`,
 	} {
 		if _, err := tx.Exec(q, userID); err != nil {
 			return "", err

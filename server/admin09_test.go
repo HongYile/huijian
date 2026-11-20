@@ -141,7 +141,7 @@ func TestAdminAccountActions(t *testing.T) {
 	d3, _, _, _ := st.LoginDevice(pairReq{UserID: u.ID, Name: "c", Platform: "android", Fingerprint: "fp-a9-000014"})
 	e.must(200, "POST", "/v1/devices/"+d3.ID+"/revoke", tok1, nil)
 	// 注销全部登录：所有设备 token 失效，账号和 pushkey 保留，可以用密码重新登录
-	code, _ := e.h.st.CreatePairCode(u.ID, pairCodeTTL, "")
+	code, _ := e.h.st.CreatePairCode(u.ID, pairCodeTTL, "", "")
 	if c, _ := adm("POST", "/accounts/"+id+"/logout", nil); c != 303 {
 		t.Fatalf("注销全部登录：%d", c)
 	}

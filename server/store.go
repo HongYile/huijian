@@ -74,6 +74,7 @@ func OpenStore(path string) (*Store, error) {
 		{"pair_codes", "created_by", "TEXT NOT NULL DEFAULT ''"},
 		{"pair_codes", "used_by", "TEXT NOT NULL DEFAULT ''"},
 		{"pair_codes", "used_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"pair_codes", "key_wrap", "TEXT NOT NULL DEFAULT ''"}, // 0.10.0：配对码带钥匙（hjc1，服务器解不开），用掉或过期即清空
 	} {
 		if err := st.addColumn(m[0], m[1], m[2]); err != nil {
 			return nil, err
@@ -257,14 +258,16 @@ func scanDevice(sc interface{ Scan(...any) error }) (*Device, error) {
 // CreatePairCode 生成一次性配对码。createdBy 为生成它的设备 ID（管理后台生成时为空）：
 // 同一台设备「重新生成」时，它之前没用掉的配对码立即作废，同一时间只有最新的一个有效。
 // 已用 / 过期的配对码保留一小时，供生成它的设备查询「已被哪台设备使用」。
-func (s *Store) CreatePairCode(userID int64, ttl time.Duration, createdBy string) (string, error) {
+// keyWrap：已解锁的设备用一次性钥匙锁住的账号私钥（hjc1，e2ee-client.md §12），只交给用这个码配对的设备，用掉或过期即清空。
+func (s *Store) CreatePairCode(userID int64, ttl time.Duration, createdBy, keyWrap string) (string, error) {
 	s.db.Exec(`DELETE FROM pair_codes WHERE expires_at < ?`, now()-3600)
 	if createdBy != "" {
 		s.db.Exec(`UPDATE pair_codes SET expires_at=? WHERE user_id=? AND created_by=? AND used=0 AND expires_at>=?`, now()-1, userID, createdBy, now())
 	}
+	s.db.Exec(`UPDATE pair_codes SET key_wrap='' WHERE key_wrap!='' AND (used!=0 OR expires_at<?)`, now())
 	for i := 0; i < 5; i++ {
 		code := randDigits(6)
-		_, err := s.db.Exec(`INSERT INTO pair_codes(code,user_id,expires_at,created_by) VALUES(?,?,?,?)`, code, userID, time.Now().Add(ttl).Unix(), createdBy)
+		_, err := s.db.Exec(`INSERT INTO pair_codes(code,user_id,expires_at,created_by,key_wrap) VALUES(?,?,?,?,?)`, code, userID, time.Now().Add(ttl).Unix(), createdBy, keyWrap)
 		if err == nil {
 			return code, nil
 		}
@@ -274,37 +277,52 @@ func (s *Store) CreatePairCode(userID int64, ttl time.Duration, createdBy string
 
 // Pair 消费一次性配对码，把设备加入配对码所属的账号（同一台设备按指纹复用原记录），返回明文 token（只返回这一次）。
 func (s *Store) Pair(code string, p pairReq) (*Device, string, bool, error) {
+	d, tok, reused, _, err := s.PairWithKey(code, p)
+	return d, tok, reused, err
+}
+
+// PairWithKey 同 Pair，另外返回配对码带的 key_wrap（没有时为空），并把它从数据库清空
+func (s *Store) PairWithKey(code string, p pairReq) (d *Device, token string, reused bool, keyWrap string, err error) {
+	d, token, reused, keyWrap, err = s.pair(code, p)
+	if err != nil {
+		keyWrap = ""
+	}
+	return
+}
+
+func (s *Store) pair(code string, p pairReq) (*Device, string, bool, string, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return nil, "", false, err
+		return nil, "", false, "", err
 	}
 	defer tx.Rollback()
-	err = tx.QueryRow(`SELECT user_id FROM pair_codes WHERE code=? AND used=0 AND expires_at>=?`, code, now()).Scan(&p.UserID)
+	var keyWrap string
+	err = tx.QueryRow(`SELECT user_id, key_wrap FROM pair_codes WHERE code=? AND used=0 AND expires_at>=?`, code, now()).Scan(&p.UserID, &keyWrap)
 	if err != nil {
-		return nil, "", false, errors.New("配对码无效或已过期")
+		return nil, "", false, "", errors.New("配对码无效或已过期")
 	}
 	var dis int
 	tx.QueryRow(`SELECT disabled FROM users WHERE id=?`, p.UserID).Scan(&dis)
 	if dis != 0 {
-		return nil, "", false, errDisabled
+		return nil, "", false, "", errDisabled
 	}
-	if _, err := tx.Exec(`UPDATE pair_codes SET used=1 WHERE code=?`, code); err != nil {
-		return nil, "", false, err
+	if _, err := tx.Exec(`UPDATE pair_codes SET used=1, key_wrap='' WHERE code=?`, code); err != nil {
+		return nil, "", false, "", err
 	}
 	p.Method = "code"
 	d, token, reused, err := attachDevice(tx, p)
 	if err != nil {
-		return nil, "", false, err
+		return nil, "", false, "", err
 	}
 	if _, err := tx.Exec(`UPDATE pair_codes SET used_by=?, used_at=? WHERE code=?`, d.Name, now(), code); err != nil {
-		return nil, "", false, err
+		return nil, "", false, "", err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, "", false, err
+		return nil, "", false, "", err
 	}
 	s.settingsChanged(p.UserID, changeDevices)
 	s.markActive(p.UserID) // 登录 / 配对也算当天活跃
-	return d, token, reused, nil
+	return d, token, reused, keyWrap, nil
 }
 
 // PairCodeStatus 配对码状态（只查本账号的）：waiting 等待使用 / used 已使用 / expired 已过期或已作废

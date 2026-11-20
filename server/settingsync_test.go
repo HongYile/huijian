@@ -72,7 +72,7 @@ func TestSettingsChangesRecorded(t *testing.T) {
 	expect("离开静音不广播", func() { st.SetAwaySilent(dev.ID, true) })
 	expect("Bark 设置不广播", func() { st.SetBarkConfig(dev.ID, barkConfig{URL: "https://api.day.app/x/"}) })
 	expect("配对码配对", func() {
-		code, err := st.CreatePairCode(alice.ID, 60e9, "")
+		code, err := st.CreatePairCode(alice.ID, 60e9, "", "")
 		if err != nil {
 			t.Fatal(err)
 		}

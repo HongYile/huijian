@@ -55,6 +55,7 @@ var serverFeatures = []feature{
 	{"register.invite", "注册模式和邀请码：/v1/info 的 register 为 closed / invite / open；invite 时 POST /v1/register 要带 invite_code", "0.9.0"},
 	{"register.e2e", "注册即开启加密：POST /v1/register 必须带 pub、password_wrap、auth_salt、auth_key（格式同 /v1/e2e/setup），返回设备 token 和 e2e；不带的旧客户端注册返回 400「请更新回笺客户端后注册」", "0.9.0"},
 	{"push.e2e", "服务器不保存明文：账号还没有加密钥匙时，明文推送返回 403（先在回笺客户端用密码登录一次），服务端系统通知直接丢弃", "0.9.0"},
+	{"pair.key", "配对码带钥匙：已解锁的设备生成的二维码 / 长配对码让新设备登录后直接解锁加密消息", "0.10.0"},
 }
 
 func (h *Hub) handleInfo(w http.ResponseWriter, r *http.Request) {

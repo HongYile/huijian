@@ -146,6 +146,44 @@ fn dispatch(m: &Map<String, Value>) -> R {
             Ok(json!({"key": b64(&crypto::recovery_key(&code)), "code": crypto::format_recovery(&code)}))
         }
 
+        // ---------- 配对码带钥匙（e2ee-client.md §12） ----------
+        "pair_key_new" => {
+            let sk = key32(m, "sk")?;
+            let r = crypto::random32().map_err(from_crypto)?;
+            let secret = &r[..16];
+            let w = crypto::wrap("hjc1", &crypto::pair_key(secret), &sk, None).map_err(from_crypto)?;
+            Ok(json!({"secret": crypto::format_recovery(secret), "wrap": w}))
+        }
+        "pair_key_open" => {
+            let secret = crypto::parse_recovery(s(m, "secret")?).map_err(|_| Fail("format", "配对码里的钥匙格式不对".into()))?;
+            let sk = crypto::unwrap("hjc1", &crypto::pair_key(&secret), s(m, "wrap")?)
+                .map_err(|_| Fail("format", "配对码里的钥匙对不上".into()))?;
+            if sk.len() != 32 {
+                return Err(Fail("format", "配对码锁住的私钥长度不对".into()));
+            }
+            Ok(json!({"data": b64(&sk)}))
+        }
+        "pair_format" => {
+            let code = s(m, "code")?;
+            if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(bad("code 应为 6 位数字"));
+            }
+            let secret = crypto::parse_recovery(s(m, "secret")?).map_err(|_| bad("secret 格式不对"))?;
+            let server = s(m, "server")?;
+            if !(server.starts_with("http://") || server.starts_with("https://")) {
+                return Err(bad("server 应以 http:// 或 https:// 开头"));
+            }
+            let text = format!("{code}-{}", crypto::format_recovery(&secret));
+            Ok(json!({"text": text, "link": format!("huijian://pair?server={}&code={}", pct_encode(server), text)}))
+        }
+        "pair_parse" => pair_parse(s(m, "input")?),
+        "qr" => {
+            let q = qrcode::QrCode::with_error_correction_level(s(m, "text")?.as_bytes(), qrcode::EcLevel::M)
+                .map_err(|_| bad("内容太长，生成不了二维码"))?;
+            let modules: String = q.to_colors().iter().map(|c| if *c == qrcode::Color::Dark { '1' } else { '0' }).collect();
+            Ok(json!({"size": q.width(), "modules": modules}))
+        }
+
         // ---------- 设备批准 ----------
         "grant_seal" => {
             let (enc, ct) = crypto::hpke_seal(&key32(m, "pub")?, crypto::INFO_GRANT, b"hjg1", &key32(m, "sk")?, None).map_err(from_crypto)?;
@@ -231,4 +269,77 @@ fn dispatch(m: &Map<String, Value>) -> R {
         }
         op => Err(bad(format!("不认识的操作 {op}"))),
     }
+}
+
+/// 解析用户输入的配对码：6 位配对码、长配对码（6 位 + 26 位一次性钥匙）、配对链接 huijian://pair?server=…&code=…
+fn pair_parse(input: &str) -> R {
+    let bad_fmt = || Fail("format", "配对码格式不对：应为 6 位数字，或扫码 / 复制得到的长配对码".into());
+    let input = input.trim();
+    let (mut server, mut code_str) = (None::<String>, input.to_string());
+    let lower = input.to_ascii_lowercase();
+    if lower.starts_with("huijian://pair") {
+        let query = input.split_once('?').map(|(_, q)| q).ok_or_else(bad_fmt)?;
+        code_str = String::new();
+        for kv in query.split('&') {
+            let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+            let v = pct_decode(v).ok_or_else(bad_fmt)?;
+            match k {
+                "server" => server = Some(v),
+                "code" => code_str = v,
+                _ => {}
+            }
+        }
+        if let Some(sv) = &server {
+            if !(sv.starts_with("http://") || sv.starts_with("https://")) || sv.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return Err(bad_fmt());
+            }
+        }
+    }
+    let compact: String = code_str.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.len() < 6 || !compact.as_bytes()[..6].iter().all(u8::is_ascii_digit) {
+        return Err(bad_fmt());
+    }
+    let (code, rest) = compact.split_at(6);
+    let mut out = json!({"code": code});
+    let rest = rest.trim_start_matches('-');
+    if !rest.is_empty() {
+        let secret = crypto::parse_recovery(rest).map_err(|_| bad_fmt())?;
+        out["secret"] = Value::String(crypto::format_recovery(&secret));
+    }
+    if let Some(sv) = server {
+        out["server"] = Value::String(sv);
+    }
+    Ok(out)
+}
+
+fn pct_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+fn pct_decode(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let (mut out, mut i) = (Vec::new(), 0);
+    while i < b.len() {
+        match b[i] {
+            b'%' => {
+                let h = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+                out.push(u8::from_str_radix(h, 16).ok()?);
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }

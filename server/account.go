@@ -28,8 +28,10 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -975,12 +977,36 @@ func (h *Hub) handleCreatePairCode(w http.ResponseWriter, r *http.Request, d *De
 		apiErr(w, 429, "这个账号已有 5 个未使用的配对码，请先用掉或等它们过期（3 分钟）")
 		return
 	}
-	code, err := h.st.CreatePairCode(d.UserID, pairCodeTTL, d.ID)
+	// 0.10.0：可带 key_wrap（e2ee-client.md §12）；旧客户端不带请求体
+	var in struct {
+		KeyWrap string `json:"key_wrap"`
+	}
+	if body, _ := io.ReadAll(io.LimitReader(r.Body, 2048)); len(strings.TrimSpace(string(body))) > 0 {
+		if err := json.Unmarshal(body, &in); err != nil {
+			apiErr(w, 400, "JSON 解析失败")
+			return
+		}
+	}
+	if in.KeyWrap != "" && !validPairKeyWrap(in.KeyWrap) {
+		apiErr(w, 400, "key_wrap 格式不对")
+		return
+	}
+	code, err := h.st.CreatePairCode(d.UserID, pairCodeTTL, d.ID, in.KeyWrap)
 	if err != nil {
 		apiErr(w, 500, "生成失败")
 		return
 	}
 	writeJSON(w, 200, map[string]any{"code": code, "expires_in": int(pairCodeTTL.Seconds())})
+}
+
+// validPairKeyWrap：hjc1.<base64url>，解开后是 12 字节 nonce + 32 字节私钥 + 16 字节标签
+func validPairKeyWrap(s string) bool {
+	rest, ok := strings.CutPrefix(s, "hjc1.")
+	if !ok || len(s) > 256 {
+		return false
+	}
+	raw, err := b64.DecodeString(rest)
+	return err == nil && len(raw) == 12+32+16
 }
 
 // GET /v1/pair-codes/{code}：配对码状态，生成它的客户端用来显示倒计时和「已被某台设备使用」（0.5.6 起）

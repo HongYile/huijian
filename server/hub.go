@@ -735,7 +735,7 @@ func (h *Hub) handlePair(w http.ResponseWriter, r *http.Request) {
 	if req.Platform == "" {
 		req.Platform = "unknown"
 	}
-	d, tok, reused, err := h.st.Pair(strings.TrimSpace(req.Code), pairReq{Name: req.Name, Platform: req.Platform,
+	d, tok, reused, keyWrap, err := h.st.PairWithKey(strings.TrimSpace(req.Code), pairReq{Name: req.Name, Platform: req.Platform,
 		Fingerprint: req.Fingerprint, IP: h.realIP(r), Client: clientLabel(clientHeader(r.Header, "Client"))})
 	if err != nil {
 		time.Sleep(500 * time.Millisecond)
@@ -747,7 +747,11 @@ func (h *Hub) handlePair(w http.ResponseWriter, r *http.Request) {
 	} else {
 		log.Printf("新设备配对: %s (%s/%s)", d.ID, d.Name, d.Platform)
 	}
-	writeJSON(w, 200, map[string]any{"device_id": d.ID, "name": d.Name, "token": tok, "reused": reused})
+	out := map[string]any{"device_id": d.ID, "name": d.Name, "token": tok, "reused": reused}
+	if keyWrap != "" {
+		out["key_wrap"] = keyWrap // 0.10.0：用一次性钥匙锁住的账号私钥，服务器解不开（e2ee-client.md §12）
+	}
+	writeJSON(w, 200, out)
 }
 
 func (h *Hub) handleMe(w http.ResponseWriter, r *http.Request, d *Device) {
