@@ -13,6 +13,15 @@ Only your devices can read them. The server can't.
 
 [Features](#features) · [Quick start](#quick-start) · [Sending messages](#sending-messages) · [Clients](#clients) · [Docs](#docs) · [License](#license)
 
+<br>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/mac-main-dark.png">
+  <img src="docs/screenshots/mac-main.png" width="820" alt="Mac client">
+</picture>
+
+<img src="docs/screenshots/ios-home.png" width="200" alt="iPhone inbox"> <img src="docs/screenshots/ios-markdown.png" width="200" alt="Huijian Markdown on iPhone"> <img src="docs/screenshots/android-home.png" width="200" alt="Android inbox"> <img src="docs/screenshots/android-markdown.png" width="200" alt="Huijian Markdown on Android">
+
 </div>
 
 ## Features

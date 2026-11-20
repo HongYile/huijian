@@ -15,6 +15,15 @@
 
 [特点](#特点) · [快速开始](#快速开始) · [发送消息](#发送消息) · [客户端](#客户端) · [文档](#文档) · [许可](#许可)
 
+<br>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/mac-main-dark.png">
+  <img src="docs/screenshots/mac-main.png" width="820" alt="Mac 客户端">
+</picture>
+
+<img src="docs/screenshots/ios-home.png" width="200" alt="iPhone 首页"> <img src="docs/screenshots/ios-markdown.png" width="200" alt="iPhone 上的回笺 Markdown"> <img src="docs/screenshots/android-home.png" width="200" alt="安卓首页"> <img src="docs/screenshots/android-markdown.png" width="200" alt="安卓上的回笺 Markdown">
+
 </div>
 
 ## 特点
