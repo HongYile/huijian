@@ -882,6 +882,13 @@ func buildDoc(m *Message) *docEntry {
 	return &docEntry{doc: d, raw: raw, preview: clip(docPlain(pv), 200)}
 }
 
+// forgetDoc：消息内容变了（补加密）时丢掉缓存的解析结果，内存里不留明文
+func forgetDoc(id int64) {
+	docCache.Lock()
+	delete(docCache.m, id)
+	docCache.Unlock()
+}
+
 // cachedDoc 返回消息的解析结果；type 为 text / image 或正文为空时返回 nil
 func cachedDoc(m *Message) *docEntry {
 	if m.Type == "text" || m.Type == "image" || strings.TrimSpace(m.Desp) == "" {

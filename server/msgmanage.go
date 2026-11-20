@@ -171,6 +171,10 @@ func (s *Store) deleteMessagesAs(userID int64, ids []int64, kind string) (delete
 	if _, err := tx.Exec(`DELETE FROM attachments WHERE message_id IN (`+ph+`)`, args...); err != nil {
 		return 0, nil, err
 	}
+	// 补加密换掉的旧附件 id 一并清掉：消息删了以后旧 id 返回 404，不再提示「已加密，请刷新」
+	if _, err := tx.Exec(`DELETE FROM sealed_atts WHERE message_id IN (`+ph+`)`, args...); err != nil {
+		return 0, nil, err
+	}
 	if _, err := tx.Exec(`DELETE FROM messages WHERE id IN (`+ph+`)`, args...); err != nil {
 		return 0, nil, err
 	}
@@ -313,15 +317,40 @@ func (fst *fileStore) remove(rels []string) {
 				found = true
 				removeOwnDir(filepath.Dir(p), root)
 			} else if !os.IsNotExist(err) {
-				log.Printf("删除附件文件失败（%s）：%v", rel, err)
+				log.Printf("删除附件文件失败（%s）：%v", blobTag(rel), safeErr(err)) // 路径里有标题和文件名，不进日志
 			}
 		}
 		if !found {
 			if err := fst.files.ready(); err != nil {
-				log.Printf("附件目录暂时不可用，没能删除附件文件 %s：%v", rel, err)
+				log.Printf("附件目录暂时不可用，没能删除附件文件（%s）：%v", blobTag(rel), safeErr(err))
 			}
 		}
 	}
+}
+
+// blobTag：日志里代替附件路径（路径里有消息标题和文件名）：同一个文件每次的标记一样，方便对照
+func blobTag(rel string) string { return "文件 " + sha256Hex(rel)[:12] }
+
+// removeBlob：删除一个附件文件（各个根目录里都试），删掉或确认已经不存在时返回 true；
+// 附件目录不可用、删除出错时返回 false（调用方稍后重试）
+func (fst *fileStore) removeBlob(rel string) bool {
+	if !safeRel(rel) {
+		return true
+	}
+	ok := true
+	for _, root := range fst.roots() {
+		p := filepath.Join(root, filepath.FromSlash(strings.ReplaceAll(rel, `\`, "/")))
+		if err := os.Remove(p); err == nil {
+			removeOwnDir(filepath.Dir(p), root)
+		} else if !os.IsNotExist(err) {
+			log.Printf("删除附件文件失败（%s）：%v", blobTag(rel), safeErr(err))
+			ok = false
+		}
+	}
+	if ok && fst.files.ready() != nil { // 附件目录（NAS）没挂上：文件可能还在那边，稍后再确认
+		return false
+	}
+	return ok
 }
 
 // removeOwnDir 删除附件所在的目录（只有它比「年/月/日」更深、且已经变空时）

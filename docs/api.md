@@ -38,6 +38,22 @@
 
 服务器检查信封格式和 kid 是否属于这个账号（钥匙已更换时返回 400，请重新复制加密发送密钥），存下的消息 `type` 为 `e2e`，`text` 是占位文字「🔒 加密消息（请把回笺更新到最新版查看）」，`desp` 为空。一次发给多个 pushkey 时，它们必须属于同一个账号。用加密发送密钥（带 `.e2e.`）却没有 `e2e` 字段时返回 400（多半是旧版命令行或 curl，避免误以为发出去的是加密的）。钥匙更换后，用已停用的旧钥匙加密的消息返回 400。账号打开「只接受加密消息」后，明文发送返回 403（一次发给多个账号时，任何一个打开了都拒收）；服务器自己产生的系统通知（管理后台发的消息、存储告警）不受这个开关限制。
 
+**服务器代加密**（0.8.0 起，功能 id `e2e.auto`，安全含义见 [e2ee.md](e2ee.md#服务器代加密080)）：所有账号都加密，服务器代加密**始终开启、没有开关**。账号开启了加密（有 active 钥匙）时，用普通 pushkey 发来的明文消息（没有 `e2e` 字段）由服务器收到后立即加密再保存：
+
+- 处理顺序：校验 → 加密 → 写库 → 推送给设备；写库之后再转发 Bark（跳转链接要用消息 id），用的是这次请求在内存里的明文（Bark 本来就由服务器转发明文，见上文「转发到 Bark」），不从库里读。上传的附件先以明文写到数据目录的 `tmp/`，加密完立即删除（失败也删，启动时清空 `tmp/`）；`os.Remove` 不擦除磁盘内容，磁盘快照可能拍到。
+- 写库的事务里核对加密用的钥匙仍然启用：加密和写库之间账号被重置过加密时，服务器重读公钥重新加密。读不到账号公钥（数据库出错、公钥损坏）时返回 **503**，不会退回明文存储。
+- 信封、载荷、附件格式和发送端加密**完全一样**：用账号当前 active 的公钥封成 `hje1` 信封，载荷 `{"v": 1, "text", "desp", "type", "atts"}`，标题最多 2000 字、正文最多 64 KB、信封超过 120 KB 时截短正文（规则同 `huijian push -k`）。`text` 为空时载荷里也为空，客户端用附件名代替；`type` 是校验后的值（`markdown` / `text` / `image`）。
+- 每个附件一把随机钥匙，按 `HJF1` 分块加密后保存，附件名写成 `encrypted-N.bin`、类型 `application/octet-stream`，`size` 和 `sha256` 都是密文的；真实名字、类型、明文大小在载荷的 `atts` 里。附件目录名用占位标题。明文临时文件处理完立即删除。
+- 存下的消息和发送端加密的一样（`type: "e2e"`、占位 `text`、`desp` 为空、没有 `doc` / `preview`），另外多一个 `"sealed": "server"`。发送端加密的消息没有这个字段。
+- 一次发给多个账号时，各账号分别处理：已开启加密的用各自的公钥加密（附件各存一份密文），还没有钥匙的账号先存明文。
+- 「只接受加密消息」打开时明文直接 403，不走代加密。
+- 服务器自己生成的消息（管理后台的测试消息、系统通知）同样代加密。
+- **补加密**：账号还没有钥匙时（新建后还没有客户端用密码登录过，或者开启加密以前的历史）收到的明文消息，在 `POST /v1/e2e/setup`、`POST /v1/e2e/reset` 成功后由服务器在后台补加密，格式同上（`sealed: "server"`，消息 id 不变）；服务启动时也会给已开启加密、还有明文的账号补一遍，明文消息写进已开启加密的账号时（开启加密的那一刻正好有推送）也会立即补。补加密时：
+  - 附件换成密文，并且**换新的附件 id**；旧 id 下载返回 `410 {"code": 410, "error": "附件已加密，请刷新消息", "reason": "sealed", "message_id": <消息 id>}`，绝不返回密文；消息之后被删掉时，旧 id 和其他不存在的附件一样返回 404；
+  - 同一个事务里给这条消息记一条 `kind: "sealed"` 的变更（`id` 是消息 id），客户端收到后用 `GET /v1/messages/{id}` 重新拉取（见下文「多设备同步」）；
+  - 旧的明文附件文件在同一个事务里登记待删，提交后删除；删不掉（NAS 掉线、文件被占用）的在启动时和每 10 分钟重试，同内容去重共用的文件不删。
+  附件文件读不到（NAS 掉线、被手动删除）的消息先跳过、保持明文，下次再试；管理后台「账号」页显示还剩几条明文，`POST /v1/e2e/delete-plain` 可以删掉它们。已经同步到设备上的本地副本不变；之前的备份（数据库快照、附件镜像）里仍有明文，需要时手动清理。
+
 加密只保证**保密**，不保证**来源**：拿到加密发送密钥的人、以及服务器本身都能往你的账号塞一条「加密消息」，也能改它的优先级和频道。客户端不要把 🔒 显示成「可信来源」。各端用 `server/testdata/e2e_vectors.json` 的测试向量核对实现。
 
 **优先级**
@@ -98,7 +114,7 @@ curl -F pushkey=PK_xxx -F text="exp42 完成" -F desp="val_loss **0.231**" -F pr
 | `GET /v1/prelogin?username=` | 0.7.0 起：登录前取密码派生参数。`{"kdf": "argon2id", "salt", "time", "memory_kib", "lanes"}`：按新协议登录；`{"kdf": "pbkdf2-sha256", "salt", "iterations"}`：还没升级的旧账号，客户端在本机算 PBKDF2-HMAC-SHA256(密码, salt, iterations, 32 字节)，作为 `password_key` 发送（不发密码原文）。账号不存在时返回由用户名算出的固定假盐（注册时「用户名已被占用」本来就能看出账号是否存在，这里只是不额外给出答案） |
 | `POST /v1/login` | `{"username", "password", "name", "platform", "fingerprint"}` → `{"device_id", "name", "token", "reused"}`；用户名不区分大小写。0.7.0 起可以不带 `password` 而带 `auth_key`（已升级的账号）或 `password_key`（旧账号），见下文「新登录协议」；带 `auth_key` 时响应多一个 `e2e: {"enabled", "keys", "password_wrap"}`。已升级的账号用 `password` / `password_key` 登录返回 426 |
 | `POST /v1/register` | 同上，注册新账号（管理员开放注册后才可用，否则 403）。新协议注册带 `auth_key` 和 `auth_salt`（客户端随机生成的 16 字节盐，十六进制），服务器从头到尾拿不到密码 |
-| `PUT /v1/account/auth` | 0.7.0 起：升级到新登录协议 / 改密码。`{"current_password" / "current_password_key" / "current_auth_key", "auth_salt", "auth_key", "password_wrap"}`；已开启加密时 `password_wrap`（用新密码锁住的私钥）必填（缺少时 400，和开启加密同时发生时 409） |
+| `PUT /v1/account/auth` | 0.7.0 起：升级到新登录协议 / 改密码。`{"current_password" / "current_password_key" / "current_auth_key", "auth_salt", "auth_key", "password_wrap", "kid"}`；已开启加密时 `password_wrap`（用新密码锁住的私钥）必填（缺少时 400，和开启加密同时发生时 409）。`kid`（0.8.0 起）是 `password_wrap` 里那把私钥的 kid，客户端用本机私钥算出；带了就必须是账号启用中的钥匙，否则 409（本机还留着重置加密以前的旧私钥），不带时不检查（兼容 0.7 客户端） |
 | `POST /v1/logout` | 本机 token 立即失效（设备记录保留） |
 | `GET /v1/account` | 账号信息和本账号全部设备：`{"account": {"id", "username", "has_password"}, "devices": [{…, "pair_count", "pairings": [{"at", "ip", "method", "client"}]}], "register_open"}` |
 | `POST /v1/account/credentials` | `{"username", "password", "current_password"}`：账号还没有密码时，只有「允许管理」的设备能设置（防止被拿到普通配对码的人抢先设密码）；已有密码时需要当前密码，「允许管理」的设备可直接重设。`password` 为空表示只改用户名。已升级到新登录协议的账号：改密码要用 `PUT /v1/account/auth`（这里带 `password` 返回 426），只改用户名时用 `current_auth_key` 核对 |
@@ -174,19 +190,22 @@ iPhone 客户端用 GBox 等工具自签安装，用不了苹果推送。锁屏�
 
 | 请求 | 说明 |
 |---|---|
-| `GET /v1/e2e` | 本账号的加密状态：`{"enabled", "keys": [{"kid", "pub", "active"}], "e2e_only", "auth_key"（是否已升级新登录协议）, "has_password_wrap", "recovery_wrap", "device": {"pub", "grant", "requested", "challenge", "revealed"}, "requests": [{"device_id", "name", "platform", "pub", "requested_at", "commit", "challenge", "reveal"}]}`。`requests` 是等待批准的其他设备 |
-| `POST /v1/e2e/setup` | 开启加密（同时升级登录协议）：`{"pub", "auth_salt", "auth_key", "password_wrap", "recovery_wrap", "current_password" / "current_password_key" / "current_auth_key"}` → `{"kid"}`。已开启返回 409 |
+| `GET /v1/e2e` | 本账号的加密状态：`{"enabled", "keys": [{"kid", "pub", "active"}], "e2e_only", "server_seal"（0.8.0 起，始终为 true）, "plain_messages"（0.8.0 起）, "auth_key"（是否已升级新登录协议）, "has_password_wrap", "recovery_wrap", "device": {"pub", "grant", "requested", "challenge", "revealed"}, "requests": [{"device_id", "name", "platform", "pub", "requested_at", "commit", "challenge", "reveal"}]}`。`enabled` = 有 active 的钥匙；`keys` 同时列出重置加密后停用的旧钥匙（`active: false`），客户端靠它们认出旧消息用的是哪把钥匙；`recovery_wrap` 为空表示没设置恢复码；`plain_messages`（0.8.0 起）是服务器上本账号还剩的明文消息条数（还没有钥匙、等待第一次用密码登录期间收到的消息只能先存明文，开启后服务器补加密）；`requests` 是等待批准的其他设备 |
+| `POST /v1/e2e/setup` | 开启加密（同时升级登录协议）：`{"pub", "auth_salt", "auth_key", "password_wrap", "recovery_wrap"（0.8.0 起可选，给了就校验格式）, "current_password" / "current_password_key" / "current_auth_key"}` → `{"kid"}`。只能在**从没开启过**时用：开启过（哪怕钥匙已停用）返回 409，换钥匙用 `reset` |
+| `POST /v1/e2e/reset` | 重置加密（0.8.0 起，功能 id `e2e.auto`）：`{"pub", "auth_salt", "auth_key", "password_wrap", "recovery_wrap"（可选）, "current_auth_key" / "current_password_key" / "current_password"}` → `{"kid"}`。当前密码凭证的核对同 setup；管理员重设密码后账号回到旧登录方式时用 `current_password_key`。在一个事务里：旧钥匙全部标成停用（保留）、删除全部锁住的副本（密码、恢复码、转交给设备的）、清掉所有设备进行中的批准请求、写入新钥匙（active）、换成新的 `auth_salt` / `auth_key`、写入新的 `password_wrap`，并记一条 `kind: "e2e"` 变更。从没开启过返回 409；同一把公钥重复提交（没收到上次响应又重试）照样成功。核对当前密码之后、写入之前凭证被改过（另一台设备抢先重置或改了密码）时返回 409，请刷新后重试；setup 也一样 |
 | `POST /v1/e2e/unlock` | 没输过密码的设备（配对码登录）解锁：`{"auth_key"}` → `{"password_wrap"}` |
 | `PUT /v1/e2e/device` | 登记本机公钥：`{"pub", "request", "commit"}`。`request: true` 时请求其他设备批准（必须带 `commit`）；每次调用都让之前的核对过程作废；公钥换了，原来转交给本机的副本作废 |
 | `POST /v1/e2e/challenge` | 批准设备接手请求：`{"device_id", "nonce"}`（na）。每个请求只能接手一次，否则 409 |
 | `POST /v1/e2e/reveal` | 新设备揭晓：`{"nonce"}`（nb），必须和承诺一致、只能揭晓一次，否则 409 |
-| `POST /v1/e2e/grant` | 批准另一台设备：`{"device_id", "pub", "grant"}`。对方必须在等待批准、已经揭晓 nb，`pub` 必须和对方当前登记的一致，否则 409。新设备收到转交的私钥后，必须核对它对应的公钥是账号的有效钥匙（`keys` 里 `active` 的那把），对不上就丢弃 |
+| `POST /v1/e2e/grant` | 批准另一台设备：`{"device_id", "pub", "grant", "kid"}`。`kid`（0.8.0 起）是转交的私钥的 kid，规则同改密码：不是启用中的钥匙返回 409。对方必须在等待批准、已经揭晓 nb，`pub` 必须和对方当前登记的一致，否则 409。新设备收到转交的私钥后，必须核对它对应的公钥是账号的有效钥匙（`keys` 里 `active` 的那把），对不上就丢弃 |
 | `POST /v1/e2e/deny` | 拒绝：`{"device_id"}` |
-| `PUT /v1/e2e/recovery` | 换恢复码：`{"recovery_wrap", "current_password" / "current_password_key" / "current_auth_key"}`，旧恢复码立即失效 |
-| `PATCH /v1/e2e` | `{"e2e_only": true/false}`：只接受加密消息 |
+| `PUT /v1/e2e/recovery` | 换恢复码：`{"recovery_wrap", "kid", "current_password" / "current_password_key" / "current_auth_key"}`，旧恢复码立即失效。`kid`（0.8.0 起）规则同改密码：不是启用中的钥匙返回 409 |
+| `PATCH /v1/e2e` | `{"e2e_only": true/false}` → `{"e2e_only", "server_seal": true}`：只接受加密消息（要求已开启加密）。服务器代加密不能关：带 `"server_seal": false` 返回 400，`true` 不改任何东西 |
 | `POST /v1/e2e/delete-plain` | `{"confirm": true}` → `{"deleted"}`：删除服务器上本账号的全部明文消息（加密消息不动）。删掉的消息记为 `kind: "purge"` 的变更（不是 `delete`），各设备保留已同步的本地副本。数据库开启了 `secure_delete`，删除后数据库文件里不残留原文；**之前做的备份不受影响**，需要的话请自行删除旧备份 |
 
-有设备请求批准、批准或拒绝后，同账号的长轮询会收到 `kind: "e2e"` 的变更（id 0），客户端重新 `GET /v1/e2e`。移除设备时，转交给它的副本一并删除。
+没有关闭加密的接口：`reset` 只是换一把新钥匙，账号始终保持加密。
+
+有设备请求批准、批准或拒绝、重置加密、改了 `e2e_only` 后，同账号的长轮询会收到 `kind: "e2e"` 的变更（id 0），客户端重新 `GET /v1/e2e`。移除设备时，转交给它的副本一并删除。
 
 ### `PATCH /v1/me`
 给本机改名：`{"name": "我的 MacBook"}`，返回同 `GET /v1/me`。名称可以重名；设备 ID 唯一，格式为 `d_<UTC 时间戳>_<4 位随机>`，例如 `d_20261117083015_a1b2`。
@@ -231,6 +250,8 @@ iPhone 客户端用 GBox 等工具自签安装，用不了苹果推送。锁屏�
 
 0.6.0 起（功能 id `markdown.doc`）`type` 不是 `text` / `image` 且正文非空的消息多两个字段：`preview`（纯文本预览，≤200 字）和 `doc`（服务端解析好的回笺 Markdown 结构，`{"v":1,"blocks":[…]}`，定义见 [markdown.md](markdown.md#给客户端开发者doc-结构)）。客户端按 `doc` 绘制，各端效果一致；没有 `doc` 时自己解析 `desp`。
 
+0.7.0 起加密消息带 `e2e`（信封），`type` 为 `e2e`，`text` 是占位文字；0.8.0 起服务器代加密的消息另外带 `"sealed": "server"`（见上文「服务器代加密」），发送端加密的没有这个字段。
+
 0.5.4 起消息多一个 `archive` 字段（没有时为 0）：`0` 自动（客户端按「超过 N 天自动归档」显示）、`1` 已归档、`2` 保留在收件箱（不再自动归档）。
 
 ### 删除与归档消息（0.5.4 起，功能 id `messages.manage`）
@@ -243,7 +264,7 @@ iPhone 客户端用 GBox 等工具自签安装，用不了苹果推送。锁屏�
 
 **多设备同步**：长轮询 `GET /v1/messages` 加上 `changes_since=<游标>` 后，响应多三个字段：
 
-- `changes`：游标之后本账号的删除 / 归档变更，`[{"seq": 41, "id": 123, "kind": "delete"}, {"seq": 42, "id": 124, "kind": "archive", "state": 1}]`；0.7.0 起还有 `kind: "purge"`：「删除服务器上的明文消息」删掉的消息，服务器上已经没有了，但客户端应当**保留**已同步的本地副本（记为「仅本机保留」，对账时也不删）；
+- `changes`：游标之后本账号的删除 / 归档变更，`[{"seq": 41, "id": 123, "kind": "delete"}, {"seq": 42, "id": 124, "kind": "archive", "state": 1}]`；0.7.0 起还有 `kind: "purge"`：「删除服务器上的明文消息」删掉的消息，服务器上已经没有了，但客户端应当**保留**已同步的本地副本（记为「仅本机保留」，对账时也不删）；0.8.0 起还有 `kind: "sealed"`：这条消息被服务器补加密了（附件也换了新 id，旧 id 下载返回 410），客户端用 `GET /v1/messages/{id}` 重新拉取，替换本地记录、丢弃旧附件缓存、按加密消息解密显示；
 - `changes_next`：下一次请求用的游标；
 - `changes_reset`：为 `true` 时游标已经失效（离线超过 90 天、变更记录已清理，或服务端数据库从备份恢复过），客户端应调用 `GET /v1/messages/state` 重新对账，再用返回的 `changes_next` 继续。
 
@@ -282,8 +303,21 @@ iPhone 客户端用 GBox 等工具自签安装，用不了苹果推送。锁屏�
 ### `GET /v1/stream?since=<id>`
 SSE 实时流（`event: message`，`id:` 为消息 id），每 20 秒发一次心跳。网络环境干净时可以用；如果中间有会缓冲响应的代理，请改用长轮询。
 
+### `GET /v1/messages/{id}`（0.8.0 起）
+取单条消息：`{"message": {…}}`，格式同列表。消息不存在（或本机设为不接收）时 404。收到 `kind: "sealed"` 的变更、或者下载附件遇到 `reason: "sealed"` 的 410 时用它重新拉取。
+
 ### `GET /v1/att/{id}`
 下载附件，支持 `Range` 断点续传。响应头 `X-Huijian-Sha256` 带文件的 sha256，客户端应在下载完成后校验。
+
+错误（0.8.0 起两种 410 用 `reason` 区分，客户端按 `reason` 判断，不要比较错误文字）：
+
+| 状态 | 响应 | 含义和处理 |
+|---|---|---|
+| 404 | `{"code": 404, "error": "附件不存在"}` | 附件或它所属的消息已经删除 |
+| 410 | `{"code": 410, "error": "附件已加密，请刷新消息", "reason": "sealed", "message_id": 123}` | 这条消息被服务器补加密过，附件换了新 id。用 `GET /v1/messages/{message_id}` 重新拉取消息（不要记成附件丢失，半截下载的文件丢掉重来） |
+| 410 | `{"code": 410, "error": "附件文件已丢失…", "reason": "missing"}` | 附件文件丢失（附件目录不可用或文件被删）。附件目录暂时不可用时稍后可能恢复 |
+
+0.8.0 以前的服务端没有 `reason`，丢失文件的 410 只有 `code` 和 `error`。
 
 ### 服务端存储与备份（需要「允许管理」）
 - `GET /v1/storage[?fresh=1]`：数据库、附件目录、备份目录的路径、占用、剩余空间，备份计划和上次结果。

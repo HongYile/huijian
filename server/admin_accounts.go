@@ -77,6 +77,7 @@ func (h *Hub) pageAccounts(w http.ResponseWriter, r *http.Request) {
 	d["Accounts"], _ = h.st.ListAccounts()
 	d["RegisterOpen"] = h.registerOpen()
 	d["Owner"] = h.st.OwnerID()
+	d["Enc"], d["Plain"] = h.st.E2EStatus() // 所有账号都应加密：标出还没开启的，以及开启后还剩的明文
 	render(w, "accounts", d)
 }
 
@@ -162,7 +163,7 @@ const adminAccountTemplates = `
 <div class="head"><div><h1>账号</h1><div class="sub">一个账号 = 一个人，有自己的 pushkey、设备和消息历史。设备用账号配对码或用户名密码加入账号。</div></div></div>
 
 <div class="card"><div class="card-h"><h2>所有账号</h2></div>
-<table class="tbl"><tr><th>账号</th><th>设备</th><th>Pushkey</th><th>消息</th><th>创建时间</th><th>状态</th><th class="r"></th></tr>
+<table class="tbl"><tr><th>账号</th><th>设备</th><th>Pushkey</th><th>消息</th><th>加密</th><th>创建时间</th><th>状态</th><th class="r"></th></tr>
 {{range .Accounts}}<tr class="{{if .Disabled}}rev{{end}}">
 <td><b>{{.Label}}</b>{{if eq .ID $.Owner}} <span class="chip acc" title="服务器自己的通知（备份失败、附件目录不可用）发给这个账号">第一个账号</span>{{end}}
 {{if not .HasPassword}}<div class="small muted">还没有密码：设置后可以在其他设备上用密码登录</div>{{end}}
@@ -170,6 +171,7 @@ const adminAccountTemplates = `
 <form method="post" action="/accounts/{{.ID}}/credentials" class="row"><input class="in" name="username" value="{{.Username}}" placeholder="用户名" required maxlength="64" style="width:140px">
 <input class="in" type="password" name="password" placeholder="{{if .HasPassword}}新密码（留空不改）{{else}}密码，至少 8 位{{end}}" minlength="8" autocomplete="new-password" style="width:180px"{{if not .HasPassword}} required{{end}}><button class="btn sm">保存</button></form></details></td>
 <td>{{.Devices}}</td><td>{{.Keys}}</td><td>{{.Messages}}</td>
+<td>{{$pl := index $.Plain .ID}}{{if index $.Enc .ID}}<span class="chip ok" title="消息在服务器上只有密文（发送端加密，或服务器收到后代为加密）">已加密</span>{{if $pl}} <span class="chip warn" title="开启加密以前的明文消息，服务器正在补加密；附件读不到的会跳过，下次启动再试">明文 {{$pl}} 条</span>{{end}}{{else}}<span class="chip warn" title="还没有加密钥匙：{{if .HasPassword}}用户第一次用密码登录新版客户端时自动开启{{else}}先设置密码，用户用密码登录新版客户端时自动开启{{end}}。在那之前收到的消息先以明文保存，开启后由服务器补加密">尚未加密（等待首次登录）</span>{{if $pl}} <span class="chip warn">明文 {{$pl}} 条</span>{{end}}{{end}}</td>
 <td class="muted" title="{{full .Created}}">{{rel .Created}}</td>
 <td>{{if .Disabled}}<span class="chip bad">已停用</span>{{else}}<span class="chip ok">正常</span>{{end}}</td>
 <td class="r"><a class="btn sm" href="/switch?u={{.ID}}&back=/devices">查看</a>

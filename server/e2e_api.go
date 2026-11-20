@@ -16,6 +16,7 @@ func (h *Hub) registerE2ERoutes(m *http.ServeMux) {
 	m.HandleFunc("GET /v1/prelogin", h.handlePrelogin)
 	m.HandleFunc("GET /v1/e2e", h.deviceAuth(h.handleE2EState))
 	m.HandleFunc("POST /v1/e2e/setup", h.deviceAuth(h.handleE2ESetup))
+	m.HandleFunc("POST /v1/e2e/reset", h.deviceAuth(h.handleE2EReset))
 	m.HandleFunc("POST /v1/e2e/unlock", h.deviceAuth(h.handleE2EUnlock))
 	m.HandleFunc("PUT /v1/e2e/device", h.deviceAuth(h.handleE2EDevice))
 	m.HandleFunc("POST /v1/e2e/challenge", h.deviceAuth(h.handleE2EChallenge))
@@ -100,10 +101,18 @@ func (h *Hub) handleE2EState(w http.ResponseWriter, r *http.Request, d *Device) 
 	if reqs == nil {
 		reqs = []E2ERequest{}
 	}
+	enabled := false
+	for _, k := range keys {
+		enabled = enabled || k.Active
+	}
 	writeJSON(w, 200, map[string]any{
-		"enabled":           len(keys) > 0,
-		"keys":              keys,
-		"e2e_only":          h.st.E2EOnly(d.UserID),
+		"enabled":     enabled,
+		"keys":        keys, // 含已停用的旧钥匙（active=false）：重置加密后，还留着旧私钥的设备靠它们解旧消息
+		"e2e_only":    h.st.E2EOnly(d.UserID),
+		"server_seal": true, // 0.8.0 起服务器代加密始终开启（没有开关）；客户端据此显示只读说明
+		// 0.8.0：服务器上还有几条明文消息。enabled 为假（还没有钥匙，等待第一次用密码登录）时收到的消息只能先存明文，
+		// 开启后由服务器补加密；补加密跳过的（附件读不到）也计在这里
+		"plain_messages":    h.st.PlainCount(d.UserID),
 		"auth_key":          a.AuthKey,
 		"has_password_wrap": h.st.HasWrap(d.UserID, wrapPassword),
 		"recovery_wrap":     h.st.Wrap(d.UserID, wrapRecovery, ""),
@@ -146,6 +155,18 @@ type authChange struct {
 	AuthSalt           string `json:"auth_salt"`
 	AuthKey            string `json:"auth_key"`
 	PasswordWrap       string `json:"password_wrap"`
+	// 0.8.0：password_wrap 里锁的私钥对应的 kid（客户端用本机私钥算出）。带了就必须是启用中的钥匙，否则 409；
+	// 防止还留着重置以前旧私钥的设备，把旧钥匙的副本覆盖到服务器上
+	KID string `json:"kid"`
+}
+
+// staleOr409：wrap 锁的钥匙已停用、凭证刚被改过时返回 409，其他错误交给调用方
+func staleOr409(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, errStaleKID) || errors.Is(err, errCredChanged) {
+		apiErr(w, 409, err.Error())
+		return true
+	}
+	return false
 }
 
 // readAuthChange：解析新的盐、登录凭证和（可选的）密码副本
@@ -170,49 +191,67 @@ func readAuthChange(w http.ResponseWriter, in *authChange, needWrap bool) ([]byt
 	return ak, true
 }
 
-// POST /v1/e2e/setup：开启端到端加密（同时升级到新登录协议）
-func (h *Hub) handleE2ESetup(w http.ResponseWriter, r *http.Request, d *Device) {
-	var in struct {
-		authChange
-		Pub          string `json:"pub"`
-		RecoveryWrap string `json:"recovery_wrap"`
-	}
+type e2eKeyChange struct {
+	authChange
+	Pub          string `json:"pub"`
+	RecoveryWrap string `json:"recovery_wrap"`
+}
+
+// readE2EKeyChange：setup 和 reset 共用的检查（新公钥、新登录凭证、密码副本、可选的恢复码副本、当前密码）。失败时已写好响应
+func (h *Hub) readE2EKeyChange(w http.ResponseWriter, r *http.Request, d *Device) (*E2ESetupInput, bool) {
+	var in e2eKeyChange
 	if !readJSON(w, r, &in) {
-		return
+		return nil, false
 	}
 	a, err := h.st.AccountByID(d.UserID)
 	if err != nil {
 		apiErr(w, 500, "查询失败")
-		return
+		return nil, false
 	}
 	if !a.HasPassword {
 		apiErr(w, 400, "请先设置用户名和密码，再开启加密")
-		return
-	}
-	if h.st.E2EEnabled(d.UserID) {
-		apiErr(w, 409, errE2EEnabled.Error())
-		return
+		return nil, false
 	}
 	pub, err := b64.DecodeString(in.Pub)
 	if err != nil || len(pub) != 32 {
 		apiErr(w, 400, "公钥格式不对")
-		return
+		return nil, false
 	}
 	ak, ok := readAuthChange(w, &in.authChange, true)
 	if !ok {
-		return
+		return nil, false
 	}
-	if !e2eValidWrap("hjr1", in.RecoveryWrap, 4096) {
-		apiErr(w, 400, "缺少用恢复码锁住的私钥 recovery_wrap（hjr1.…）")
-		return
+	// 0.8.0 起恢复码可选（自动开启、重置加密时不生成）；给了就校验格式
+	if in.RecoveryWrap != "" && !e2eValidWrap("hjr1", in.RecoveryWrap, 4096) {
+		apiErr(w, 400, "recovery_wrap 格式不对（hjr1.…）")
+		return nil, false
 	}
+	// 管理员重设密码后账号回到旧登录方式：checkCurrent 接受 current_password_key（PBKDF2）。
+	// 核对前先记下凭证快照，写入的事务里再比一次（核对和写入之间密码被改、或另一台设备抢先重置时拒绝）
+	snap := credSnapshot(h.st.db, a.ID)
 	if !h.checkCurrent(w, a, in.CurrentPassword, in.CurrentAuthKey, in.CurrentPasswordKey) {
+		return nil, false
+	}
+	return &E2ESetupInput{Salt: in.AuthSalt, AuthKey: ak, Pub: pub,
+		PasswordWrap: in.PasswordWrap, RecoveryWrap: in.RecoveryWrap, DeviceID: d.ID, CredSnap: snap}, true
+}
+
+// POST /v1/e2e/setup：开启端到端加密（同时升级到新登录协议）。只能在从没开启过时用，之后换钥匙走 /v1/e2e/reset
+func (h *Hub) handleE2ESetup(w http.ResponseWriter, r *http.Request, d *Device) {
+	if e2eEverEnabled(h.st.db, d.UserID) {
+		apiErr(w, 409, errE2EEnabled.Error())
 		return
 	}
-	kid, err := h.st.SetupE2E(d.UserID, E2ESetupInput{Salt: in.AuthSalt, AuthKey: ak, Pub: pub,
-		PasswordWrap: in.PasswordWrap, RecoveryWrap: in.RecoveryWrap, DeviceID: d.ID})
+	in, ok := h.readE2EKeyChange(w, r, d)
+	if !ok {
+		return
+	}
+	kid, err := h.st.SetupE2E(d.UserID, *in)
 	if errors.Is(err, errE2EEnabled) {
 		apiErr(w, 409, err.Error())
+		return
+	}
+	if staleOr409(w, err) {
 		return
 	}
 	if err != nil {
@@ -221,6 +260,36 @@ func (h *Hub) handleE2ESetup(w http.ResponseWriter, r *http.Request, d *Device) 
 		return
 	}
 	log.Printf("账号 #%d 开启端到端加密（钥匙 %s，设备 %s）", d.UserID, kid, d.ID)
+	h.startSealBacklog(d.UserID) // 开启以前收到的明文消息由服务器补加密
+	writeJSON(w, 200, map[string]any{"kid": kid})
+}
+
+// POST /v1/e2e/reset：重置加密（忘了密码又没有恢复码和其他设备，或者主动换钥匙）。
+// 旧钥匙停用保留，所有锁住的副本删除，进行中的批准作废，写入新钥匙和新密码副本
+func (h *Hub) handleE2EReset(w http.ResponseWriter, r *http.Request, d *Device) {
+	if !e2eEverEnabled(h.st.db, d.UserID) {
+		apiErr(w, 409, errE2ENotEnabled.Error()+"：请用 /v1/e2e/setup 开启")
+		return
+	}
+	in, ok := h.readE2EKeyChange(w, r, d)
+	if !ok {
+		return
+	}
+	kid, err := h.st.ResetE2E(d.UserID, *in)
+	if errors.Is(err, errE2ENotEnabled) {
+		apiErr(w, 409, err.Error())
+		return
+	}
+	if staleOr409(w, err) {
+		return
+	}
+	if err != nil {
+		log.Printf("重置加密失败（账号 #%d）：%v", d.UserID, err)
+		apiErr(w, 500, "重置加密失败")
+		return
+	}
+	log.Printf("账号 #%d 重置端到端加密（新钥匙 %s，设备 %s）", d.UserID, kid, d.ID)
+	h.startSealBacklog(d.UserID) // 之前补加密跳过的明文（附件读不到等）用新钥匙再试
 	writeJSON(w, 200, map[string]any{"kid": kid})
 }
 
@@ -246,8 +315,10 @@ func (h *Hub) handleAccountAuth(w http.ResponseWriter, r *http.Request, d *Devic
 	if !h.checkCurrent(w, a, in.CurrentPassword, in.CurrentAuthKey, in.CurrentPasswordKey) {
 		return
 	}
-	if err := h.st.SetPasswordAuth(d.UserID, in.AuthSalt, ak, in.PasswordWrap); errors.Is(err, errNeedPasswordWrap) {
+	if err := h.st.SetPasswordAuth(d.UserID, in.AuthSalt, ak, in.PasswordWrap, in.KID); errors.Is(err, errNeedPasswordWrap) {
 		apiErr(w, 409, err.Error())
+		return
+	} else if staleOr409(w, err) {
 		return
 	} else if err != nil {
 		apiErr(w, 500, "保存失败")
@@ -274,7 +345,7 @@ func (h *Hub) handleE2EUnlock(w http.ResponseWriter, r *http.Request, d *Device)
 		return
 	}
 	if !a.AuthKey || !h.st.HasWrap(d.UserID, wrapPassword) {
-		apiErr(w, 409, "用密码锁住的私钥已失效（管理员重设过密码）：请用恢复码或另一台设备解锁，再重新设置密码")
+		apiErr(w, 409, "用密码锁住的私钥已失效（管理员重设过密码）：请用恢复码或另一台设备解锁，再重新设置密码；都不行时可以重置加密")
 		return
 	}
 	if !h.checkCurrent(w, a, "", in.AuthKey, "") {
@@ -369,6 +440,7 @@ func (h *Hub) handleE2EGrant(w http.ResponseWriter, r *http.Request, d *Device) 
 		DeviceID string `json:"device_id"`
 		Pub      string `json:"pub"`
 		Grant    string `json:"grant"`
+		KID      string `json:"kid"` // 0.8.0：转交的私钥对应的 kid，带了就必须是启用中的钥匙
 	}
 	if !readJSON(w, r, &in) {
 		return
@@ -381,7 +453,9 @@ func (h *Hub) handleE2EGrant(w http.ResponseWriter, r *http.Request, d *Device) 
 		apiErr(w, 400, "grant 格式不对（hjg1.…）")
 		return
 	}
-	if err := h.st.GrantDevice(d.UserID, in.DeviceID, in.Pub, in.Grant); err != nil {
+	if err := h.st.GrantDevice(d.UserID, in.DeviceID, in.Pub, in.Grant, in.KID); staleOr409(w, err) {
+		return
+	} else if err != nil {
 		apiErr(w, 409, err.Error())
 		return
 	}
@@ -408,6 +482,7 @@ func (h *Hub) handleE2EDeny(w http.ResponseWriter, r *http.Request, d *Device) {
 func (h *Hub) handleE2ERecovery(w http.ResponseWriter, r *http.Request, d *Device) {
 	var in struct {
 		RecoveryWrap       string `json:"recovery_wrap"`
+		KID                string `json:"kid"` // 0.8.0：recovery_wrap 锁的私钥对应的 kid，带了就必须是启用中的钥匙
 		CurrentPassword    string `json:"current_password"`
 		CurrentAuthKey     string `json:"current_auth_key"`
 		CurrentPasswordKey string `json:"current_password_key"`
@@ -431,34 +506,44 @@ func (h *Hub) handleE2ERecovery(w http.ResponseWriter, r *http.Request, d *Devic
 	if !h.checkCurrent(w, a, in.CurrentPassword, in.CurrentAuthKey, in.CurrentPasswordKey) {
 		return
 	}
-	if err := h.st.SetRecoveryWrap(d.UserID, in.RecoveryWrap); err != nil {
+	if err := h.st.SetRecoveryWrap(d.UserID, in.RecoveryWrap, in.KID); staleOr409(w, err) {
+		return
+	} else if err != nil {
 		apiErr(w, 500, "保存失败")
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
-// PATCH /v1/e2e {e2e_only}：只接受加密消息（打开后明文发送会被拒收）
+// PATCH /v1/e2e {e2e_only}：只接受加密消息（打开后明文发送会被拒收）。
+// 服务器代加密始终开启：server_seal 只接受 true（不改任何东西），false 返回 400
 func (h *Hub) handleE2EUpdate(w http.ResponseWriter, r *http.Request, d *Device) {
 	var in struct {
-		E2EOnly *bool `json:"e2e_only"`
+		E2EOnly    *bool `json:"e2e_only"`
+		ServerSeal *bool `json:"server_seal"`
 	}
 	if !readJSON(w, r, &in) {
 		return
 	}
-	if in.E2EOnly == nil {
-		apiErr(w, 400, "缺少 e2e_only")
+	if in.E2EOnly == nil && in.ServerSeal == nil {
+		apiErr(w, 400, "缺少 e2e_only 或 server_seal")
 		return
 	}
-	if *in.E2EOnly && !h.st.E2EEnabled(d.UserID) {
+	if in.ServerSeal != nil && !*in.ServerSeal {
+		apiErr(w, 400, "服务器代加密始终开启，不能关闭（想让服务器完全看不到内容，请用加密发送密钥）")
+		return
+	}
+	if in.E2EOnly != nil && *in.E2EOnly && !h.st.E2EEnabled(d.UserID) {
 		apiErr(w, 409, "请先开启加密")
 		return
 	}
-	if err := h.st.SetE2EOnly(d.UserID, *in.E2EOnly); err != nil {
-		apiErr(w, 500, "保存失败")
-		return
+	if in.E2EOnly != nil {
+		if err := h.st.SetE2EOnly(d.UserID, *in.E2EOnly); err != nil {
+			apiErr(w, 500, "保存失败")
+			return
+		}
 	}
-	writeJSON(w, 200, map[string]any{"e2e_only": *in.E2EOnly})
+	writeJSON(w, 200, map[string]any{"e2e_only": h.st.E2EOnly(d.UserID), "server_seal": true})
 }
 
 // POST /v1/e2e/delete-plain {confirm:true}：删除服务器上这个账号的全部明文消息（加密消息不动；各设备本地已同步的照常保留）
@@ -486,7 +571,7 @@ func (h *Hub) handleE2EDeletePlain(w http.ResponseWriter, r *http.Request, d *De
 		ids = ids[n:]
 	}
 	// secure_delete 已把删掉的内容在数据库页里清零；再把 WAL 里的旧页写回并截断，磁盘上不留明文（历史备份不受影响）
-	h.st.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	h.st.truncateWAL("删除明文消息")
 	log.Printf("账号 #%d 删除服务器上的明文消息 %d 条", d.UserID, total)
 	writeJSON(w, 200, map[string]any{"deleted": total})
 }

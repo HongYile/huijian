@@ -134,6 +134,8 @@ type fileStore struct {
 	legacy   string // 数据目录/blobs：旧版本附件
 	mu       sync.Mutex
 	degraded bool // 正在使用本地暂存
+	// moveMu：搬回暂存附件（relocate，会改附件路径）和补加密（按读到的路径删旧明文文件）互斥
+	moveMu sync.Mutex
 }
 
 func newFileStore(h *Hub, filesDir string) *fileStore {
@@ -323,6 +325,8 @@ func (fst *fileStore) relocate() (int, error) {
 	if absPath(fst.files.dir) == absPath(fst.local) || fst.files.ready() != nil {
 		return 0, nil
 	}
+	fst.moveMu.Lock()
+	defer fst.moveMu.Unlock()
 	n := 0
 	err := filepath.WalkDir(fst.local, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || hasPartSuffix(d.Name()) {
@@ -451,7 +455,7 @@ func (h *Hub) notice(kind string, prio int, title, body string) {
 	}
 	noticeLast[kind] = time.Now()
 	noticeMu.Unlock()
-	if _, _, err := h.st.InsertMessage(NewMessage{UserID: h.userID, Topic: "huijian", Priority: prio, Type: "markdown",
+	if _, _, err := h.insertServerMessage(NewMessage{UserID: h.userID, Topic: "huijian", Priority: prio, Type: "markdown",
 		Text: title, Desp: body, Source: "回笺服务端"}); err != nil {
 		log.Printf("发送系统通知失败: %v", err)
 		return

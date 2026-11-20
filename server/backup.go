@@ -409,8 +409,9 @@ func (h *Hub) startBackground() func() {
 				}
 			case <-relocateEvery.C:
 				if _, err := h.files.relocate(); err != nil {
-					log.Printf("搬回暂存附件失败: %v", err)
+					log.Printf("搬回暂存附件失败: %v", safeErr(err))
 				}
+				h.unlinkPending(nil) // 补加密后没删掉的旧明文附件（NAS 掉线、文件被占用时）
 			}
 		}
 	}()
@@ -657,13 +658,17 @@ func runRestore(args []string) int {
 		os.MkdirAll(h.paths.files, 0o750)
 	}
 	target := h.files.writeRoot()
-	// 只补缺失的附件（附件目录已经是原来的 NAS 时，基本不用复制）
-	n, err := mirrorTree(filepath.Join(root, "files"), target, false, false)
+	// 只补缺失的、而且是这份数据库还引用着的附件（附件目录已经是原来的 NAS 时，基本不用复制）。
+	// 附件镜像只增不删：补加密以前的明文附件、删掉的消息的附件都还在镜像里，不能把它们带回附件目录
+	n, skipped, err := restoreReferencedFiles(h.st.db, filepath.Join(root, "files"), target)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "恢复附件失败：", err)
 		return 1
 	}
 	fmt.Printf("✅ 附件补齐 %d 个 → %s\n", n, absPath(target))
+	if skipped > 0 {
+		fmt.Printf("   备份里另有 %d 个文件这份数据库已经不用（删掉的消息、补加密以前的明文附件），没有恢复\n", skipped)
+	}
 	if target != h.paths.files {
 		fmt.Println("⚠️ 附件目录", h.paths.files, "现在不可用，附件先放在本地暂存，服务端启动后目录可用时会自动搬过去")
 	}
@@ -676,6 +681,50 @@ func runRestore(args []string) int {
 	}
 	fmt.Println("完成。现在可以启动服务端。")
 	return 0
+}
+
+// restoreReferencedFiles：把备份附件镜像 src 里、数据库还引用着的附件补到 dst（已存在的不覆盖）。
+// 返回补了几个，以及镜像里有、但数据库已经不用的文件个数（没有恢复）
+func restoreReferencedFiles(db *sql.DB, src, dst string) (copied, skipped int, err error) {
+	rows, err := db.Query(`SELECT DISTINCT blob FROM attachments`)
+	if err != nil {
+		return 0, 0, err
+	}
+	used := map[string]bool{}
+	for rows.Next() {
+		var b string
+		if rows.Scan(&b) == nil && safeRel(b) {
+			used[filepath.ToSlash(b)] = true
+		}
+	}
+	rows.Close()
+	if _, err := os.Stat(src); err != nil {
+		return 0, 0, nil // 备份里没有附件镜像
+	}
+	err = filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || strings.HasPrefix(d.Name(), ".") || hasPartSuffix(d.Name()) {
+			return nil
+		}
+		relOS, _ := filepath.Rel(src, p)
+		rel := filepath.ToSlash(relOS)
+		if !used[rel] {
+			skipped++
+			return nil
+		}
+		to := filepath.Join(dst, relOS)
+		if _, err := os.Stat(to); err == nil {
+			return nil
+		}
+		if err := os.MkdirAll(filepath.Dir(to), 0o750); err != nil {
+			return err
+		}
+		if err := copyFileSync(p, to); err != nil {
+			return fmt.Errorf("复制附件（%s）：%w", blobTag(rel), safeErr(err))
+		}
+		copied++
+		return nil
+	})
+	return copied, skipped, err
 }
 
 func snapshotMessages(p string) (int, error) {

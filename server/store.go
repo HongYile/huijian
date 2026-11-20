@@ -390,7 +390,9 @@ type Message struct {
 	Preview string          `json:"preview,omitempty"`
 	// 0.7.0 起：端到端加密的信封（hje1.…，见 docs/e2ee.md）。有它时标题、正文、附件名都在信封里，
 	// text 只是给旧客户端看的占位文字，type 为 e2e，附件是密文（名字也是占位的）
-	E2E    string `json:"e2e,omitempty"`
+	E2E string `json:"e2e,omitempty"`
+	// 0.8.0 起：服务器代加密的消息为 "server"（发送端用明文发来，服务器收到后立即加密保存）；发送端加密的没有这个字段
+	Sealed string `json:"sealed,omitempty"`
 	userID int64
 }
 
@@ -410,6 +412,8 @@ type NewMessage struct {
 	SrcIP     string
 	Idem      string
 	E2E       string       // 端到端加密的信封（hje1.…）；有它时 Text 是给旧客户端看的占位文字，Desp 为空
+	Sealed    string       // "server"：服务器代加密
+	SealKID   string       // 代加密用的钥匙：写库的事务里核对它仍然启用，否则返回 errKeyChanged
 	Files     []Attachment // blob/name/mime/size/sha256 已填好
 }
 
@@ -425,8 +429,15 @@ func (s *Store) InsertMessage(m NewMessage) (id int64, dup bool, err error) {
 			return id, true, nil
 		}
 	}
-	res, err := tx.Exec(`INSERT INTO messages(user_id,pushkey_id,topic,thread,priority,type,text,desp,source,src_ip,created_at,idem,e2e)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, m.UserID, m.PushkeyID, m.Topic, m.Thread, m.Priority, m.Type, m.Text, m.Desp, m.Source, m.SrcIP, now(), m.Idem, m.E2E)
+	if m.SealKID != "" {
+		if ok, err := kidActive(tx, m.UserID, m.SealKID); err != nil {
+			return 0, false, err
+		} else if !ok {
+			return 0, false, errKeyChanged
+		}
+	}
+	res, err := tx.Exec(`INSERT INTO messages(user_id,pushkey_id,topic,thread,priority,type,text,desp,source,src_ip,created_at,idem,e2e,sealed)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, m.UserID, m.PushkeyID, m.Topic, m.Thread, m.Priority, m.Type, m.Text, m.Desp, m.Source, m.SrcIP, now(), m.Idem, m.E2E, m.Sealed)
 	if err != nil {
 		return 0, false, err
 	}
@@ -440,12 +451,19 @@ func (s *Store) InsertMessage(m NewMessage) (id int64, dup bool, err error) {
 	return id, false, tx.Commit()
 }
 
+// MessageIDByIdem：这个账号用这个幂等键记过的消息（没有时为 0）
+func (s *Store) MessageIDByIdem(userID int64, idem string) int64 {
+	var id int64
+	s.db.QueryRow(`SELECT id FROM messages WHERE user_id=? AND idem=?`, userID, idem).Scan(&id)
+	return id
+}
+
 // Messages 返回 id > since 的消息（升序）。since<0 表示取最新 limit 条。
 // deviceID 非空时，跳过这台设备设为「不接收」的 pushkey 发来的消息。
 func (s *Store) Messages(userID int64, deviceID string, since int64, limit int) ([]Message, error) {
 	var rows *sql.Rows
 	var err error
-	cols := `id,user_id,topic,thread,priority,type,text,desp,source,created_at,COALESCE(pushkey_id,0),archive,e2e`
+	cols := `id,user_id,topic,thread,priority,type,text,desp,source,created_at,COALESCE(pushkey_id,0),archive,e2e,sealed`
 	where := `user_id=? AND NOT EXISTS (SELECT 1 FROM device_keys dk WHERE dk.device_id=? AND dk.pushkey_id=messages.pushkey_id AND dk.mode='off')`
 	if since < 0 {
 		rows, err = s.db.Query(`SELECT * FROM (SELECT `+cols+` FROM messages WHERE `+where+` ORDER BY id DESC LIMIT ?) ORDER BY id`, userID, deviceID, limit)
@@ -460,7 +478,7 @@ func (s *Store) Messages(userID int64, deviceID string, since int64, limit int) 
 	for rows.Next() {
 		var m Message
 		var ts int64
-		if err := rows.Scan(&m.ID, &m.userID, &m.Topic, &m.Thread, &m.Priority, &m.Type, &m.Text, &m.Desp, &m.Source, &ts, &m.PushkeyID, &m.Archive, &m.E2E); err != nil {
+		if err := rows.Scan(&m.ID, &m.userID, &m.Topic, &m.Thread, &m.Priority, &m.Type, &m.Text, &m.Desp, &m.Source, &ts, &m.PushkeyID, &m.Archive, &m.E2E, &m.Sealed); err != nil {
 			rows.Close()
 			return nil, err
 		}

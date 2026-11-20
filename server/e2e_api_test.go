@@ -179,6 +179,13 @@ func TestE2EFlow(t *testing.T) {
 		t.Fatalf("kid = %s", kid)
 	}
 	e.must(409, "POST", "/v1/e2e/setup", tokA, setup)
+	// 开启以前的明文消息（plain-1）由服务器补加密（setup 后在后台跑；这里等它跑完）
+	e.h.sealBacklog(alice.ID)
+	if ms := e.messages(tokA); ms[0]["sealed"] != "server" || ms[0]["text"] != e2ePlaceholder {
+		t.Fatalf("开启前的明文没有补加密：%v", ms[0])
+	} else if pt, err := e2eOpenMessage(sk, ms[0]["e2e"].(string)); err != nil || !strings.Contains(string(pt), `"text":"plain-1"`) {
+		t.Fatalf("补加密的内容：%s %v", pt, err)
+	}
 
 	// 升级后：prelogin 给真盐；密码原文登录 426；凭证登录拿到密码副本，本机解开
 	if out := e.must(200, "GET", "/v1/prelogin?username=alice", "", nil); out["salt"] != saltHex || out["kdf"] != "argon2id" {
@@ -381,7 +388,10 @@ func TestE2EFlow(t *testing.T) {
 		t.Fatalf("unlock = %v", w)
 	}
 
-	// 删除服务器上的明文消息：只删明文，加密消息保留
+	// 删除服务器上的明文消息：只删明文，加密消息保留（补加密跳过的消息，例如附件读不到，会留成明文）
+	if _, _, err := e.h.st.InsertMessage(NewMessage{UserID: alice.ID, PushkeyID: pk.ID, Topic: "default", Priority: 3, Type: "markdown", Text: "plain-1"}); err != nil {
+		t.Fatal(err)
+	}
 	e.must(400, "POST", "/v1/e2e/delete-plain", tokA, map[string]any{})
 	del := e.must(200, "POST", "/v1/e2e/delete-plain", tokA, map[string]any{"confirm": true})
 	if del["deleted"].(float64) != 1 {
@@ -431,7 +441,7 @@ func TestE2EFlow(t *testing.T) {
 	salt3x, salt3xHex := newSalt(t)
 	auth3x, _ := e2ePasswordKeys("admin-reset-pass-3", salt3x)
 	e.must(400, "PUT", "/v1/account/auth", tokA, map[string]any{"current_password": "admin-reset-pass-3", "auth_salt": salt3xHex, "auth_key": b64of(auth3x)})
-	if err := e.h.st.SetPasswordAuth(alice.ID, salt3xHex, auth3x, ""); !errors.Is(err, errNeedPasswordWrap) {
+	if err := e.h.st.SetPasswordAuth(alice.ID, salt3xHex, auth3x, "", ""); !errors.Is(err, errNeedPasswordWrap) {
 		t.Fatalf("存储层也要拦住：%v", err)
 	}
 	// 重新升级（用恢复码解开私钥后，用新密码再锁一份）

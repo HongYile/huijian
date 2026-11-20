@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ecdh"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -106,6 +107,7 @@ func runHub() {
 		log.Printf("附件目录 %s", absPath(h.paths.files))
 	}
 	stopBg := h.startBackground()
+	h.startAllSealBacklogs() // 已开启加密的账号里还有明文消息（开启以前的历史、上次附件读不到跳过的）：后台补加密
 
 	pub := &http.Server{
 		Addr:              env("HUIJIAN_PUBLIC_ADDR", "127.0.0.1:8790"),
@@ -259,6 +261,7 @@ func (h *Hub) publicMux() http.Handler {
 	m.HandleFunc("POST /v1/presence", h.deviceAuth(h.handlePresence))
 	m.HandleFunc("POST /v1/admin/link", h.deviceAuth(h.handleAdminLink))
 	m.HandleFunc("GET /v1/messages", h.deviceAuth(h.handleMessages))
+	m.HandleFunc("GET /v1/messages/{id}", h.deviceAuth(h.handleMessage))
 	m.HandleFunc("GET /v1/stream", h.deviceAuth(h.handleStream))
 	m.HandleFunc("GET /v1/att/{id}", h.deviceAuth(h.handleAtt))
 	m.HandleFunc("GET /v1/update", h.deviceAuth(h.handleUpdate))
@@ -528,7 +531,7 @@ func (h *Hub) handlePush(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		if sendKey { // 用了加密发送密钥却没加密：多半是旧版命令行 / SDK 或 curl，不能让人以为发出去的是加密的
-			apiErr(w, 400, "这是加密发送密钥，但消息没有加密：请用新版 huijian 命令行或 Python SDK 发送；只能用 curl 时请改用普通 pushkey（内容是明文）")
+			apiErr(w, 400, "这是加密发送密钥，但消息没有加密：请用新版 huijian 命令行或 Python SDK 发送；只能用 curl 时请改用普通 pushkey（明文发到服务器，开启了加密的账号由服务器收到后代为加密）")
 			return
 		}
 		for _, pk := range pks {
@@ -542,6 +545,7 @@ func (h *Hub) handlePush(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 400, "缺少 text")
 		return
 	}
+	sealText := text // 代加密时信封里的标题：和发送端加密一样，为空时由客户端用附件名代替
 	if text == "" {
 		names := make([]string, len(files))
 		for i, f := range files {
@@ -586,22 +590,14 @@ func (h *Hub) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 附件落盘：按日期分目录（年/月/日/时分秒_标题/文件名），同样内容的文件只存一份
-	var atts []Attachment
-	if len(files) > 0 {
-		rels, err := h.files.save(files, text, time.Now())
-		if err != nil {
-			log.Printf("保存附件失败: %v", err)
-			apiErr(w, 500, "保存附件失败")
-			return
-		}
-		for i, f := range files {
-			atts = append(atts, Attachment{Name: f.name, Mime: f.mime, Size: f.size, Sha256: f.sha256, blob: rels[i]})
-		}
+	// 每个账号一条消息（同一账号的多个 pushkey 只投递一次）：
+	// 发送端加密的原样保存；开启了加密的账号由服务器用各自的公钥加密（代加密始终开启）；还没有钥匙的账号先存明文，开启后补加密
+	type target struct {
+		pk   *Pushkey
+		seal *ecdh.PublicKey
+		msg  NewMessage
 	}
-
-	// 同一用户的多个 pushkey 只投递一次
-	var ids []string
+	var targets []*target
 	done := map[int64]bool{}
 	for _, pk := range pks {
 		h.st.TouchPushkey(pk.ID)
@@ -609,21 +605,91 @@ func (h *Hub) handlePush(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		done[pk.UserID] = true
-		id, dup, err := h.st.InsertMessage(NewMessage{
-			UserID: pk.UserID, PushkeyID: pk.ID, Topic: topic, Thread: thread, Priority: prio,
-			Type: typ, Text: text, Desp: desp, Source: pk.Name, SrcIP: ip, Idem: idem, Files: atts, E2E: env,
-		})
+		t := &target{pk: pk, msg: NewMessage{UserID: pk.UserID, PushkeyID: pk.ID, Topic: topic, Thread: thread, Priority: prio,
+			Type: typ, Text: text, Desp: desp, Source: pk.Name, SrcIP: ip, Idem: idem, E2E: env}}
+		if env == "" {
+			pub, err := h.st.E2EActivePub(pk.UserID)
+			if err != nil { // 读不到公钥时不能当成「没开启」存明文
+				log.Printf("读取账号 #%d 的公钥失败：%v", pk.UserID, err)
+				apiErr(w, 503, "服务器暂时无法加密这条消息，请稍后重试")
+				return
+			}
+			t.seal = pub
+		}
+		targets = append(targets, t)
+	}
+	ids := make([]string, len(targets))
+	sent := func(uid, id int64, dup bool, bark *barkPlain) {
+		if dup {
+			log.Printf("幂等键重复，返回已有消息 #%d", id)
+			return
+		}
+		h.br.Notify(uid)
+		go h.forwardBark(uid, id, bark)
+	}
+
+	// 1. 代加密的账号：各自加密附件、落盘、写库（写库时核对钥匙仍然启用，被重置时重新加密）
+	for i, t := range targets {
+		if t.seal == nil {
+			continue
+		}
+		id, dup, err := h.pushSealed(t.seal, t.msg, sealText, files)
+		if err != nil {
+			var pe *pushError
+			if errors.As(err, &pe) {
+				apiErr(w, pe.code, pe.msg)
+			} else {
+				apiErr(w, 500, "写入消息失败")
+			}
+			return
+		}
+		ids[i] = strconv.FormatInt(id, 10)
+		sent(t.pk.UserID, id, dup, &barkPlain{Text: text, Desp: desp, Type: typ}) // Bark 照旧转发明文（Bark 本来就由服务器转发明文）
+	}
+
+	// 2. 明文（还没有钥匙的账号）和发送端密文：附件落盘一次（年/月/日/时分秒_标题/文件名，同样内容只存一份），各账号共用
+	var rels []string
+	var atts []Attachment
+	needFiles := false
+	for _, t := range targets {
+		needFiles = needFiles || t.seal == nil
+	}
+	if len(files) > 0 && needFiles {
+		var err error
+		if rels, err = h.files.save(files, text, time.Now()); err != nil {
+			log.Printf("保存附件失败: %v", safeErr(err))
+			apiErr(w, 500, "保存附件失败")
+			return
+		}
+		for i, f := range files {
+			atts = append(atts, Attachment{Name: f.name, Mime: f.mime, Size: f.size, Sha256: f.sha256, blob: rels[i]})
+		}
+	}
+	removeTemps(files) // 明文临时文件：用完立即删除
+	used := false      // 落盘的附件有没有被写进库（全是幂等重复或写库失败时删掉）
+	defer func() {
+		if !used {
+			h.files.remove(rels)
+		}
+	}()
+	for i, t := range targets {
+		if t.seal != nil {
+			continue
+		}
+		t.msg.Files = atts
+		id, dup, err := h.st.InsertMessage(t.msg)
 		if err != nil {
 			log.Printf("写入消息失败: %v", err)
 			apiErr(w, 500, "写入消息失败")
 			return
 		}
-		ids = append(ids, strconv.FormatInt(id, 10))
-		if dup {
-			log.Printf("幂等键重复，返回已有消息 #%d", id)
-		} else {
-			h.br.Notify(pk.UserID)
-			go h.forwardBark(pk.UserID, id)
+		used = used || !dup
+		ids[i] = strconv.FormatInt(id, 10)
+		sent(t.pk.UserID, id, dup, nil)
+		if env == "" && !dup { // 读公钥之后、写库之前账号刚开启加密：这条明文交给补加密
+			if pub, err := h.st.E2EActivePub(t.pk.UserID); err != nil || pub != nil {
+				h.startSealBacklog(t.pk.UserID)
+			}
 		}
 	}
 	writeJSON(w, 200, map[string]any{"code": 0, "content": map[string]any{"result": ids}})
@@ -781,6 +847,28 @@ func parseSince(r *http.Request) int64 {
 		return -1
 	}
 	return v
+}
+
+// GET /v1/messages/{id}：取单条消息（格式同列表）。0.8.0 起客户端收到 kind "sealed" 的变更后用它重新拉取被补加密的消息
+func (h *Hub) handleMessage(w http.ResponseWriter, r *http.Request, d *Device) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		apiErr(w, 400, "消息 id 不对")
+		return
+	}
+	msgs, err := h.st.Messages(d.UserID, d.ID, id-1, 1)
+	if err != nil {
+		apiErr(w, 500, "查询失败")
+		return
+	}
+	if len(msgs) == 0 || msgs[0].ID != id {
+		apiErr(w, 404, "消息不存在")
+		return
+	}
+	h.decorate(d, msgs)
+	attachDocs(msgs)
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, 200, map[string]any{"message": msgs[0]})
 }
 
 func (h *Hub) handleMessages(w http.ResponseWriter, r *http.Request, d *Device) {
@@ -980,17 +1068,25 @@ func (h *Hub) handleAtt(w http.ResponseWriter, r *http.Request, d *Device) {
 func (h *Hub) serveAttachment(w http.ResponseWriter, r *http.Request, userID int64, attID string) {
 	a, err := h.st.AttachmentFor(userID, attID)
 	if err != nil {
+		if msgID, ok := h.st.SealedAttachment(userID, attID); ok { // 0.8.0 补加密换掉的旧 id：绝不返回密文，让客户端重新拉取消息
+			writeJSON(w, 410, map[string]any{"code": 410, "error": "附件已加密，请刷新消息", "reason": "sealed", "message_id": msgID})
+			return
+		}
 		apiErr(w, 404, "附件不存在")
 		return
 	}
+	// 文件找不到也是 410，用 reason 区分（0.8.0 起）：missing = 文件丢失，sealed = 已补加密
+	missing := func(msg string) {
+		writeJSON(w, 410, map[string]any{"code": 410, "error": msg, "reason": "missing"})
+	}
 	p, ok := h.files.find(a.blob)
 	if !ok {
-		apiErr(w, 410, "附件文件已丢失（附件目录不可用或文件被删除）")
+		missing("附件文件已丢失（附件目录不可用或文件被删除）")
 		return
 	}
 	f, err := os.Open(p)
 	if err != nil {
-		apiErr(w, 410, "附件文件已丢失")
+		missing("附件文件已丢失")
 		return
 	}
 	defer f.Close()

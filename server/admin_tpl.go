@@ -18,8 +18,10 @@ svg{display:block}
 .app{display:flex;min-height:100vh}
 .side{width:224px;flex:none;background:var(--sidebar);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:18px 12px 14px;position:sticky;top:0;height:100vh}
 .brand{display:flex;align-items:center;gap:10px;padding:2px 8px 22px;font-weight:650;font-size:15px;letter-spacing:-.01em}
-.logo{width:30px;height:30px;border-radius:8px;background:linear-gradient(150deg,#5B74C9,#34488F);display:grid;place-items:center;color:#fff;box-shadow:0 2px 6px rgba(52,72,143,.35)}
-.logo svg{width:18px;height:18px}
+.logo{--lg-bg:#F4F1EA;--lg-env:#4A63B5;--lg-line:#2B2924;--lg-flap:#F4F1EA;--lg-arrow:#4A63B5;--lg-spark:#D44C3D;
+width:30px;height:30px;border-radius:8px;overflow:hidden;flex:none;border:1px solid var(--border);box-shadow:0 1px 3px rgba(60,48,30,.12)}
+@media (prefers-color-scheme:dark){.logo{--lg-bg:#1A1917;--lg-env:#5B74C9;--lg-line:#EBE6DC;--lg-flap:#1A1917;--lg-arrow:#8EA2EC;--lg-spark:#E06A5A;box-shadow:none}}
+.logo svg{width:100%;height:100%}
 .brand small{display:block;font-weight:500;font-size:11.5px;color:var(--text3);letter-spacing:0}
 .nav a{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:7px;color:var(--text2);font-weight:500;margin-bottom:2px;text-decoration:none}
 .nav a:hover{background:var(--surface2);color:var(--text)}
@@ -162,6 +164,8 @@ form.inline{display:inline;margin:0}
 .key .nm{font-weight:600;font-size:14px}
 .key .when{margin-left:auto;color:var(--text3);font-size:12px;display:flex;gap:14px}
 .keyline{display:flex;align-items:center;gap:6px;margin-top:10px}
+.keyline .kl{flex:none;width:92px;color:var(--text3);font-size:12px}
+.keyhint{line-height:1.75}.keyhint b{color:var(--text2);font-weight:600}.keyhint code{font-size:11.5px;background:var(--surface2);padding:1px 5px;border-radius:4px}
 .keyline code{font-size:12.5px;background:var(--surface2);padding:7px 10px;border-radius:6px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
 .snipbox{margin-top:12px;border:1px solid var(--border);border-radius:8px;overflow:hidden}
 .tabs{display:flex;gap:2px;padding:0 6px;background:var(--surface2);border-bottom:1px solid var(--border);align-items:center}
@@ -191,7 +195,6 @@ pre.snip{margin:0;padding:12px 14px;font-size:12px;line-height:1.65;white-space:
 .login{min-height:100vh;display:grid;place-items:center;padding:24px}
 .login .card{width:380px;max-width:100%;padding:30px 28px 24px;margin:0}
 .login .logo{width:44px;height:44px;border-radius:12px;margin-bottom:16px}
-.login .logo svg{width:26px;height:26px}
 .login h1{font-size:19px}
 .login .in{width:100%;height:38px;margin:18px 0 12px}
 .login .btn{width:100%;height:38px;margin-top:16px}
@@ -210,7 +213,8 @@ form.search{margin:0 0 12px;gap:6px}
 </style>{{end}}`
 
 const adminIcons = `
-{{define "i-logo"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.6 8.2 Q10.3 5.9 12 8.4 Q13.7 5.9 15.4 8.2"/><path d="M4.9 12.6 Q6.1 11 7.3 12.8 Q8.5 11 9.7 12.6"/><path d="M14.3 12.6 Q15.5 11 16.7 12.8 Q17.9 11 19.1 12.6"/><path d="M1.8 16.8 Q2.8 15.5 3.8 17 Q4.8 15.5 5.8 16.8" stroke-width="1.5"/><path d="M18.2 16.8 Q19.2 15.5 20.2 17 Q21.2 15.5 22.2 16.8" stroke-width="1.5"/></svg>{{end}}
+{{/* 回笺图标简化版（design/icon/make.py 的 svg(theme, simple=True)），颜色随页面亮 / 暗主题切换（.logo 的 --lg-* 变量） */}}
+{{define "i-logo"}}<svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 1024 1024"><rect width="1024" height="1024" style="fill:var(--lg-bg)"/><g transform="translate(512 512) scale(1.1200) translate(-534 -470)"><rect x="476" y="404" width="420" height="304" rx="46" stroke-width="26" style="fill:var(--lg-env);stroke:var(--lg-line)"/><polyline points="500,446 686,572 872,446" fill="none" style="stroke:var(--lg-flap)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/><path d="M 118 566 C 130 330, 500.5 125.1, 627.0 317.2 L 578.6 349.1 C 474.1 190.5, 190 360, 118 566 Z" style="fill:var(--lg-arrow)"/><path d="M 660.0 420.0 L 557.7 362.9 L 647.9 303.4 Z" stroke-width="14" stroke-linejoin="round" paint-order="stroke" style="fill:var(--lg-arrow);stroke:var(--lg-bg)"/><line x1="812" y1="352" x2="784" y2="306" style="stroke:var(--lg-spark)" stroke-width="26" stroke-linecap="round"/><line x1="862" y1="334" x2="862" y2="272" style="stroke:var(--lg-spark)" stroke-width="26" stroke-linecap="round"/><line x1="912" y1="352" x2="940" y2="306" style="stroke:var(--lg-spark)" stroke-width="26" stroke-linecap="round"/></g></svg>{{end}}
 {{define "i-overview"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>{{end}}
 {{define "i-messages"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>{{end}}
 {{define "i-keys"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></svg>{{end}}
@@ -260,7 +264,7 @@ if(location.search.indexOf('f=')>=0&&history.replaceState){var u=new URL(locatio
 {{define "msgrow"}}<div class="msg p{{.Priority}}{{if le .Priority 1}} dim{{end}}">
 <div class="body">
 <div class="t"><span class="badge p{{.Priority}}">P{{.Priority}} {{pname .Priority}}</span><span class="tt" title="{{.Text}}">{{.Text}}</span></div>
-<div class="meta"><span class="chip"># {{.Topic}}</span>{{if .Thread}}<span class="chip">线程 · {{.Thread}}</span>{{end}}{{if .Source}}<span>来自 {{.Source}}</span>{{end}}</div>
+<div class="meta"><span class="chip"># {{.Topic}}</span>{{if .Sealed}}<span class="chip" title="发送端用普通 pushkey 发来，服务器收到后立即加密保存；内容只能在已解锁的回笺客户端里看">🔐 服务器加密</span>{{else if .E2E}}<span class="chip" title="发送端加密，服务器看不到内容；请在已解锁的回笺客户端里看">🔒 端到端加密</span>{{end}}{{if .Thread}}<span class="chip">线程 · {{.Thread}}</span>{{end}}{{if .Source}}<span>来自 {{.Source}}</span>{{end}}</div>
 {{if .Desp}}{{if long .Desp}}<details class="desp md"><summary>{{snip (msgplain .) 160}}</summary>{{msgmd .}}</details>{{else}}<div class="desp md">{{msgmd .}}</div>{{end}}{{end}}
 {{if .Attachments}}<div class="atts">{{range .Attachments}}{{$k := kind .Mime .Name}}<a class="att k-{{$k.Class}}" href="/att/{{.ID}}" title="下载 {{.Name}}"><span class="ic">{{$k.Label}}</span><span class="nm"><span class="n">{{.Name}}</span><span class="s">{{size .Size}}</span></span></a>{{end}}</div>{{end}}
 </div>
@@ -270,7 +274,7 @@ if(location.search.indexOf('f=')>=0&&history.replaceState){var u=new URL(locatio
 
 {{define "msgrowc"}}<div class="msg compact p{{.Priority}}{{if le .Priority 1}} dim{{end}}">
 <div class="body"><div class="t"><span class="badge p{{.Priority}}">P{{.Priority}} {{pname .Priority}}</span><span class="tt" title="{{.Text}}">{{.Text}}</span></div>
-<div class="meta"><span class="chip"># {{.Topic}}</span>{{if .Thread}}<span class="chip">线程 · {{.Thread}}</span>{{end}}{{if .Attachments}}<span class="chip">📎 {{len .Attachments}} 个附件</span>{{end}}{{if .Desp}}<span class="sn">{{snip (msgplain .) 90}}</span>{{end}}</div></div>
+<div class="meta"><span class="chip"># {{.Topic}}</span>{{if .Sealed}}<span class="chip" title="发送端用普通 pushkey 发来，服务器收到后立即加密保存；内容只能在已解锁的回笺客户端里看">🔐 服务器加密</span>{{else if .E2E}}<span class="chip" title="发送端加密，服务器看不到内容；请在已解锁的回笺客户端里看">🔒 端到端加密</span>{{end}}{{if .Thread}}<span class="chip">线程 · {{.Thread}}</span>{{end}}{{if .Attachments}}<span class="chip">📎 {{len .Attachments}} 个附件</span>{{end}}{{if .Desp}}<span class="sn">{{snip (msgplain .) 90}}</span>{{end}}</div></div>
 <div class="time" title="{{full .CreatedAt}}">{{rel .CreatedAt}}</div></div>{{end}}
 
 {{define "login"}}<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -343,16 +347,20 @@ if(location.search.indexOf('f=')>=0&&history.replaceState){var u=new URL(locatio
 {{define "keys"}}{{template "top" .}}
 <div class="head"><div><h1>Pushkey <span class="chip acc" title="pushkey 属于账号，这个账号的所有设备看到的是同一组">账号「{{.Acct.Label}}」</span></h1><div class="sub">发送方用 pushkey 把消息发给账号「{{.Acct.Label}}」的所有设备。建议每台机器、每个项目各用一把，泄露时只吊销那一把即可。</div></div>
 <form method="post" action="/keys" class="row"><input type="hidden" name="u" value="{{$.Acct.ID}}"><input class="in" name="name" placeholder="备注，例如：PC 训练脚本" required maxlength="40" style="width:200px"{{if not .HasActiveKey}} value="default"{{end}}><input class="in mono" name="key" placeholder="自定义 key（可选）" pattern="[A-Za-z0-9_\-]{16,64}" title="16–64 位字母、数字、下划线或短横线" style="width:200px"><button class="btn primary">{{template "i-plus"}}新建</button></form></div>
-{{$pub := .PublicURL}}{{$new := .NewKey}}
+{{$pub := .PublicURL}}{{$new := .NewKey}}{{$sp := .SendPub}}
+{{if $sp}}<div class="card"><div class="card-b small muted keyhint"><b>加密发送密钥</b>（<code>&lt;pushkey&gt;.e2e.&lt;公钥&gt;</code>）给 huijian 命令行和 Python SDK 用：标题、正文、附件在发送端加密，服务器看不到内容。<br><b>普通 pushkey</b> 适合 curl 等无法加密的发送端，消息由服务器收到后立即用账号公钥加密再保存（服务器代加密，始终开启）：数据库和备份里没有明文，但服务器在收到的那一刻能看到内容。</div></div>{{end}}
 <div class="card">
 {{range $i, $k := .Keys}}<div class="key{{if $k.Revoked}} rev{{end}}">
 <div class="top"><span class="nm">{{$k.Name}}</span>{{if $k.Revoked}}<span class="chip bad">已吊销</span>{{else if eq $k.Key $new}}<span class="chip acc">刚创建</span>{{else}}<span class="chip ok">有效</span>{{end}}
 <span class="when"><span title="{{full $k.Created}}">创建于 {{rel $k.Created}}</span><span>{{if $k.LastUsed.Valid}}<span title="{{full $k.LastUsed.Int64}}">最近使用 {{rel $k.LastUsed.Int64}}</span>{{else}}从未使用{{end}}</span></span>
 {{if $k.Revoked}}<form class="inline" method="post" action="/keys/{{$k.ID}}/delete" data-confirm="彻底删除「{{$k.Name}}」？历史消息会保留。"><input type="hidden" name="u" value="{{$.Acct.ID}}"><button class="btn sm danger">删除</button></form>{{end}}</div>
 {{if not $k.Revoked}}
-<div class="keyline"><code id="k{{$k.ID}}" data-mask="{{mask $k.Key}}" data-full="{{$k.Key}}">{{if eq $k.Key $new}}{{$k.Key}}{{else}}{{mask $k.Key}}{{end}}</code>
+{{$ek := $k.Key}}{{if $sp}}{{$ek = printf "%s.e2e.%s" $k.Key $sp}}
+<div class="keyline"><span class="kl">加密发送密钥</span><code id="e{{$k.ID}}" data-mask="{{mask $k.Key}}.e2e.{{$sp}}" data-full="{{$ek}}">{{if eq $k.Key $new}}{{$ek}}{{else}}{{mask $k.Key}}.e2e.{{$sp}}{{end}}</code>
+<button class="btn sm" data-reveal="e{{$k.ID}}">{{if eq $k.Key $new}}隐藏{{else}}显示{{end}}</button><button class="btn sm" data-copy="{{$ek}}">复制</button></div>{{end}}
+<div class="keyline">{{if $sp}}<span class="kl">普通 pushkey</span>{{end}}<code id="k{{$k.ID}}" data-mask="{{mask $k.Key}}" data-full="{{$k.Key}}">{{if eq $k.Key $new}}{{$k.Key}}{{else}}{{mask $k.Key}}{{end}}</code>
 <button class="btn sm" data-reveal="k{{$k.ID}}">{{if eq $k.Key $new}}隐藏{{else}}显示{{end}}</button><button class="btn sm" data-copy="{{$k.Key}}">复制</button>
-<form class="inline" method="post" action="/keys/{{$k.ID}}/revoke" data-confirm="吊销「{{$k.Name}}」后，使用它的发送方将无法再发送。确定吗？"><input type="hidden" name="u" value="{{$.Acct.ID}}"><button class="btn sm danger">吊销</button></form></div>
+<form class="inline" method="post" action="/keys/{{$k.ID}}/revoke" data-confirm="吊销「{{$k.Name}}」后，使用它的发送方将无法再发送（加密发送密钥也一起失效）。确定吗？"><input type="hidden" name="u" value="{{$.Acct.ID}}"><button class="btn sm danger">吊销</button></form></div>
 <details class="edit"><summary class="muted small">改名 / 更换 key</summary>
 <form method="post" action="/keys/{{$k.ID}}/update" class="row" data-confirm="确定保存？如果更换了 key，旧 key 会立即失效。"><input type="hidden" name="u" value="{{$.Acct.ID}}">
 <input class="in" name="name" value="{{$k.Name}}" maxlength="40" style="width:180px">
@@ -366,13 +374,13 @@ if(location.search.indexOf('f=')>=0&&history.replaceState){var u=new URL(locatio
      -F desp="val_loss **0.231**" -F file=@loss.png -F file=@report.pdf \
      {{$pub}}/message/push</pre>
 <pre class="snip" data-pane="c" hidden>export HUIJIAN_URL={{$pub}}
-export HUIJIAN_PUSHKEY={{$k.Key}}
+export HUIJIAN_PUSHKEY={{$ek}}
 huijian push -p 4 -topic train -f loss.png "exp42 完成"</pre>
 <pre class="snip" data-pane="d" hidden>import huijian   # sdk/python/huijian.py，单文件无依赖
 huijian.push("exp42 完成", "val_loss 0.231", files=["loss.png"], priority=4,
-            topic="train", pushkey="{{$k.Key}}")
+            topic="train", pushkey="{{$ek}}")
 
-with huijian.run("exp42", pushkey="{{$k.Key}}"):   # 自动发送开始/完成/异常
+with huijian.run("exp42", pushkey="{{$ek}}"):   # 自动发送开始/完成/异常
     train()</pre>
 </div>{{end}}
 </div>{{else}}<div class="empty"><div class="big">还没有 pushkey</div>在右上角填一个备注，新建第一把。</div>{{end}}

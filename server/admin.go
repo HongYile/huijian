@@ -429,8 +429,10 @@ func (h *Hub) adminTest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	h.st.InsertMessage(NewMessage{Idem: "adm_" + randHex(8), UserID: uid, Topic: "admin", Priority: prio, Type: "markdown",
-		Text: text, Desp: r.FormValue("desp"), Source: "管理网页", SrcIP: hostOf(r.RemoteAddr)})
+	if _, _, err := h.insertServerMessage(NewMessage{Idem: "adm_" + randHex(8), UserID: uid, Topic: "admin", Priority: prio, Type: "markdown",
+		Text: text, Desp: r.FormValue("desp"), Source: "管理网页", SrcIP: hostOf(r.RemoteAddr)}); err != nil {
+		log.Printf("发送测试消息失败: %v", err)
+	}
 	h.br.Notify(uid)
 	back := r.FormValue("back")
 	if back != "/messages" {
@@ -451,6 +453,10 @@ func (h *Hub) pageKeys(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	d["HasActiveKey"] = active // 还没有有效的 key 时，新建表单的名称默认填 default
+	// 账号开启了加密：每把 key 同时给出加密发送密钥 <key>.e2e.<公钥>（管理后台就是服务器，直接用数据库里的 active 公钥）
+	if pub, _ := h.st.E2EActivePub(h.acct(r)); pub != nil {
+		d["SendPub"] = b64.EncodeToString(pub.Bytes())
+	}
 	d["NewKey"] = r.URL.Query().Get("key")
 	d["PublicURL"] = publicURL(r)
 	render(w, "keys", d)

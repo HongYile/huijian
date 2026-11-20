@@ -101,7 +101,7 @@ func TestForwardBark(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		h.forwardBark(alice.ID, id)
+		h.forwardBark(alice.ID, id, nil)
 		return id
 	}
 

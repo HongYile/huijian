@@ -41,7 +41,7 @@ func (s *Store) AdminMessages(userID int64, f MsgFilter, limit int) ([]Message, 
 		args = append(args, f.Before)
 	}
 	args = append(args, limit)
-	rows, err := s.db.Query(`SELECT m.id,m.user_id,m.topic,m.thread,m.priority,m.type,m.text,m.desp,m.source,m.created_at
+	rows, err := s.db.Query(`SELECT m.id,m.user_id,m.topic,m.thread,m.priority,m.type,m.text,m.desp,m.source,m.created_at,m.e2e!='',m.sealed
 		FROM messages m WHERE `+strings.Join(where, " AND ")+` ORDER BY m.id DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
@@ -50,12 +50,16 @@ func (s *Store) AdminMessages(userID int64, f MsgFilter, limit int) ([]Message, 
 	for rows.Next() {
 		var m Message
 		var ts int64
-		if err := rows.Scan(&m.ID, &m.userID, &m.Topic, &m.Thread, &m.Priority, &m.Type, &m.Text, &m.Desp, &m.Source, &ts); err != nil {
+		var enc bool
+		if err := rows.Scan(&m.ID, &m.userID, &m.Topic, &m.Thread, &m.Priority, &m.Type, &m.Text, &m.Desp, &m.Source, &ts, &enc, &m.Sealed); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		m.CreatedAt = time.Unix(ts, 0)
 		m.Attachments = []Attachment{}
+		if enc { // 管理后台只需要知道是加密消息（显示占位文字和标记），不带信封
+			m.E2E = "1"
+		}
 		out = append(out, m)
 	}
 	rows.Close()

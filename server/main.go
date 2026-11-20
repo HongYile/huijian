@@ -8,7 +8,7 @@ import (
 )
 
 // 发布时可用 -ldflags "-X main.version=…" 覆盖
-var version = "0.7.0"
+var version = "0.8.0"
 
 func usage() {
 	fmt.Fprint(os.Stderr, `huijian（回笺）`+version+`

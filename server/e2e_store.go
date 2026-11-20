@@ -3,6 +3,7 @@ package main
 // 端到端加密的存储（docs/e2ee.md）：服务端只存公钥、各种「锁住的私钥副本」和密文，自己解不开任何一样。
 
 import (
+	"crypto/ecdh"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -20,6 +22,11 @@ CREATE TABLE IF NOT EXISTS e2e_keys(
 CREATE TABLE IF NOT EXISTS e2e_wraps(
   user_id INTEGER NOT NULL, kind TEXT NOT NULL, device_id TEXT NOT NULL DEFAULT '',
   blob TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(user_id, kind, device_id));
+-- 0.8.0 补加密：换掉的旧附件 id（下载时返回 410「附件已加密，请刷新消息」，不返回密文）
+CREATE TABLE IF NOT EXISTS sealed_atts(
+  id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, message_id INTEGER NOT NULL, at INTEGER NOT NULL);
+-- 0.8.0 补加密：等待删除的旧明文附件文件（和补加密同一个事务登记，删掉才清记录；启动时、定时重试）
+CREATE TABLE IF NOT EXISTS pending_unlink(blob TEXT PRIMARY KEY, at INTEGER NOT NULL);
 `
 
 // e2ePlaceholder：加密消息存进数据库的标题（旧客户端、管理后台看到的就是它）
@@ -42,6 +49,8 @@ func (s *Store) migrateE2E() error {
 		{"users", "auth_salt", "TEXT NOT NULL DEFAULT ''"},
 		{"users", "auth_hash", "TEXT NOT NULL DEFAULT ''"},
 		{"users", "e2e_only", "INTEGER NOT NULL DEFAULT 0"},
+		// 0.8.0：代加密的消息记 "server"；发送端加密的、明文的为空
+		{"messages", "sealed", "TEXT NOT NULL DEFAULT ''"},
 		// 设备自己的 X25519 公钥（转交钥匙时加密给它），以及请求批准的时间
 		{"devices", "e2e_pub", "TEXT NOT NULL DEFAULT ''"},
 		{"devices", "e2e_req", "INTEGER NOT NULL DEFAULT 0"},
@@ -125,10 +134,106 @@ func (s *Store) E2EKeys(userID int64) []E2EKey {
 	return out
 }
 
+// E2EEnabled：账号有启用中的钥匙。重置加密（ResetE2E）会停用旧钥匙、同时写入新钥匙，所以开启过的账号始终有一把 active 钥匙
 func (s *Store) E2EEnabled(userID int64) bool {
 	var n int
-	s.db.QueryRow(`SELECT COUNT(*) FROM e2e_keys WHERE user_id=?`, userID).Scan(&n)
+	s.db.QueryRow(`SELECT COUNT(*) FROM e2e_keys WHERE user_id=? AND active=1`, userID).Scan(&n)
 	return n > 0
+}
+
+// e2eEverEnabled：开启过加密（包括已停用的旧钥匙）。setup 只能在从没开启过时用，之后换钥匙走 reset
+func e2eEverEnabled(q interface{ QueryRow(string, ...any) *sql.Row }, userID int64) bool {
+	var n int
+	q.QueryRow(`SELECT COUNT(*) FROM e2e_keys WHERE user_id=?`, userID).Scan(&n)
+	return n > 0
+}
+
+// E2EActivePub：账号启用中的公钥（服务器代加密、管理后台的加密发送密钥用）。
+// 只有确实没有启用中的钥匙才返回 (nil, nil)；查询出错、公钥损坏都返回错误：调用方不能把它当成「没开启」而存明文
+func (s *Store) E2EActivePub(userID int64) (*ecdh.PublicKey, error) {
+	var enc string
+	err := s.db.QueryRow(`SELECT pub FROM e2e_keys WHERE user_id=? AND active=1 ORDER BY created_at DESC, kid LIMIT 1`, userID).Scan(&enc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	raw, err := b64.DecodeString(enc)
+	if err != nil {
+		return nil, fmt.Errorf("账号 #%d 的公钥损坏：%w", userID, err)
+	}
+	return ecdh.X25519().NewPublicKey(raw)
+}
+
+// errKeyChanged：加密用的钥匙在写库前被停用（账号刚刚重置过加密）
+var errKeyChanged = errors.New("账号的加密钥匙刚刚更换，请重试")
+
+// kidActive：在事务里确认 kid 是账号启用中的钥匙
+func kidActive(tx *sql.Tx, userID int64, kid string) (bool, error) {
+	var n int
+	err := tx.QueryRow(`SELECT COUNT(*) FROM e2e_keys WHERE user_id=? AND kid=? AND active=1`, userID, kid).Scan(&n)
+	return n > 0, err
+}
+
+// errStaleKID：上传的 wrap / grant 锁的是已经停用的钥匙（本机还留着重置以前的旧私钥）
+var errStaleKID = errors.New("这把钥匙已经停用（账号重置过加密）：请先用密码或恢复码解锁新的钥匙")
+
+// checkWrapKID：上传锁住的私钥副本时带的 kid 必须是启用中的钥匙。kid 为空时不检查（0.7 客户端不带）
+func checkWrapKID(tx *sql.Tx, userID int64, kid string) error {
+	if kid == "" {
+		return nil
+	}
+	ok, err := kidActive(tx, userID, kid)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errStaleKID
+	}
+	return nil
+}
+
+// PlainCount：服务器上这个账号还剩几条明文消息
+func (s *Store) PlainCount(userID int64) int {
+	var n int
+	s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE user_id=? AND e2e=''`, userID).Scan(&n)
+	return n
+}
+
+// credSnapshot：当前登录凭证的哈希（新协议 + 旧协议）。核对当前密码前取一次，写入时在事务里再比一次：
+// 期间密码被改过、或者另一台设备刚重置过加密，就拒绝（防止两边互相覆盖）
+func credSnapshot(q interface{ QueryRow(string, ...any) *sql.Row }, userID int64) string {
+	var ah, ph string
+	q.QueryRow(`SELECT auth_hash, pass_hash FROM users WHERE id=?`, userID).Scan(&ah, &ph)
+	return ah + "|" + ph
+}
+
+var errCredChanged = errors.New("密码刚刚被修改，或者另一台设备刚重置过加密：请刷新后重试")
+
+// E2EStatus：管理后台「账号」页用：每个账号是否有启用中的钥匙，以及服务器上还剩多少条明文消息
+func (s *Store) E2EStatus() (enc map[int64]bool, plain map[int64]int) {
+	enc, plain = map[int64]bool{}, map[int64]int{}
+	if rows, err := s.db.Query(`SELECT DISTINCT user_id FROM e2e_keys WHERE active=1`); err == nil {
+		for rows.Next() {
+			var id int64
+			if rows.Scan(&id) == nil {
+				enc[id] = true
+			}
+		}
+		rows.Close()
+	}
+	if rows, err := s.db.Query(`SELECT user_id, COUNT(*) FROM messages WHERE e2e='' GROUP BY user_id`); err == nil {
+		for rows.Next() {
+			var id int64
+			var n int
+			if rows.Scan(&id, &n) == nil {
+				plain[id] = n
+			}
+		}
+		rows.Close()
+	}
+	return
 }
 
 // E2EHasKID：信封里的 kid 是不是这个账号的钥匙（包括更换前的旧钥匙）
@@ -160,8 +265,9 @@ type E2ESetupInput struct {
 	AuthKey      []byte // 新登录凭证
 	Pub          []byte // 账号公钥（32 字节）
 	PasswordWrap string // hjp1.…：用密码派生的解锁钥匙锁住的私钥
-	RecoveryWrap string // hjr1.…：用恢复码锁住的私钥
+	RecoveryWrap string // hjr1.…：用恢复码锁住的私钥（0.8.0 起可选）
 	DeviceID     string // 开启加密的这台设备
+	CredSnap     string // 核对当前密码前的凭证快照（credSnapshot），事务里再比一次；空表示不比
 }
 
 func (s *Store) SetupE2E(userID int64, in E2ESetupInput) (string, error) {
@@ -170,14 +276,64 @@ func (s *Store) SetupE2E(userID int64, in E2ESetupInput) (string, error) {
 		return "", err
 	}
 	defer tx.Rollback()
-	var n int
-	tx.QueryRow(`SELECT COUNT(*) FROM e2e_keys WHERE user_id=?`, userID).Scan(&n)
-	if n > 0 {
+	if e2eEverEnabled(tx, userID) { // 开启过（哪怕钥匙都已停用）就只能走 reset，免得两条路径互相覆盖
 		return "", errE2EEnabled
+	}
+	if in.CredSnap != "" && credSnapshot(tx, userID) != in.CredSnap {
+		return "", errCredChanged
 	}
 	kid := e2eKID(in.Pub)
 	if _, err := tx.Exec(`INSERT INTO e2e_keys(user_id,kid,pub,created_at,active) VALUES(?,?,?,?,1)`,
 		userID, kid, b64.EncodeToString(in.Pub), now()); err != nil {
+		return "", err
+	}
+	if err := s.SetAuthKey(tx, userID, in.Salt, in.AuthKey); err != nil {
+		return "", err
+	}
+	for kind, blob := range map[string]string{wrapPassword: in.PasswordWrap, wrapRecovery: in.RecoveryWrap} {
+		if blob == "" {
+			continue
+		}
+		if err := putWrap(tx, userID, kind, "", blob); err != nil {
+			return "", err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	s.settingsChanged(userID, changeE2E)
+	return kid, nil
+}
+
+var errE2ENotEnabled = errors.New("这个账号还没有开启加密")
+
+// ResetE2E：重置加密（换一把新钥匙）。旧钥匙全部停用但保留（还留着旧私钥的设备靠它们解旧消息），
+// 所有锁住的副本（密码、恢复码、转交给设备的）一律删除，进行中的设备批准作废；新钥匙、新登录凭证、新密码副本一起写入
+func (s *Store) ResetE2E(userID int64, in E2ESetupInput) (string, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	if !e2eEverEnabled(tx, userID) {
+		return "", errE2ENotEnabled
+	}
+	if in.CredSnap != "" && credSnapshot(tx, userID) != in.CredSnap { // 核对密码和写入之间凭证变了：两台设备同时重置时后到的被拒
+		return "", errCredChanged
+	}
+	kid := e2eKID(in.Pub)
+	for _, q := range []string{
+		`UPDATE e2e_keys SET active=0 WHERE user_id=?`,
+		`DELETE FROM e2e_wraps WHERE user_id=?`,
+		`UPDATE devices SET e2e_req=0, e2e_commit='', e2e_na='', e2e_nb='' WHERE user_id=?`,
+	} {
+		if _, err := tx.Exec(q, userID); err != nil {
+			return "", err
+		}
+	}
+	// 同一把公钥重复提交（客户端没收到上次的响应又重试）：重新启用它即可
+	if _, err := tx.Exec(`INSERT INTO e2e_keys(user_id,kid,pub,created_at,active) VALUES(?,?,?,?,1)
+		ON CONFLICT(user_id,kid) DO UPDATE SET active=1`, userID, kid, b64.EncodeToString(in.Pub), now()); err != nil {
 		return "", err
 	}
 	if err := s.SetAuthKey(tx, userID, in.Salt, in.AuthKey); err != nil {
@@ -220,18 +376,23 @@ func (s *Store) HasWrap(userID int64, kind string) bool {
 // SetPasswordAuth：在已开启加密的账号上改密码：新盐、新登录凭证、用新密码锁住的私钥一起换
 var errNeedPasswordWrap = errors.New("这个账号已开启加密：改密码时要同时提交用新密码锁住的私钥（请更新回笺后重试）")
 
-func (s *Store) SetPasswordAuth(userID int64, salt string, authKey []byte, passwordWrap string) error {
+func (s *Store) SetPasswordAuth(userID int64, salt string, authKey []byte, passwordWrap, kid string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	var keys int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM e2e_keys WHERE user_id=?`, userID).Scan(&keys); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM e2e_keys WHERE user_id=? AND active=1`, userID).Scan(&keys); err != nil {
 		return err
 	}
 	if keys > 0 && passwordWrap == "" { // 在事务里判断：和另一台设备同时开启加密时，不会留下旧密码锁住的副本
 		return errNeedPasswordWrap
+	}
+	if passwordWrap != "" {
+		if err := checkWrapKID(tx, userID, kid); err != nil {
+			return err
+		}
 	}
 	if err := s.SetAuthKey(tx, userID, salt, authKey); err != nil {
 		return err
@@ -248,12 +409,15 @@ func (s *Store) SetPasswordAuth(userID int64, salt string, authKey []byte, passw
 	return nil
 }
 
-func (s *Store) SetRecoveryWrap(userID int64, blob string) error {
+func (s *Store) SetRecoveryWrap(userID int64, blob, kid string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := checkWrapKID(tx, userID, kid); err != nil {
+		return err
+	}
 	if err := putWrap(tx, userID, wrapRecovery, "", blob); err != nil {
 		return err
 	}
@@ -339,12 +503,15 @@ func (s *Store) PendingE2ERequests(userID int64) []E2ERequest {
 var errNoSuchDevice = errors.New("找不到这台设备，或它还没登记加密公钥")
 
 // GrantDevice：已解锁的设备把私钥转交给 deviceID（blob 是加密给对方公钥的 HPKE 密文）。pub 必须和对方登记的一致
-func (s *Store) GrantDevice(userID int64, deviceID, pub, blob string) error {
+func (s *Store) GrantDevice(userID int64, deviceID, pub, blob, kid string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := checkWrapKID(tx, userID, kid); err != nil {
+		return err
+	}
 	var cur string
 	var req int64
 	var nb string

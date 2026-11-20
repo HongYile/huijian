@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -202,6 +203,36 @@ type e2eAtt struct {
 	Mime string `json:"mime"`
 	Size int64  `json:"size"` // 明文大小
 	Key  string `json:"key"`  // base64url，32 字节
+}
+
+// e2eSealPayload：把标题、正文、附件信息封进信封（huijian push -k 发送端和服务器代加密共用，SDK 的 _e2e_seal 规则相同）。
+// 服务端看不到发送端加密的内容，没法像明文那样截断，所以在加密前截断：标题最多 2000 字、正文最多 64 KB；
+// 信封超过 e2eMaxEnvelope 时逐步截短正文直到放得下
+func e2eSealPayload(pub *ecdh.PublicKey, text, desp, typ string, atts []e2eAtt) (string, error) {
+	if len(desp) > 64<<10 {
+		desp = desp[:64<<10]
+	}
+	if r := []rune(text); len(r) > 2000 {
+		text = string(r[:2000])
+	}
+	p := e2ePayload{V: 1, Text: text, Type: typ, Atts: atts}
+	for {
+		p.Desp = strings.ToValidUTF8(desp, "")
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false) // 不把 < > & 转成 \u003c，免得体积暴涨
+		if err := enc.Encode(p); err != nil {
+			return "", err
+		}
+		env, err := e2eSealMessage(pub, bytes.TrimSpace(buf.Bytes()))
+		if err != nil || len(env) <= e2eMaxEnvelope {
+			return env, err
+		}
+		if desp == "" {
+			return "", errors.New("加密后的内容太长：标题或附件太多，请精简")
+		}
+		desp = desp[:len(desp)*4/5] // 引号、控制字符转义后会变长：逐步截短正文直到放得下
+	}
 }
 
 // e2eMaxEnvelope：信封最长 120 KB（服务端 multipart 字段读到 128 KB 为止，留余量，超过就拒收而不是截断）

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/json"
@@ -165,18 +164,9 @@ func splitSendKeys(s string) (string, *ecdh.PublicKey, error) {
 	return strings.Join(keys, ","), pub, nil
 }
 
-// e2eSeal：用加密发送密钥里的公钥把标题、正文、附件信息封进信封；返回信封和每个附件的密钥（顺序同 j.Files）。
-// 服务端看不到内容，没法像明文那样截断：标题超过 2000 字、正文超过 64 KB 或信封超长时，在这里截断正文
+// e2eSeal：用加密发送密钥里的公钥把标题、正文、附件信息封进信封；返回信封和每个附件的密钥（顺序同 j.Files）
 func e2eSeal(pub *ecdh.PublicKey, j Job) (string, [][]byte, error) {
-	desp := j.Desp
-	if len(desp) > 64<<10 {
-		desp = desp[:64<<10]
-	}
-	text := j.Text
-	if r := []rune(text); len(r) > 2000 {
-		text = string(r[:2000])
-	}
-	p := e2ePayload{V: 1, Text: text, Type: j.Type}
+	var atts []e2eAtt
 	keys := make([][]byte, len(j.Files))
 	for i, path := range j.Files {
 		st, err := os.Stat(path)
@@ -187,25 +177,13 @@ func e2eSeal(pub *ecdh.PublicKey, j Job) (string, [][]byte, error) {
 		if _, err := rand.Read(keys[i]); err != nil {
 			return "", nil, err
 		}
-		p.Atts = append(p.Atts, e2eAtt{Name: filepath.Base(path), Mime: fileMime(path), Size: st.Size(), Key: b64.EncodeToString(keys[i])})
+		atts = append(atts, e2eAtt{Name: filepath.Base(path), Mime: fileMime(path), Size: st.Size(), Key: b64.EncodeToString(keys[i])})
 	}
-	for {
-		p.Desp = strings.ToValidUTF8(desp, "")
-		var buf bytes.Buffer
-		enc := json.NewEncoder(&buf)
-		enc.SetEscapeHTML(false) // 不把 < > & 转成 \u003c，免得体积暴涨
-		if err := enc.Encode(p); err != nil {
-			return "", nil, err
-		}
-		env, err := e2eSealMessage(pub, bytes.TrimSpace(buf.Bytes()))
-		if err != nil || len(env) <= e2eMaxEnvelope {
-			return env, keys, err
-		}
-		if desp == "" {
-			return "", nil, errors.New("加密后的内容太长：标题或附件太多，请精简")
-		}
-		desp = desp[:len(desp)*4/5] // 引号、控制字符转义后会变长：逐步截短正文直到放得下
+	env, err := e2eSealPayload(pub, j.Text, j.Desp, j.Type, atts)
+	if err != nil {
+		return "", nil, err
 	}
+	return env, keys, nil
 }
 
 // fileMime：附件类型，按扩展名，认不出时看文件头（和服务端的判断方式一致）

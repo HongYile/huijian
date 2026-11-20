@@ -52,6 +52,7 @@ var serverFeatures = []feature{
 	{"sync.settings", "设置实时同步：key、设备、账户变了以后，变更里出现 keys / devices / account（id 0），客户端重新拉取", "0.6.1"},
 	{"poll.long", "长轮询可以挂起超过 55 秒（上限见 /v1/info 的 long_poll_max），客户端按网络自适应等待时长，更省电", "0.6.4"},
 	{"e2e", "端到端加密（docs/e2ee.md）：/v1/prelogin + auth_key 登录、/v1/e2e 钥匙管理和设备批准；消息带 e2e 信封时 type=e2e、text 是占位文字、附件是密文", "0.7.0"},
+	{"e2e.auto", "默认自动加密：开启加密时恢复码可选、POST /v1/e2e/reset 重置加密、服务器代加密明文消息并补加密开启以前的历史（sealed: \"server\"，始终开启；补加密的消息记 kind \"sealed\" 变更、附件换新 id，用 GET /v1/messages/{id} 重新拉取）；上传 wrap / grant 带 kid", "0.8.0"},
 }
 
 func (h *Hub) handleInfo(w http.ResponseWriter, r *http.Request) {
@@ -111,8 +112,8 @@ func clientVersion(label string) string {
 	return ""
 }
 
-// clientOutdated：客户端版本低于这个平台已发布的最新版本；没有发布过时，和服务端比「主.次」版本
-// （客户端和服务端各自升级，只改服务端的小版本不应让所有客户端都显示较旧）。没上报版本的旧客户端也算较旧。
+// clientOutdated：客户端版本低于这个平台已发布的最新版本。没上报版本号的旧客户端算较旧。
+// 这个平台在本服务器上没有发布记录时不标较旧：各端版本线独立（Mac 0.7、手机 0.4），和服务端版本号比没有意义
 func (h *Hub) clientOutdated(label string) bool {
 	v := clientVersion(label)
 	if v == "" {
@@ -121,14 +122,7 @@ func (h *Hub) clientOutdated(label string) bool {
 	if latest := h.st.LatestReleaseVersion(strings.Fields(label)[0]); latest != "" {
 		return verLess(v, latest)
 	}
-	mm := func(s string) string {
-		p := strings.SplitN(s, ".", 3)
-		if len(p) >= 2 {
-			return p[0] + "." + p[1]
-		}
-		return s
-	}
-	return verLess(mm(v), mm(version))
+	return false
 }
 
 // ---------- 存储状态（管理后台和客户端共用） ----------
@@ -164,9 +158,9 @@ type storageInfo struct {
 
 var usageCache struct {
 	sync.Mutex
-	at                       time.Time
-	count, pending, legacy   int
-	size                     int64
+	at                     time.Time
+	count, pending, legacy int
+	size                   int64
 }
 
 func (h *Hub) storageInfo(fresh bool) storageInfo {

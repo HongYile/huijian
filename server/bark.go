@@ -224,9 +224,13 @@ func barkIcon() string {
 	return ""
 }
 
+// barkPlain：服务器代加密的消息在内存里的明文，只用来转发 Bark（库里只有密文）
+type barkPlain struct{ Text, Desp, Type string }
+
 // forwardBark：新消息转发到账号下登记了 Bark 的设备。按每台设备的接收规则判断（不接收的 key、
 // 静默的 key / 频道、正在别的设备上使用），P0–P2 不转发。在后台 goroutine 里调用。
-func (h *Hub) forwardBark(userID, msgID int64) {
+// plain 非空表示这条是服务器代加密的消息：照旧用明文转发（Bark 本来就由服务器转发明文）
+func (h *Hub) forwardBark(userID, msgID int64, plain *barkPlain) {
 	devs := h.st.barkDevices(userID)
 	if len(devs) == 0 {
 		return
@@ -242,6 +246,10 @@ func (h *Hub) forwardBark(userID, msgID int64) {
 		if m.Silent || m.Priority < 3 {
 			continue
 		}
+		if plain != nil {
+			// 用明文解析正文，但不进 doc 缓存（ID 置 0）：缓存里不留明文
+			m.ID, m.Text, m.Desp, m.Type, m.E2E = 0, plain.Text, plain.Desp, plain.Type, ""
+		}
 		if m.E2E != "" { // 加密消息：服务端读不到内容，锁屏只提示有新消息（点开回笺在本机解密）
 			body := "打开回笺查看（端到端加密）"
 			if n := len(m.Attachments); n > 0 {
@@ -250,7 +258,7 @@ func (h *Hub) forwardBark(userID, msgID int64) {
 			note := barkNote{Title: "🔒 新消息", Body: body, Group: h.channelDisplayName(userID, m.Topic),
 				URL: fmt.Sprintf("huijian://message/%d", m.ID), Priority: m.Priority}
 			if err := sendBark(h.st.BarkConfig(d.ID), note, barkIcon()); err != nil {
-				log.Printf("转发到 Bark 失败（设备 %s，消息 #%d）：%v", d.ID, m.ID, err)
+				log.Printf("转发到 Bark 失败（设备 %s，消息 #%d）：%v", d.ID, msgID, err)
 			}
 			continue
 		}
@@ -267,9 +275,9 @@ func (h *Hub) forwardBark(userID, msgID int64) {
 			body = "来自 " + m.Source
 		}
 		note := barkNote{Title: clip(m.Text, 100), Body: body, Group: h.channelDisplayName(userID, m.Topic),
-			URL: fmt.Sprintf("huijian://message/%d", m.ID), Priority: m.Priority}
+			URL: fmt.Sprintf("huijian://message/%d", msgID), Priority: m.Priority}
 		if err := sendBark(h.st.BarkConfig(d.ID), note, barkIcon()); err != nil {
-			log.Printf("转发到 Bark 失败（设备 %s，消息 #%d）：%v", d.ID, m.ID, err)
+			log.Printf("转发到 Bark 失败（设备 %s，消息 #%d）：%v", d.ID, msgID, err)
 		}
 	}
 }
