@@ -419,10 +419,18 @@ func copyExecutable(src, dst string) error {
 }
 
 // addUserPathWindows：追加到用户级 PATH（HKCU\Environment），用 PowerShell 写，避免 setx 截断到 1024 字符
+// HUIJIAN_SETUP_PATH_VAR 只给测试用：改写另一个用户变量，不动真的 PATH
 func addUserPathWindows(dir string) error {
-	ps := `$d=$args[0]; $p=[Environment]::GetEnvironmentVariable('Path','User'); if(-not $p){$p=''}; ` +
-		`if(($p -split ';') -notcontains $d){ [Environment]::SetEnvironmentVariable('Path', ($p.TrimEnd(';') + ';' + $d).TrimStart(';'), 'User') }`
-	return exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps, dir).Run()
+	v := env("HUIJIAN_SETUP_PATH_VAR", "Path")
+	// -Command 后面的参数不会进 $args：值用单引号字符串直接写进脚本（单引号加倍转义）
+	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+	ps := `$d=` + q(dir) + `; $v=` + q(v) + `; $p=[Environment]::GetEnvironmentVariable($v,'User'); if(-not $p){$p=''}; ` +
+		`if(($p -split ';') -notcontains $d){ [Environment]::SetEnvironmentVariable($v, ($p.TrimEnd(';') + ';' + $d).TrimStart(';'), 'User') }`
+	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // ---------- 配置文件小工具 ----------

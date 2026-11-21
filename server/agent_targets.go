@@ -58,7 +58,8 @@ func claudeTarget() agentTarget {
 		id: "claude", name: "Claude Code",
 		detect: func() bool { return lookCmd("claude") != "" || exists(dir()) || exists(cfg()) },
 		configure: func(bin string) (string, error) {
-			if c := lookCmd("claude"); c != "" {
+			// Windows 上 claude 多半是 npm 的 claude.cmd：经过 cmd.exe 传 JSON 参数会把引号弄坏，直接写文件
+			if c := lookCmd("claude"); c != "" && runtime.GOOS != "windows" {
 				exec.Command(c, "mcp", "remove", "-s", "user", "huijian").Run()
 				js, _ := encodeIndent(entry(bin))
 				out, err := exec.Command(c, "mcp", "add-json", "-s", "user", "huijian", strings.TrimSpace(string(js))).CombinedOutput()
@@ -74,7 +75,7 @@ func claudeTarget() agentTarget {
 		},
 		remove: func() (bool, error) {
 			had := jsonHasServer(cfg(), "mcpServers")
-			if c := lookCmd("claude"); c != "" && had {
+			if c := lookCmd("claude"); c != "" && had && runtime.GOOS != "windows" {
 				if exec.Command(c, "mcp", "remove", "-s", "user", "huijian").Run() == nil {
 					return true, nil
 				}
