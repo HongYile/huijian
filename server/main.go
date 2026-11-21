@@ -1,14 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
+	"runtime"
 	"time"
 	_ "time/tzdata" // 容器镜像没有 tzdata，内嵌一份，保证 TZ 生效
 )
 
 // 发布时可用 -ldflags "-X main.version=…" 覆盖
-var version = "0.10.0"
+var version = "0.11.0"
 
 func usage() {
 	fmt.Fprint(os.Stderr, `huijian（回笺）`+version+`
@@ -58,6 +60,14 @@ var devCommands = map[string]bool{"hub": true, "release-key": true, "release-pub
 
 func main() {
 	if len(os.Args) < 2 {
+		// Windows 上双击下载的 huijian.exe：直接进入 agent 一步接入，按提示输入服务器地址和连接码；结束后等回车，免得窗口一闪就关
+		if runtime.GOOS == "windows" {
+			fmt.Fprintln(os.Stderr, "回笺 huijian：把这台电脑上的 agent 接入回笺（在回笺「设置 → Pushkey」→「连接 agent」生成连接码）")
+			code := runAgentCLI([]string{"setup"})
+			fmt.Fprint(os.Stderr, "\n按回车关闭窗口…")
+			bufio.NewReader(os.Stdin).ReadString('\n')
+			os.Exit(code)
+		}
 		usage()
 		os.Exit(2)
 	}

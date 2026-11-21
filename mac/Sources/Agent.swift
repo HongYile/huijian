@@ -16,8 +16,8 @@ enum Agent {
         static let tooLong = "回复太长（最多 16 KB）"
         static let waitingReply = "等你回复"
         static let choiceHint = "选好选项、写好补充（都可选），再点发送。"
-        static let connectSteps = "1. 在 agent 所在的电脑上安装 huijian 命令行（GitHub Releases 下载，Windows 版首次运行会自动装好）。\n2. 运行上面这行命令，或运行 huijian agent setup 再输入连接码。\n3. 本页最上方出现登录请求时点「批准」，核对两边的 6 位核对码。\nsetup 会自动把回笺接入这台电脑上的 Claude Code、Codex、Cursor、DeepSeek Harness、Hermes、Qwen Code、Pi。"
-        static let cliDownload = "https://github.com/HongYile/huijian/releases/latest"
+        static let connectSteps = "1. 在 agent 所在的电脑上下载 huijian 命令行（「下载命令行」，选 server-v 开头的最新版本）：Windows 双击 huijian-…-windows-amd64.exe，按提示输入服务器地址和连接码；macOS / Linux 在终端运行上面这行命令（下载方法见发布页说明）。\n2. 本页最上方出现登录请求时点「批准」，核对两边的 6 位核对码。\nsetup 会自动把回笺接入这台电脑上的 Claude Code、Codex、Cursor、DeepSeek Harness、Hermes、Qwen Code、Pi，并把 huijian 装好（以后在终端里直接用）。"
+        static let cliDownload = "https://github.com/HongYile/huijian/releases?q=server-v&expanded=true"
         static let tookReply = "agent 已拿到你的回复，现在没在等你；再发的回复要等它下次查看才会收到。"
         static func codeHint(_ name: String) -> String { "确认「\(name)」那边显示的也是这 6 位数字，再批准。" }
     }

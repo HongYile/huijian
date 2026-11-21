@@ -497,7 +497,7 @@ func TestE2EServerSealVectors(t *testing.T) {
 func TestInfoE2EAuto(t *testing.T) {
 	e := newE2EEnv(t)
 	out := e.must(200, "GET", "/v1/info", "", nil)
-	if out["version"] != version || version != "0.10.0" {
+	if out["version"] != version || version != "0.11.0" {
 		t.Fatalf("版本：%v", out["version"])
 	}
 	found := false

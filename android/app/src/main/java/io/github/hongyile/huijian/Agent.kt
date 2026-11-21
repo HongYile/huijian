@@ -47,8 +47,8 @@ object AgentText {
     const val UNSUPPORTED = "服务端版本较旧，agent 双向需要回笺服务端 0.10.0 及以上，请更新服务端"
 
     // 连接 agent（连接码，服务端 0.11.0，功能 agent.connect；和 Mac / iPhone 一致）
-    const val CONNECT_STEPS = "1. 在 agent 所在的电脑上安装 huijian 命令行（GitHub Releases 下载，Windows 版首次运行会自动装好）。\n2. 运行上面这行命令，或运行 huijian agent setup 再输入连接码。\n3. 本页最上方出现登录请求时点「批准」，核对两边的 6 位核对码。\nsetup 会自动把回笺接入这台电脑上的 Claude Code、Codex、Cursor、DeepSeek Harness、Hermes、Qwen Code、Pi。"
-    const val CLI_DOWNLOAD = "https://github.com/HongYile/huijian/releases/latest"
+    const val CONNECT_STEPS = "1. 在 agent 所在的电脑上下载 huijian 命令行（「下载命令行」，选 server-v 开头的最新版本）：Windows 双击 huijian-…-windows-amd64.exe，按提示输入服务器地址和连接码；macOS / Linux 在终端运行上面这行命令（下载方法见发布页说明）。\n2. 本页最上方出现登录请求时点「批准」，核对两边的 6 位核对码。\nsetup 会自动把回笺接入这台电脑上的 Claude Code、Codex、Cursor、DeepSeek Harness、Hermes、Qwen Code、Pi，并把 huijian 装好（以后在终端里直接用）。"
+    const val CLI_DOWNLOAD = "https://github.com/HongYile/huijian/releases?q=server-v&expanded=true"
 
     /** 给用户复制的一行命令 */
     fun setupCommand(server: String, code: String) = "huijian agent setup -u $server $code"

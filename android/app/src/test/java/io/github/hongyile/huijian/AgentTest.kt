@@ -529,7 +529,7 @@ class AgentTest {
 
     @Test fun setupCommand() {
         assertEquals("huijian agent setup -u https://push.example.com K7Q2-9XMD", AgentText.setupCommand("https://push.example.com", "K7Q2-9XMD"))
-        assertEquals(AgentText.CLI_DOWNLOAD, "https://github.com/HongYile/huijian/releases/latest")
-        assertTrue(AgentText.CONNECT_STEPS.startsWith("1. 在 agent 所在的电脑上安装 huijian 命令行"))
+        assertEquals(AgentText.CLI_DOWNLOAD, "https://github.com/HongYile/huijian/releases?q=server-v&expanded=true")
+        assertTrue(AgentText.CONNECT_STEPS.startsWith("1. 在 agent 所在的电脑上下载 huijian 命令行"))
     }
 }

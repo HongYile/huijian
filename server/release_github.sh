@@ -37,17 +37,30 @@ for arch in amd64 arm64; do
   CGO_ENABLED=0 GOOS=linux GOARCH=$arch GOTOOLCHAIN=local go build -trimpath -ldflags "-s -w" -o "$f" .
   FILES+=("$f")
 done
+# agent 电脑用的命令行（huijian agent setup）：Windows / macOS。不进 update-server.json（服务端一键更新只用 linux）
+CLI=()
+for t in windows/amd64 darwin/arm64 darwin/amd64; do
+  os=${t%/*}; arch=${t#*/}; ext=""; [ "$os" = windows ] && ext=.exe
+  f="$OUT/huijian-$VERSION-$os-$arch$ext"
+  CGO_ENABLED=0 GOOS=$os GOARCH=$arch GOTOOLCHAIN=local go build -trimpath -ldflags "-s -w" -o "$f" .
+  CLI+=("$f")
+done
 # 可选：维护者自己的私人信息扫描（发现命中返回非 0）
-if [ -n "${PRIVATE_SCAN:-}" ]; then for f in "${FILES[@]}"; do "$PRIVATE_SCAN" --binary "$f"; done; fi
+if [ -n "${PRIVATE_SCAN:-}" ]; then for f in "${FILES[@]}" "${CLI[@]}"; do "$PRIVATE_SCAN" --binary "$f"; done; fi
 python3 tools/server_manifest.py "$HY" "$GITHUB_UPDATE_KEY" "$VERSION" "$BUILD" "$NOTES" "${FILES[@]}" > "$OUT/update-server.json"
 BODY="$NOTES
 ---
 **更新方式**：管理后台「设置 → 服务端更新」点「一键更新」（0.6.0 起；会先备份数据库，签名校验通过才安装）。
 服务器访问 GitHub 慢时可以在同一处设置下载代理（0.6.2 起）；下载不了时，把下面对应平台的程序和 \`update-server.json\` 下载到别的电脑，在同一处「手动上传」。
-也可以 \`git pull\` 后 \`docker compose up -d --build\` 重新构建镜像。"
+也可以 \`git pull\` 后 \`docker compose up -d --build\` 重新构建镜像。
+
+**agent 电脑用的命令行**（\`huijian agent setup\`，在回笺「设置 → Pushkey → 连接 agent」生成连接码后一步接入）：
+Windows 下载 \`huijian-$VERSION-windows-amd64.exe\` 双击运行，按提示输入服务器地址和连接码；
+macOS：\`curl -fLo huijian https://github.com/$GITHUB_REPO/releases/download/server-v$VERSION/huijian-$VERSION-darwin-arm64 && chmod +x huijian && ./huijian agent setup -u 服务器 连接码\`（Intel Mac 换成 darwin-amd64）；
+Linux 用上面的 linux 程序，命令同 macOS。"
 if [ "${DRY_RUN:-}" = 1 ]; then echo "DRY_RUN：产物在 ${OUT}，未上传"; ls -lh "$OUT" | awk 'NR>1{print $5, $9}'; exit 0; fi
 gh release create "server-v$VERSION" --repo "$GITHUB_REPO" --target "$(git rev-parse HEAD)" --title "回笺服务端 $VERSION" --notes "$BODY" --latest=false \
-  "${FILES[@]}" "$OUT/update-server.json"
+  "${FILES[@]}" "${CLI[@]}" "$OUT/update-server.json"
 echo "已发布到 https://github.com/$GITHUB_REPO/releases/tag/server-v$VERSION"
 
 # 顺便推送到自己的服务器（可选）。到这里 GitHub 发布已经成功，下面任何失败都只警告、退出码仍为 0，所以整段关掉 -e -u。
