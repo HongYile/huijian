@@ -225,10 +225,10 @@ func (s *Store) RedeemAgentConnectCode(code, name string) (*AgentKey, string, er
 	if err := tx.QueryRow(`SELECT user_id FROM agent_connect_codes WHERE code_hash=? AND used=0 AND expires_at>=?`, sha256Hex(c), now()).Scan(&userID); err != nil {
 		return nil, "", errAgentConnect
 	}
+	// 账号已删除（用户 id 可能被新账号复用）或停用：一律当作无效码，不区分（免得借此确认码是否有效）
 	var dis int
-	tx.QueryRow(`SELECT disabled FROM users WHERE id=?`, userID).Scan(&dis)
-	if dis != 0 {
-		return nil, "", errDisabled
+	if err := tx.QueryRow(`SELECT disabled FROM users WHERE id=?`, userID).Scan(&dis); err != nil || dis != 0 {
+		return nil, "", errAgentConnect
 	}
 	res, err := tx.Exec(`UPDATE agent_connect_codes SET used=1, used_by=?, used_at=? WHERE code_hash=? AND used=0`, name, now(), sha256Hex(c))
 	if err != nil {
@@ -276,6 +276,12 @@ func (s *Store) AgentKeyByToken(key string) (*AgentKey, error) {
 		s.db.Exec(`UPDATE agent_keys SET last_used=? WHERE id=?`, now(), k.ID)
 	}
 	return &k, nil
+}
+
+// RevokeOwnAgentKey：agent 用自己的 key 吊销自己（huijian agent setup -remove）
+func (s *Store) RevokeOwnAgentKey(k *AgentKey) error {
+	_, err := s.RevokeAgentKey(k.UserID, k.ID)
+	return err
 }
 
 // RevokeAgentKey：吊销，它登录的会话全部结束

@@ -86,25 +86,41 @@ func agentSetupCmd(args []string) error {
 
 	// 2. 登录（已有有效会话就跳过）
 	srv := strings.TrimRight(strings.Split(*server, ",")[0], "/")
+	code := strings.TrimSpace(fs.Arg(0))
 	if *noLogin {
 		goto configure
 	}
-	if old, _ := loadAgentState(*slot); old != nil && old.Token != "" && (srv == "" || old.Server == srv) {
-		if _, err := agentReq("GET", old.Server, "/v1/agent/replies?wait=0", old.Token, nil, 20*time.Second); err == nil {
+	// 已登录、也没给新的连接码：跳过登录。只有服务器明确拒绝（401 / 403：会话已结束、key 已吊销）才重新登录；
+	// 断网、429（在线会话满了）之类先按已登录处理（这时也登录不了），照常配置 agent
+	if old, _ := loadAgentState(*slot); code == "" && old != nil && old.Token != "" && (srv == "" || old.Server == srv) {
+		_, err := agentReq("GET", old.Server, "/v1/agent/replies?wait=0", old.Token, nil, 20*time.Second)
+		var he *agentHTTPError
+		if err == nil || !(errors.As(err, &he) && (he.Status == 401 || he.Status == 403)) {
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️ 没能确认会话状态（%v），先按已登录处理\n", err)
+			}
 			fmt.Fprintf(os.Stderr, "✅ 已经登录：「%s」（%s），跳过登录\n", old.Name, old.Server)
 			srv = old.Server
 			goto configure
 		}
+		fmt.Fprintln(os.Stderr, "之前的会话已经结束，重新登录")
 	}
 	if srv == "" {
-		srv = strings.TrimRight(prompt(in, "回笺服务器地址（如 https://push.example.com）："), "/")
-		if srv == "" {
+		if s, _ := loadAgentKey(*slot); s != "" {
+			srv = s
+		} else if srv = strings.TrimRight(prompt(in, "回笺服务器地址（如 https://push.example.com）："), "/"); srv == "" {
 			return errors.New("缺少服务器地址")
 		}
 	}
 	{
-		code := strings.TrimSpace(fs.Arg(0))
 		key := strings.TrimSpace(env("HUIJIAN_AGENT_KEY", ""))
+		// 以前用连接码换过 key（同一服务器）、这次没给新连接码：直接用它登录，不再要连接码，也不会多占一把 key
+		if code == "" && !strings.HasPrefix(key, "AK_") {
+			if s, k := loadAgentKey(*slot); k != "" && s == srv {
+				key = k
+				fmt.Fprintln(os.Stderr, "用这台电脑以前保存的 Agent key 登录（想换新的：带上新连接码运行）")
+			}
+		}
 		if code == "" && !strings.HasPrefix(key, "AK_") {
 			code = prompt(in, "连接码（回笺「设置 → Pushkey」→「连接 agent」→ 生成连接码）：")
 		}
@@ -204,8 +220,19 @@ func agentSetupRemove(slot string) error {
 			fmt.Fprintln(os.Stderr, "结束会话失败：", err)
 		}
 	}
-	if dir, err := agentDir(slot); err == nil {
-		os.Remove(filepath.Join(dir, "agent_key"))
+	// 连接码换来的 key：在服务端吊销（不占额度），再删本机文件；吊销不了就提示用户去设置里吊销
+	if srv, key := loadAgentKey(slot); key != "" {
+		if _, err := agentReq("DELETE", srv, "/v1/agent/key", key, nil, 20*time.Second); err != nil {
+			var he *agentHTTPError
+			if !(errors.As(err, &he) && he.Status == 401) {
+				fmt.Fprintf(os.Stderr, "⚠️ 没能吊销这台电脑的 Agent key（%v），可以在回笺「设置 → Pushkey」里手动吊销\n", err)
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "✅ 已吊销这台电脑的 Agent key")
+		}
+		if dir, err := agentDir(slot); err == nil {
+			os.Remove(filepath.Join(dir, "agent_key"))
+		}
 	}
 	return nil
 }
@@ -341,6 +368,7 @@ func installSelf(cur string) (string, string, error) {
 		name = "huijian.exe"
 	}
 	dst := filepath.Join(dir, name)
+	os.Remove(dst + ".old") // 上次更新时改名留下的旧程序（还在运行时删不掉，下次再删）
 	if !samePath(cur, dst) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return cur, "", err
@@ -422,10 +450,15 @@ func copyExecutable(src, dst string) error {
 // HUIJIAN_SETUP_PATH_VAR 只给测试用：改写另一个用户变量，不动真的 PATH
 func addUserPathWindows(dir string) error {
 	v := env("HUIJIAN_SETUP_PATH_VAR", "Path")
-	// -Command 后面的参数不会进 $args：值用单引号字符串直接写进脚本（单引号加倍转义）
+	// -Command 后面的参数不会进 $args：值用单引号字符串直接写进脚本（单引号加倍转义）。
+	// 直接读写 HKCU\Environment 的原值（不展开 %USERPROFILE% 之类，按 REG_EXPAND_SZ 写回）；
+	// 写注册表不会通知别的程序，最后用 SetEnvironmentVariable 设一个临时变量再删掉，借它广播 WM_SETTINGCHANGE
 	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
-	ps := `$d=` + q(dir) + `; $v=` + q(v) + `; $p=[Environment]::GetEnvironmentVariable($v,'User'); if(-not $p){$p=''}; ` +
-		`if(($p -split ';') -notcontains $d){ [Environment]::SetEnvironmentVariable($v, ($p.TrimEnd(';') + ';' + $d).TrimStart(';'), 'User') }`
+	ps := `$d=` + q(dir) + `; $v=` + q(v) + `; $k=Get-Item 'HKCU:\Environment'; ` +
+		`$p=$k.GetValue($v,'','DoNotExpandEnvironmentNames'); if(-not $p){$p=''}; ` +
+		`if(($p -split ';') -notcontains $d){ ` +
+		`New-ItemProperty -Path 'HKCU:\Environment' -Name $v -Value (($p.TrimEnd(';') + ';' + $d).TrimStart(';')) -PropertyType ExpandString -Force | Out-Null; ` +
+		`[Environment]::SetEnvironmentVariable('HUIJIAN_PATH_REFRESH','1','User'); [Environment]::SetEnvironmentVariable('HUIJIAN_PATH_REFRESH',$null,'User') }`
 	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%v %s", err, strings.TrimSpace(string(out)))
@@ -469,8 +502,12 @@ const (
 	blockEnd   = "# <<< " + setupMark
 )
 
-// stripBlock：删掉文本里的标记块（含标记行），返回新文本和是否删过
+// stripBlock：删掉文本里的标记块（含标记行），返回新文本和是否删过。只有开始标记、没有结束标记（被手动改坏了）时不动，
+// 免得把开始标记之后的内容全删掉
 func stripBlock(s string) (string, bool) {
+	if strings.Count(s, "# >>> "+setupMark) != strings.Count(s, "# <<< "+setupMark) {
+		return s, false
+	}
 	lines := strings.SplitAfter(s, "\n")
 	var out []string
 	in, found := false, false
@@ -555,8 +592,19 @@ func parseJSONObj(b []byte) (*jsonObj, error) {
 
 func (o *jsonObj) get(k string) (json.RawMessage, bool) { v, ok := o.vals[k]; return v, ok }
 
+// marshalJSON：和 json.Marshal 一样，但不把 & < > 转成 \u0026 之类（保持用户配置原样）
+func marshalJSON(v any) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(b.Bytes(), "\n"), nil
+}
+
 func (o *jsonObj) set(k string, v any) error {
-	b, err := json.Marshal(v)
+	b, err := marshalJSON(v)
 	if raw, ok := v.(json.RawMessage); ok {
 		b, err = raw, nil
 	}
@@ -602,7 +650,7 @@ func (o *jsonObj) MarshalJSON() ([]byte, error) {
 
 // encodeIndent：两格缩进写回（中文不转义）
 func encodeIndent(v any) ([]byte, error) {
-	raw, err := json.Marshal(v)
+	raw, err := marshalJSON(v)
 	if err != nil {
 		return nil, err
 	}
@@ -614,7 +662,19 @@ func encodeIndent(v any) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// jsonSetServer：在 JSON 配置文件的 <容器键>（如 mcpServers）里设置 huijian 一项；文件不存在就新建
+// setupEnvMark：写进各 JSON 配置里 huijian 一项的 env，标明是 setup 写的（撤销时只删带标记的，用户自己配的 huijian 不动）
+const setupEnvMark = "HUIJIAN_SETUP"
+
+// isSetupEntry：这一项是不是 setup 写的
+func isSetupEntry(raw json.RawMessage) bool {
+	var e struct {
+		Env map[string]any `json:"env"`
+	}
+	return json.Unmarshal(raw, &e) == nil && e.Env[setupEnvMark] != nil
+}
+
+// jsonSetServer：在 JSON 配置文件的 <容器键>（如 mcpServers）里设置 huijian 一项；文件不存在就新建。
+// 已有用户自己写的 huijian（没有 setup 标记）时报错不动
 func jsonSetServer(path, container string, entry any) error {
 	b, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -630,6 +690,9 @@ func jsonSetServer(path, container string, entry any) error {
 			return fmt.Errorf("%s 里的 %s 格式不对：%v", path, container, err)
 		}
 	}
+	if old, ok := servers.get("huijian"); ok && !isSetupEntry(old) {
+		return fmt.Errorf("%s 里已有你自己写的 huijian，没有改动", path)
+	}
 	if err := servers.set("huijian", entry); err != nil {
 		return err
 	}
@@ -639,6 +702,9 @@ func jsonSetServer(path, container string, entry any) error {
 	out, err := encodeIndent(root)
 	if err != nil {
 		return err
+	}
+	if bytes.Contains(b, []byte("\r\n")) {
+		out = bytes.ReplaceAll(out, []byte("\n"), []byte("\r\n"))
 	}
 	if err := backupOnce(path); err != nil {
 		return err
@@ -664,9 +730,13 @@ func jsonRemoveServer(path, container string) (bool, error) {
 		return false, nil
 	}
 	servers, err := parseJSONObj(raw)
-	if err != nil || !servers.del("huijian") {
+	if err != nil {
 		return false, nil
 	}
+	if old, ok := servers.get("huijian"); !ok || !isSetupEntry(old) {
+		return false, nil // 没有，或者是用户自己写的：不动
+	}
+	servers.del("huijian")
 	if len(servers.keys) == 0 {
 		root.del(container)
 	} else if err := root.set(container, servers); err != nil {
@@ -676,7 +746,14 @@ func jsonRemoveServer(path, container string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return true, writeFileKeepMode(path, out)
+	if bytes.Contains(b, []byte("\r\n")) {
+		out = bytes.ReplaceAll(out, []byte("\n"), []byte("\r\n"))
+	}
+	if err := writeFileKeepMode(path, out); err != nil {
+		return false, err
+	}
+	os.Remove(path + ".bak-huijian") // 撤销完，原样恢复了，备份没用了（里面可能有别的凭据，不留）
+	return true, nil
 }
 
 func jsonHasServer(path, container string) bool {

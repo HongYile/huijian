@@ -184,6 +184,13 @@ struct AgentSettings: View {
                 }
             }
         }
+        .task(id: connect?.code) {
+            // 连接码到期自动收起，免得照着过期的码去 setup
+            guard let c = connect else { return }
+            let left = connectAt.addingTimeInterval(TimeInterval(c.expires_in)).timeIntervalSinceNow
+            if left > 0 { try? await Task.sleep(nanoseconds: UInt64(left * 1_000_000_000)) }
+            if !Task.isCancelled, connect?.code == c.code { connect = nil; connectMsg = "连接码已过期，可以重新生成。" }
+        }
         .padding(.bottom, 18)
     }
 

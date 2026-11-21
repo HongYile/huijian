@@ -32,6 +32,7 @@ func (h *Hub) registerAgentRoutes(m *http.ServeMux) {
 
 	m.HandleFunc("GET /v1/agent/info", h.agentKeyAuth(h.handleAgentInfo))
 	m.HandleFunc("POST /v1/agent/sessions", h.agentKeyAuth(h.handleAgentLogin))
+	m.HandleFunc("DELETE /v1/agent/key", h.agentKeyAuth(h.handleAgentKeySelfRevoke)) // 0.11.0：agent 吊销自己的 key（setup -remove）
 	m.HandleFunc("GET /v1/agent/sessions/{id}", h.agentKeyAuth(h.handleAgentLoginState))
 	m.HandleFunc("POST /v1/agent/sessions/{id}/reveal", h.agentKeyAuth(h.handleAgentReveal))
 
@@ -214,10 +215,6 @@ func (h *Hub) handleAgentConnect(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, errAgentKeyExists):
 		apiErr(w, 409, err.Error())
 		return
-	case errors.Is(err, errDisabled):
-		time.Sleep(500 * time.Millisecond)
-		apiErr(w, 403, "账号已停用")
-		return
 	case err != nil:
 		if !errors.Is(err, errAgentConnect) {
 			log.Printf("兑换连接码失败：%v", err)
@@ -227,6 +224,14 @@ func (h *Hub) handleAgentConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"id": k.ID, "key": key, "prefix": k.Prefix, "name": k.Name})
+}
+
+func (h *Hub) handleAgentKeySelfRevoke(w http.ResponseWriter, r *http.Request, k *AgentKey) {
+	if err := h.st.RevokeOwnAgentKey(k); err != nil {
+		apiErr(w, 500, "吊销失败")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 func (h *Hub) handleAgentKeys(w http.ResponseWriter, r *http.Request, d *Device) {

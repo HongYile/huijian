@@ -543,12 +543,16 @@ func TestAgentConnectCode(t *testing.T) {
 	// 账号停用后，兑换连接码返回「账号已停用」（不能借连接码给停用的账号新建 key）
 	dc := gen()
 	f.e.h.st.db.Exec(`UPDATE users SET disabled=1 WHERE id=(SELECT user_id FROM agent_keys WHERE prefix=?)`, f.ak[:7])
-	if code, out := e.call("POST", "/v1/agent/connect", "", map[string]any{"code": dc, "name": "x"}); code != 403 || out["error"] != "账号已停用" {
-		t.Fatalf("停用账号兑换应 403 账号已停用：%d %v", code, out)
+	if code, out := e.call("POST", "/v1/agent/connect", "", map[string]any{"code": dc, "name": "x"}); code != 403 || out["error"] != errAgentConnect.Error() {
+		t.Fatalf("停用账号兑换应和无效码一样 403：%d %v", code, out)
 	}
 	f.e.h.st.db.Exec(`UPDATE users SET disabled=0 WHERE id=(SELECT user_id FROM agent_keys WHERE prefix=?)`, f.ak[:7])
-	// 换来的 key 能用，列表里带名字
+	// 换来的 key 能用，列表里带名字；agent 能吊销自己的 key
 	e.agentMust(200, "GET", "/v1/agent/info", key, nil)
+	defer func() {
+		e.agentMust(200, "DELETE", "/v1/agent/key", key, nil)
+		e.agentMust(401, "GET", "/v1/agent/info", key, nil)
+	}()
 	ks := e.agentMust(200, "GET", "/v1/agent/keys", f.tokB, nil)["keys"].([]any)
 	if len(ks) != 2 || ks[1].(map[string]any)["name"] != "Windows Harness" {
 		t.Fatalf("key 列表不对：%v", ks)

@@ -128,6 +128,7 @@ func (s *Store) DeleteAccount(userID int64) ([]string, error) {
 		`DELETE FROM agent_replies WHERE user_id=?`,
 		`DELETE FROM agent_sessions WHERE user_id=?`,
 		`DELETE FROM agent_keys WHERE user_id=?`,
+		`DELETE FROM agent_connect_codes WHERE user_id=?`,
 		`DELETE FROM devices WHERE user_id=?`,
 		`DELETE FROM pushkeys WHERE user_id=?`,
 		`UPDATE invite_uses SET user_id=0, username='' WHERE user_id=?`,

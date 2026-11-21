@@ -224,6 +224,23 @@ func TestAgentCLIAndMCP(t *testing.T) {
 		t.Fatalf("MCP 响应不对：%s", out.String())
 	}
 
+	// check_replies(wait_seconds)：没有回复时等到期限；等的中途用户补充了，立刻返回
+	m2 := &mcpServer{slot: "t1", out: &syncWriter{w: io.Discard}}
+	t0 := time.Now()
+	if txt, bad := m2.tool(context.Background(), "check_replies", json.RawMessage(`{"wait_seconds":2}`)); bad || txt != "没有新回复" || time.Since(t0) < 1500*time.Millisecond {
+		t.Fatalf("check_replies 等待不对：%q %v %v", txt, bad, time.Since(t0))
+	}
+	var askID int64
+	f.e.h.st.db.QueryRow(`SELECT id FROM messages WHERE agent_session=? AND ask=1 ORDER BY id DESC LIMIT 1`, sid).Scan(&askID)
+	go func() { time.Sleep(time.Second); f.reply(t, f.tokB, sid, pk, askID, "再补一句") }()
+	t0 = time.Now()
+	if txt, bad := m2.tool(context.Background(), "check_replies", json.RawMessage(`{"wait_seconds":20}`)); bad || !strings.Contains(txt, "再补一句") || time.Since(t0) > 10*time.Second {
+		t.Fatalf("check_replies 等到补充应立刻返回：%q %v %v", txt, bad, time.Since(t0))
+	}
+	m2.mu.Lock()
+	m2.release()
+	m2.mu.Unlock()
+
 	// 退出：服务器上会话结束，本地文件删掉
 	if err := agentLogoutCmd([]string{"-s", "t1"}); err != nil {
 		t.Fatal(err)

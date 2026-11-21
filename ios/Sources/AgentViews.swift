@@ -263,6 +263,13 @@ struct AgentSections: View {
                 Text(connectMsg ?? "在 agent 所在的电脑上用连接码一步接入：自动登录、自动配置那台电脑上的 agent。")
             }
         }
+        .task(id: connect?.code) {
+            // 连接码到期自动收起，免得照着过期的码去 setup
+            guard let c = connect else { return }
+            let left = connectAt.addingTimeInterval(TimeInterval(c.expires_in)).timeIntervalSinceNow
+            if left > 0 { try? await Task.sleep(nanoseconds: UInt64(left * 1_000_000_000)) }
+            if !Task.isCancelled, connect?.code == c.code { connect = nil; connectMsg = "连接码已过期，可以重新生成。" }
+        }
     }
 
     private func act(_ id: String, _ f: @escaping () async throws -> Void) {

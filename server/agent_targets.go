@@ -24,6 +24,31 @@ func init() {
 	}
 }
 
+// setupEnv：JSON 配置里 huijian 一项的 env（带 setup 标记，见 isSetupEntry）
+func setupEnv() map[string]string { return map[string]string{setupEnvMark: "1"} }
+
+// jsonHasSetupServer：有 huijian 而且是 setup 写的
+func jsonHasSetupServer(path, container string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	root, err := parseJSONObj(b)
+	if err != nil {
+		return false
+	}
+	raw, ok := root.get(container)
+	if !ok {
+		return false
+	}
+	servers, err := parseJSONObj(raw)
+	if err != nil {
+		return false
+	}
+	e, ok := servers.get("huijian")
+	return ok && isSetupEntry(e)
+}
+
 // 共用 skill 目录：Codex、Cursor、Pi、Qwen Code、DeepSeek Harness 都读 ~/.agents/skills
 func sharedSkillDir() string { return homeJoin(".agents", "skills") }
 
@@ -52,14 +77,20 @@ func claudeTarget() agentTarget {
 		return homeJoin(".claude.json")
 	}
 	entry := func(bin string) map[string]any {
-		return map[string]any{"type": "stdio", "command": bin, "args": []string{"mcp"}, "env": map[string]string{}, "timeout": mcpTimeoutSec * 1000}
+		return map[string]any{"type": "stdio", "command": bin, "args": []string{"mcp"}, "env": setupEnv(), "timeout": mcpTimeoutSec * 1000}
 	}
 	return agentTarget{
 		id: "claude", name: "Claude Code",
 		detect: func() bool { return lookCmd("claude") != "" || exists(dir()) || exists(cfg()) },
 		configure: func(bin string) (string, error) {
 			// Windows 上 claude 多半是 npm 的 claude.cmd：经过 cmd.exe 传 JSON 参数会把引号弄坏，直接写文件
+			if jsonHasServer(cfg(), "mcpServers") && !jsonHasSetupServer(cfg(), "mcpServers") {
+				return "", fmt.Errorf("%s 里已有你自己写的 huijian，没有改动", cfg())
+			}
 			if c := lookCmd("claude"); c != "" && runtime.GOOS != "windows" {
+				if err := backupOnce(cfg()); err != nil {
+					return "", err
+				}
 				exec.Command(c, "mcp", "remove", "-s", "user", "huijian").Run()
 				js, _ := encodeIndent(entry(bin))
 				out, err := exec.Command(c, "mcp", "add-json", "-s", "user", "huijian", strings.TrimSpace(string(js))).CombinedOutput()
@@ -74,9 +105,10 @@ func claudeTarget() agentTarget {
 			return "已写入 " + cfg() + "，新开的会话生效", nil
 		},
 		remove: func() (bool, error) {
-			had := jsonHasServer(cfg(), "mcpServers")
+			had := jsonHasSetupServer(cfg(), "mcpServers") // 只撤销 setup 写的
 			if c := lookCmd("claude"); c != "" && had && runtime.GOOS != "windows" {
 				if exec.Command(c, "mcp", "remove", "-s", "user", "huijian").Run() == nil {
+					os.Remove(cfg() + ".bak-huijian")
 					return true, nil
 				}
 			}
@@ -143,7 +175,7 @@ func cursorTarget() agentTarget {
 		id: "cursor", name: "Cursor",
 		detect: func() bool { return exists(dir()) || cli() != "" },
 		configure: func(bin string) (string, error) {
-			if err := jsonSetServer(cfg(), "mcpServers", map[string]any{"type": "stdio", "command": bin, "args": []string{"mcp"}, "env": map[string]string{}}); err != nil {
+			if err := jsonSetServer(cfg(), "mcpServers", map[string]any{"type": "stdio", "command": bin, "args": []string{"mcp"}, "env": setupEnv()}); err != nil {
 				return "", err
 			}
 			note := "已写入 " + cfg() + "，重启 Cursor 生效"
@@ -282,7 +314,60 @@ func hermesHome() string {
 	return homeJoin(".hermes")
 }
 
-var reHermesMCP = regexp.MustCompile(`(?m)^mcp_servers:[ \t]*(\{\s*\})?[ \t]*(#.*)?$`)
+var reHermesMCP = regexp.MustCompile(`^mcp_servers:[ \t]*(\{\s*\})?[ \t]*(#.*)?$`)
+
+// hermesInsert：把 huijian 一项写进 Hermes config.yaml 的 mcp_servers（逐行处理，CRLF 也认）。
+//   - 没有 mcp_servers：在文件末尾追加整段（含 mcp_servers: 这一行，撤销后整段消失）
+//   - mcp_servers: {}：整行换成整段
+//   - 已有 mcp_servers：在它下面插入，缩进沿用已有子项（没有子项时两格）；本段里已有用户自己的 huijian 时报错不动
+func hermesInsert(s, body, p string) (string, error) {
+	nl := eol(s)
+	lines := strings.SplitAfter(s, "\n")
+	trim := func(l string) string { return strings.TrimRight(l, "\r\n") }
+	for i, l := range lines {
+		m := reHermesMCP.FindStringSubmatch(trim(l))
+		if m == nil {
+			continue
+		}
+		before, after := strings.Join(lines[:i], ""), strings.Join(lines[i+1:], "")
+		if m[1] != "" {
+			return before + blockBegin + nl + "mcp_servers:" + nl + indentBlock(body, "  ", nl) + blockEnd + nl + after, nil
+		}
+		// 本段：到下一个顶层键（不缩进、不是注释的非空行）为止
+		indent := ""
+		for _, x := range lines[i+1:] {
+			t := trim(x)
+			if strings.TrimSpace(t) == "" {
+				continue
+			}
+			if t[0] != ' ' && t[0] != '\t' && t[0] != '#' {
+				break
+			}
+			lead := t[:len(t)-len(strings.TrimLeft(t, " \t"))]
+			if strings.HasPrefix(strings.TrimSpace(t), "#") {
+				continue
+			}
+			if indent == "" {
+				indent = lead
+			}
+			if lead == indent && regexp.MustCompile(`^['"]?huijian['"]?\s*:`).MatchString(strings.TrimSpace(t)) {
+				return "", fmt.Errorf("%s 的 mcp_servers 里已有你自己写的 huijian，没有改动", p)
+			}
+		}
+		if indent == "" {
+			indent = "  "
+		}
+		head := l
+		if !strings.HasSuffix(head, "\n") {
+			head += nl
+		}
+		return before + head + indent + blockBegin + nl + indentBlock(body, indent, nl) + indent + blockEnd + nl + after, nil
+	}
+	if s != "" && !strings.HasSuffix(s, "\n") {
+		s += nl
+	}
+	return s + blockBegin + nl + "mcp_servers:" + nl + indentBlock(body, "  ", nl) + blockEnd + nl, nil
+}
 
 func hermesTarget() agentTarget {
 	cfg := func() string { return filepath.Join(hermesHome(), "config.yaml") }
@@ -296,30 +381,13 @@ func hermesTarget() agentTarget {
 				return "", err
 			}
 			s, _ := stripBlock(string(b))
-			nl := eol(string(b))
 			body := fmt.Sprintf(`huijian:
   command: %s
   args: [mcp]
   timeout: %d
   connect_timeout: 60`, yamlQuote(bin), mcpTimeoutSec)
-			if m := reHermesMCP.FindStringSubmatchIndex(s); m != nil && m[2] >= 0 {
-				// mcp_servers: {}（空的行内写法）：整行换成我们的块（撤销后整行消失，等于没有 mcp_servers）
-				rest := strings.TrimPrefix(strings.TrimPrefix(s[m[1]:], "\r"), "\n")
-				s = s[:m[0]] + blockBegin + nl + "mcp_servers:" + nl + indentBlock(body, "  ", nl) + blockEnd + nl + rest
-			} else if loc := reHermesMCP.FindStringIndex(s); loc != nil {
-				// 已有 mcp_servers：在它下面插入（缩进两格）
-				head := "mcp_servers:" + nl
-				rest := s[loc[1]:]
-				rest = strings.TrimPrefix(strings.TrimPrefix(rest, "\r"), "\n")
-				if regexp.MustCompile(`(?m)^  huijian:`).MatchString(rest) {
-					return "", fmt.Errorf("%s 的 mcp_servers 里已有你自己写的 huijian，没有改动", p)
-				}
-				s = s[:loc[0]] + head + "  " + blockBegin + nl + indentBlock(body, "  ", nl) + "  " + blockEnd + nl + rest
-			} else {
-				if s != "" && !strings.HasSuffix(s, "\n") {
-					s += nl
-				}
-				s += blockBegin + nl + "mcp_servers:" + nl + indentBlock(body, "  ", nl) + blockEnd + nl
+			if s, err = hermesInsert(s, body, p); err != nil {
+				return "", err
 			}
 			if err := backupOnce(p); err != nil {
 				return "", err
@@ -345,7 +413,7 @@ func qwenTarget() agentTarget {
 		id: "qwen", name: "Qwen Code",
 		detect: func() bool { return lookCmd("qwen") != "" || exists(dir()) },
 		configure: func(bin string) (string, error) {
-			if err := jsonSetServer(cfg(), "mcpServers", map[string]any{"command": bin, "args": []string{"mcp"}, "timeout": mcpTimeoutSec * 1000}); err != nil {
+			if err := jsonSetServer(cfg(), "mcpServers", map[string]any{"command": bin, "args": []string{"mcp"}, "env": setupEnv(), "timeout": mcpTimeoutSec * 1000}); err != nil {
 				return "", err
 			}
 			return "已写入 " + cfg() + "，重启 Qwen Code 生效", nil
@@ -367,7 +435,7 @@ func piTarget() agentTarget {
 		id: "pi", name: "Pi",
 		detect: func() bool { return lookCmd("pi") != "" || exists(dir()) },
 		configure: func(bin string) (string, error) {
-			if err := jsonSetServer(cfg(), "mcpServers", map[string]any{"command": bin, "args": []string{"mcp"}, "timeout": mcpTimeoutSec}); err != nil {
+			if err := jsonSetServer(cfg(), "mcpServers", map[string]any{"command": bin, "args": []string{"mcp"}, "env": setupEnv(), "timeout": mcpTimeoutSec}); err != nil {
 				return "", err
 			}
 			return "已写入 " + cfg() + "，重启 Pi 生效（旧版 Pi 没有内置 MCP 时，它会按 skill 用命令行）", nil
@@ -392,7 +460,11 @@ func removeTextBlock(p string) (bool, error) {
 	if !ok {
 		return false, nil
 	}
-	return true, writeFileKeepMode(p, []byte(s))
+	if err := writeFileKeepMode(p, []byte(s)); err != nil {
+		return false, err
+	}
+	os.Remove(p + ".bak-huijian") // 撤销完已恢复原样，备份没用了
+	return true, nil
 }
 
 func fileHasBlock(p string) bool {

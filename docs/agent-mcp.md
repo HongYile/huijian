@@ -44,6 +44,8 @@
 
 用户在设备上点「连接 agent」生成 8 位一次性连接码（Crockford Base32，40 位随机，显示为 XXXX-XXXX，10 分钟有效），在 agent 电脑上运行 `huijian agent setup -u <服务器> <连接码>`：用连接码换一把这台电脑专用的 Agent key（带名字，存在 `~/.huijian/agent/<槽位>/agent_key`），然后照常走 4.1 的登录（仍要在设备上核对 6 位核对码）。连接码只是代替「复制 Agent key」，不跳过核对：服务器拿到连接码也只能换 key，冒充不了账号公钥。服务器只存连接码的哈希；兑换接口按 IP 限速，失败统一 403 并延迟。
 
+`setup` 之后再运行（不带连接码）会沿用保存的会话或 key，不用再要连接码；带了新连接码就照样兑换、换成新 key 重新登录。`huijian agent setup -remove` 撤销这台电脑上写入的 agent 配置，退出会话，并用 `DELETE /v1/agent/key` 在服务端吊销这把 key。只改动带标记的配置（TOML / YAML 用 `# >>> huijian agent setup` 标记块，JSON 项带 `env.HUIJIAN_SETUP=1`）；用户自己写的同名 `huijian` 不覆盖、不删除。
+
 setup 接着找出本机装的 agent（Claude Code、Codex、Cursor、DeepSeek Harness、Hermes、Qwen Code、Pi），把 `huijian mcp` 写进它们的配置、装上 skill；写之前备份为 `<文件>.bak-huijian`，写入内容带标记，`huijian agent setup -remove` 原样撤销并结束会话；`huijian agent status` 列出接入情况。
 
 ### 4.1 登录（手机批准 + 6 位核对码）
@@ -229,9 +231,10 @@ Mac、iPhone、安卓同步做：
 |---|---|---|
 | `POST /v1/agent/keys` | 设备 | 新建 Agent key → `{"id","key","prefix","created_at"}`；每账号最多 10 把，满了 409 |
 | `POST /v1/agent/connect-codes` | 设备 | 0.11.0：生成连接码 → `{"code":"XXXX-XXXX","expires_at","expires_in":600}`；同一设备重新生成时旧码作废；key 已满或账号没有钥匙时 409 |
-| `POST /v1/agent/connect` | 无（按 IP 限速） | 0.11.0：`{code, name}` → `{"id","key","prefix","name"}`，用连接码换一把带名字的 Agent key；码不对 / 过期 / 用过统一 403（延迟 0.5 秒） |
-| `GET /v1/agent/keys` | 设备 | `{"keys":[{"id","prefix","created_at","last_used"}]}` |
+| `POST /v1/agent/connect` | 无（按 IP 限速） | 0.11.0：`{code, name}` → `{"id","key","prefix","name"}`，用连接码换一把带名字的 Agent key；码不对 / 过期 / 用过 / 账号已停用统一 403（延迟 0.5 秒）；只有 key 已满时 409 |
+| `GET /v1/agent/keys` | 设备 | `{"keys":[{"id","prefix","name","created_at","last_used"}]}`（`name`：连接码兑换时起的名字，0.11.0） |
 | `DELETE /v1/agent/keys/{id}` | 设备 | 吊销，它登录的会话全部结束 |
+| `DELETE /v1/agent/key` | AK | 0.11.0：agent 吊销自己这把 key（`huijian agent setup -remove` 用），它登录的会话一起结束 |
 | `GET /v1/agent/info` | AK | `{"account_pub","kid","limits":{…}}`；账号还没有钥匙时 409 |
 | `POST /v1/agent/sessions` | AK | `{name, pub, commit}` → `{"session_id"}`；等待批准的请求每账号最多 3 个，10 分钟没批准自动作废 |
 | `GET /v1/agent/sessions/{id}` | AK | `{"state","challenge"}`；`state`：`pending` / `approved` / `denied` / `expired` / `ended`。批准后第一次查询带 `token`（只给一次） |

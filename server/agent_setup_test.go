@@ -235,6 +235,48 @@ func TestAgentSetupEdgeCases(t *testing.T) {
 	if got := yamlQuote(`C:\it's\huijian.exe`); got != `'C:\it''s\huijian.exe'` {
 		t.Fatal(got)
 	}
+	// Hermes：CRLF、四格缩进、mcp_servers 行带注释、引号写的 huijian、别的段里同名项不误报
+	writeT(t, hermes, "model: x\r\nmcp_servers:   # 我的\r\n    other:\r\n        command: y\r\nother_section:\r\n  huijian: 不相干\r\n")
+	orig := readT(t, hermes)
+	if _, err := h.configure("/b/huijian"); err != nil {
+		t.Fatalf("Hermes CRLF / 四格缩进：%v", err)
+	}
+	hs := readT(t, hermes)
+	if strings.Count(hs, "mcp_servers:") != 1 || !strings.Contains(hs, "mcp_servers:   # 我的\r\n    # >>> ") ||
+		!strings.Contains(hs, "    huijian:\r\n      command: '/b/huijian'\r\n") || strings.Contains(strings.ReplaceAll(hs, "\r\n", ""), "\n") {
+		t.Fatalf("Hermes CRLF / 四格缩进写得不对：%q", hs)
+	}
+	h.remove()
+	if readT(t, hermes) != orig {
+		t.Fatalf("Hermes CRLF 撤销后不是原样：%q", readT(t, hermes))
+	}
+	writeT(t, hermes, "mcp_servers:\n  \"huijian\":\n    command: mine\n")
+	if _, err := h.configure("/b/huijian"); err == nil {
+		t.Fatal("引号写的 huijian 也应报错")
+	}
+	// JSON：用户自己的 huijian 不覆盖、撤销也不删；& < > 和 CRLF 保持
+	cursor := filepath.Join(home, ".cursor", "mcp.json")
+	writeT(t, cursor, "{\r\n  \"mcpServers\": {\"huijian\": {\"command\": \"mine\"}},\r\n  \"note\": \"a&b<c>\"\r\n}\r\n")
+	if _, err := cursorTarget().configure("/b/huijian"); err == nil || !strings.Contains(err.Error(), "你自己写的") {
+		t.Fatalf("用户自己的 huijian 应报错：%v", err)
+	}
+	if ok, _ := cursorTarget().remove(); ok || !strings.Contains(readT(t, cursor), "mine") {
+		t.Fatal("撤销不应删用户自己的 huijian")
+	}
+	writeT(t, cursor, "{\r\n  \"note\": \"a&b<c>\"\r\n}\r\n")
+	if _, err := cursorTarget().configure("/b/huijian"); err != nil {
+		t.Fatal(err)
+	}
+	if cs := readT(t, cursor); !strings.Contains(cs, `"a&b<c>"`) || !strings.Contains(cs, "\r\n") || strings.Contains(strings.ReplaceAll(cs, "\r\n", ""), "\n") || !strings.Contains(cs, setupEnvMark) {
+		t.Fatalf("JSON 转义 / CRLF / 标记不对：%q", cs)
+	}
+	if ok, _ := cursorTarget().remove(); !ok || exists(cursor+".bak-huijian") {
+		t.Fatal("撤销应删掉 setup 写的项和备份")
+	}
+	// 标记块缺结束标记：不动
+	if out, ok := stripBlock("a\n" + blockBegin + "\nb\nc\n"); ok || out != "a\n"+blockBegin+"\nb\nc\n" {
+		t.Fatal("缺结束标记时不应删除")
+	}
 	// 选择
 	ts := []agentTarget{{id: "a"}, {id: "b"}, {id: "c"}}
 	if got := pickTargets(ts, ""); len(got) != 3 {
@@ -283,6 +325,29 @@ func TestAgentSetupFlow(t *testing.T) {
 	if err := agentSetupCmd([]string{"-s", "st", "-yes", "-no-install"}); err != nil {
 		t.Fatalf("第二次 setup：%v", err)
 	}
+	_, key1 := loadAgentKey("st")
+	// 会话被结束后再运行（没给连接码）：用保存的 key 重新登录，不再要连接码，不多建 key
+	s1, _ := loadAgentState("st")
+	f.e.agentMust(200, "DELETE", "/v1/agent/sessions/"+s1.SessionID, f.tokA, nil)
+	nKeys := len(f.e.agentMust(200, "GET", "/v1/agent/keys", f.tokB, nil)["keys"].([]any))
+	go func() { done <- agentSetupCmd([]string{"-s", "st", "-yes", "-no-install"}) }()
+	f.approveNext(t)
+	if err := <-done; err != nil {
+		t.Fatalf("会话结束后重新 setup：%v", err)
+	}
+	if n := len(f.e.agentMust(200, "GET", "/v1/agent/keys", f.tokB, nil)["keys"].([]any)); n != nKeys {
+		t.Fatalf("不应多建 key：%d → %d", nKeys, n)
+	}
+	// 已登录但给了新连接码：照样兑换（换一把新 key）、重新登录
+	code2 := f.e.agentMust(200, "POST", "/v1/agent/connect-codes", f.tokB, nil)["code"].(string)
+	go func() { done <- agentSetupCmd([]string{"-u", f.e.srv.URL, "-s", "st", "-yes", "-no-install", code2}) }()
+	f.approveNext(t)
+	if err := <-done; err != nil {
+		t.Fatalf("带新连接码 setup：%v", err)
+	}
+	if _, key2 := loadAgentKey("st"); key2 == key1 || key2 == "" {
+		t.Fatal("带新连接码时应换成新 key")
+	}
 	// 撤销：配置删掉、会话结束、key 文件删掉
 	if err := agentSetupCmd([]string{"-s", "st", "-remove"}); err != nil {
 		t.Fatal(err)
@@ -292,6 +357,12 @@ func TestAgentSetupFlow(t *testing.T) {
 	}
 	if _, key := loadAgentKey("st"); key != "" {
 		t.Fatal("撤销后应删掉保存的 key")
+	}
+	// 撤销时在服务端吊销了这台电脑的 key（列表里不再有「测试电脑」）
+	for _, k := range f.e.agentMust(200, "GET", "/v1/agent/keys", f.tokB, nil)["keys"].([]any) {
+		if k.(map[string]any)["name"] == "测试电脑" && k.(map[string]any)["prefix"] != key1[:7] {
+			t.Fatalf("撤销后服务端仍有这台电脑的当前 key：%v", k)
+		}
 	}
 	// 用过的连接码不能再用
 	if c, _ := f.e.call("POST", "/v1/agent/connect", "", map[string]any{"code": code, "name": "x"}); c != 403 {

@@ -278,21 +278,32 @@ func (m *mcpServer) tool(ctx context.Context, name string, raw json.RawMessage) 
 		return "用户回复：\n" + got.Text + "\n\n（用户之后可能还会补充：继续做之前、结束任务之前，用 check_replies 看看有没有新回复。）", false
 	case "check_replies":
 		// wait_seconds：没有现成的回复时最多等这么久（≤50 秒，给工具调用有 60 秒上限的客户端分段等，例如 Cursor 命令行）
-		wait := time.Duration(min(max(a.Wait, 0), 50)) * time.Second
-		if wait > 0 {
+		// 服务端可能先返回给并发 ask 的回复（留给那次调用）：在截止前接着等，直到有能交出的回复
+		ready := func() bool {
 			m.mu.Lock()
+			defer m.mu.Unlock()
 			if s, err := m.state(); err == nil {
 				for _, g := range s.Inbox {
 					if m.waiting[g.MsgID] == 0 {
-						wait = 0
-						break
+						return true
 					}
 				}
 			}
-			m.mu.Unlock()
+			return false
 		}
-		if err := m.fetch(ctx, wait); err != nil {
-			return m.failed("取回复失败：", err)
+		deadline := time.Now().Add(time.Duration(min(max(a.Wait, 0), 50)) * time.Second)
+		for {
+			left := time.Until(deadline)
+			if left < 0 || ready() {
+				left = 0
+			}
+			// 服务端按整秒长轮询：向上取整，别把最后不足一秒的部分丢掉
+			if err := m.fetch(ctx, (left + time.Second - 1).Truncate(time.Second)); err != nil {
+				return m.failed("取回复失败：", err)
+			}
+			if left == 0 || ready() || ctx.Err() != nil || time.Until(deadline) <= 0 {
+				break
+			}
 		}
 		m.mu.Lock()
 		defer m.mu.Unlock()
