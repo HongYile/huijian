@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 回笺 Windows 客户端：WinUI 3（Windows App SDK）+ 共用 Rust 核心（huijian_core.dll，见 ../core） -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RootNamespace>Huijian</RootNamespace>
+    <AssemblyName>Huijian</AssemblyName>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <!-- 未打包应用也要打开：发布时才会生成 Huijian.pri（编译好的 XAML 和资源），否则启动即崩 -->
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <SelfContained>true</SelfContained>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\huijian.ico</ApplicationIcon>
+    <Version>0.1.0</Version>
+    <Product>回笺</Product>
+    <!-- 体积：只留中英文资源；发布时裁剪（WinUI 3 + CsWinRT 支持） -->
+    <SatelliteResourceLanguages>zh-Hans;en</SatelliteResourceLanguages>
+    <PublishTrimmed Condition="'$(Configuration)' == 'Release'">true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 只引用用得到的组件：总包 Microsoft.WindowsAppSDK 会带上 AI / ML（onnxruntime、DirectML）、搜索、小组件，发布目录多出约 60 MB -->
+    <PackageReference Include="Microsoft.WindowsAppSDK.Base" Version="2.7.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="2.7.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Foundation" Version="2.7.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="2.7.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.7.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.DWrite" Version="2.7.0" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2957" />
+    <!-- 不用总包时要直接引用（它的 build/ props 只对直接引用生效） -->
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools.MSIX" Version="1.7.251221100" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Assets\huijian.ico" CopyToOutputDirectory="PreserveNewest" />
+    <!-- 共用核心：先在 ../core 编译（core/build.sh windows），再复制到 native\ -->
+    <Content Include="native\huijian_core.dll" Link="huijian_core.dll" CopyToOutputDirectory="PreserveNewest" Condition="Exists('native\huijian_core.dll')" />
+  </ItemGroup>
+</Project>

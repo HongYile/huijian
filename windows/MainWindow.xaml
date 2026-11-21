@@ -1,0 +1,22 @@
+<Window x:Class="Huijian.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="回笺">
+  <Window.SystemBackdrop>
+    <MicaBackdrop />
+  </Window.SystemBackdrop>
+  <ScrollViewer>
+    <StackPanel Padding="32" Spacing="14" MaxWidth="720" HorizontalAlignment="Left">
+      <TextBlock Text="回笺 Windows 原型" Style="{StaticResource TitleTextBlockStyle}" />
+      <TextBlock x:Name="CoreInfo" TextWrapping="Wrap" />
+      <TextBlock x:Name="Argon" TextWrapping="Wrap" />
+      <TextBlock x:Name="Md" TextWrapping="Wrap" FontFamily="Consolas" FontSize="12" />
+      <TextBlock x:Name="Mem" TextWrapping="Wrap" />
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <Button Content="发一条测试通知（带快捷回复）" Click="OnTestNotify" />
+        <Button Content="刷新内存占用" Click="OnMem" />
+      </StackPanel>
+      <TextBlock x:Name="Reply" TextWrapping="Wrap" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+    </StackPanel>
+  </ScrollViewer>
+</Window>

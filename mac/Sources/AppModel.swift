@@ -857,6 +857,7 @@ final class AppModel: ObservableObject {
         "agent": "agent 双向（回复 agent 的提问、批准 agent 登录）",
         "e2e.auto": "默认自动加密（服务器代加密、重置加密）",
         "register.invite": "注册邀请码", "register.e2e": "注册即开启加密",
+        "agent.connect": "连接码一步接入 agent",
         // 下面三项 Mac 客户端不需要做什么（iPhone 的 Bark 转发和软件源、服务端在管理后台自更新），认识即可，不提示「更新客户端」
         "bark": "iPhone 锁屏通知（Bark 转发）", "ios.source": "iPhone 客户端软件源", "server.update": "服务端一键更新",
     ]
