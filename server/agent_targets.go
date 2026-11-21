@@ -326,7 +326,7 @@ func hermesTarget() agentTarget {
 			if err := writeFileKeepMode(p, []byte(s)); err != nil {
 				return "", err
 			}
-			return "已写入 " + p + "，重启 Hermes（或在会话里 /reload-mcp）生效", nil
+			return "已写入 " + p + "，重启 Hermes（或在会话里 /reload-mcp）生效；Hermes 要带 MCP 支持（官方安装脚本默认带，pip / uv 安装要用 hermes-agent[mcp]），hermes mcp test huijian 可检查", nil
 		},
 		remove:     func() (bool, error) { return removeTextBlock(cfg()) },
 		configured: func() (bool, string) { return fileHasBlock(cfg()), cfg() },

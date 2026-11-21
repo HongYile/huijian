@@ -56,6 +56,7 @@ func agentSetupCmd(args []string) error {
 	yes := fs.Bool("yes", false, "不提问：接入找到的全部 agent")
 	remove := fs.Bool("remove", false, "撤销：删除写入各 agent 的配置和 skill，结束会话")
 	noInstall := fs.Bool("no-install", false, "不把 huijian 复制到固定位置（用当前程序的路径）")
+	noLogin := fs.Bool("no-login", false, "只配置本机的 agent，不登录（已经用 huijian agent login 登录过时用）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -85,6 +86,9 @@ func agentSetupCmd(args []string) error {
 
 	// 2. 登录（已有有效会话就跳过）
 	srv := strings.TrimRight(strings.Split(*server, ",")[0], "/")
+	if *noLogin {
+		goto configure
+	}
 	if old, _ := loadAgentState(*slot); old != nil && old.Token != "" && (srv == "" || old.Server == srv) {
 		if _, err := agentReq("GET", old.Server, "/v1/agent/replies?wait=0", old.Token, nil, 20*time.Second); err == nil {
 			fmt.Fprintf(os.Stderr, "✅ 已经登录：「%s」（%s），跳过登录\n", old.Name, old.Server)

@@ -140,7 +140,7 @@ func (m *mcpServer) serve(in io.Reader) int {
 			}
 			m.reply(r.ID, map[string]any{"protocolVersion": ver, "capabilities": map[string]any{"tools": map[string]any{}},
 				"serverInfo":   map[string]any{"name": "huijian", "version": version},
-				"instructions": "用回笺把消息发到用户的手机和电脑。只有确实需要用户做决定时才用 ask；普通进度用 notify。"})
+				"instructions": "用回笺把消息发到用户的手机和电脑。只有确实需要用户做决定时才用 ask；普通进度用 notify。ask 拿到回复后用户可能还会补充：继续做之前、结束任务之前调用 check_replies。"})
 		case "ping":
 			m.reply(r.ID, map[string]any{})
 		case "tools/list":
