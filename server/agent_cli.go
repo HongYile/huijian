@@ -302,7 +302,8 @@ func agentLoginCmd(args []string) error {
 		return err
 	}
 	sid, _ := out["session_id"].(string)
-	fmt.Fprintf(os.Stderr, "已发起登录「%s」：在回笺（设置 → Pushkey 页最上方）里会看到这个请求。\n", *name)
+	// 核对码要等设备点了「批准」（发来随机数）才算得出来：先说清楚下一步在设备上做什么，免得 agent 以为卡住了
+	fmt.Fprintf(os.Stderr, "已发起登录「%s」：在回笺「设置 → Pushkey」页最上方会出现这个请求，点「批准」后这里会显示 6 位核对码（最多等 %s）。\n", *name, *wait)
 	deadline := time.Now().Add(*wait)
 	revealed := ""
 	for time.Now().Before(deadline) {

@@ -128,7 +128,7 @@ with huijian.run("exp42"):   # 自动发送：开始 / 完成（含用时）/ �
 
 ```bash
 export HUIJIAN_AGENT_KEY=AK_xxx
-huijian agent login -name "家里 Claude Code"          # 显示核对码，等你在手机上批准
+huijian agent login -name "家里 Claude Code"          # 你在手机上点「批准」后显示核对码，核对一致再确认
 huijian agent ask -choice 删 -choice 保留 "要不要删掉 3 个异常样本？"   # 回复打印到标准输出
 claude mcp add huijian -- huijian mcp                 # 或者作为 MCP 工具：notify / ask / check_replies
 ```

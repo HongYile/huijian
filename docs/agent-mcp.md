@@ -46,7 +46,7 @@
 
 1. agent 生成会话钥匙对（X25519）和随机 `nb`，用 Agent key 调 `POST /v1/agent/sessions {name, pub, commit}`。`commit` 的算法和设备批准一样，但用 agent 专用前缀 `huijian agent v1 commit`，账号公钥取 `GET /v1/agent/info` 返回的值（或 agent 以前钉住的值）。
 2. 已解锁的设备收到请求（长轮询 `kind: "agent"`），出 `na`。agent 揭晓 `nb`。
-3. 两边都显示 6 位核对码，前缀改为 `huijian agent v1 sas`。终端里打印，手机上显示。用户对上后在手机上点「批准」。
+3. 两边都显示 6 位核对码，前缀改为 `huijian agent v1 sas`。终端里打印，手机上显示。用户对上后在手机上点「一致，批准」。核对码要等手机点了「批准」（发出 challenge）才算得出来，所以终端在这之前只提示「去设备上点批准」（2026-11-21 实测：agent 看不到核对码会以为卡住了）。
 4. 批准设备写一份**会话证明** `hja1`：
    - 内容：会话 id、会话公钥、名称、批准时间；
    - 加密：AES-256-GCM，密钥 = HKDF-SHA256(账号私钥, info=`huijian agent v1 attest`)；
@@ -123,7 +123,7 @@ HPKE Auth 模式（RFC 9180 `mode_auth`）在加密的同时证明「是谁加�
 ```bash
 export HUIJIAN_URL=https://push.example.com
 export HUIJIAN_AGENT_KEY=AK_xxx
-huijian agent login -name "家里 Claude Code"   # 打印 6 位核对码，等手机批准
+huijian agent login -name "家里 Claude Code"   # 手机上点「批准」后打印 6 位核对码，核对一致再确认
 huijian agent send -p 3 "数据清洗完成"          # 发会话消息（可被回复）
 huijian agent ask -timeout 30m -choice 删 -choice 保留 "要不要删掉 3 个异常样本？"   # 发出并等回复（可带快捷按钮），回复打印到标准输出
 huijian agent replies -wait 60                  # 取回复（JSON 每行一条）
