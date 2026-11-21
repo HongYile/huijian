@@ -8,8 +8,8 @@ package main
 
 import (
 	"bufio"
-	_ "embed"
 	"bytes"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"flag"

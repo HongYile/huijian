@@ -194,8 +194,10 @@ func mcpTools() []map[string]any {
 				"choices":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 4, "description": "快捷回复选项，最多 4 个、每个最长 20 字（可选）"},
 				"timeout_seconds": map[string]any{"type": "integer", "minimum": 10, "maximum": 86400, "description": "最多等多久，默认 1800"},
 			}}},
-		{"name": "check_replies", "description": "取用户发来、还没处理的回复：ask 超时后用户才回的，或者 ask 拿到回复之后用户又补充的。继续做之前、结束任务之前调用一次。",
-			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
+		{"name": "check_replies", "description": "取用户发来、还没处理的回复：ask 超时后用户才回的，或者 ask 拿到回复之后用户又补充的。继续做之前、结束任务之前调用一次。工具调用有 60 秒上限时（例如 Cursor 命令行）：ask 用 timeout_seconds=50，超时后反复调用 check_replies(wait_seconds=50) 分段等。",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
+				"wait_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 50, "description": "没有回复时最多等几秒（默认 0 = 不等）"},
+			}}},
 	}
 }
 
@@ -220,6 +222,7 @@ func (m *mcpServer) tool(ctx context.Context, name string, raw json.RawMessage) 
 		Question string   `json:"question"`
 		Choices  []string `json:"choices"`
 		Timeout  int      `json:"timeout_seconds"`
+		Wait     int      `json:"wait_seconds"`
 	}
 	if len(raw) > 0 && json.Unmarshal(raw, &a) != nil {
 		return "参数格式不对", true
@@ -274,7 +277,21 @@ func (m *mcpServer) tool(ctx context.Context, name string, raw json.RawMessage) 
 		// 拿到回复 ask 就结束了，之后用户再补充的话 agent 不会自动知道：提醒它适时 check_replies（2026-11-21 实测：用户回了「继续」又补了一句，agent 没看到）
 		return "用户回复：\n" + got.Text + "\n\n（用户之后可能还会补充：继续做之前、结束任务之前，用 check_replies 看看有没有新回复。）", false
 	case "check_replies":
-		if err := m.fetch(ctx, 0); err != nil {
+		// wait_seconds：没有现成的回复时最多等这么久（≤50 秒，给工具调用有 60 秒上限的客户端分段等，例如 Cursor 命令行）
+		wait := time.Duration(min(max(a.Wait, 0), 50)) * time.Second
+		if wait > 0 {
+			m.mu.Lock()
+			if s, err := m.state(); err == nil {
+				for _, g := range s.Inbox {
+					if m.waiting[g.MsgID] == 0 {
+						wait = 0
+						break
+					}
+				}
+			}
+			m.mu.Unlock()
+		}
+		if err := m.fetch(ctx, wait); err != nil {
 			return m.failed("取回复失败：", err)
 		}
 		m.mu.Lock()

@@ -540,6 +540,13 @@ func TestAgentConnectCode(t *testing.T) {
 	if code, _ := e.call("POST", "/v1/agent/connect", "", map[string]any{"code": c, "name": "again"}); code != 403 {
 		t.Fatalf("连接码只能用一次，得到 %d", code)
 	}
+	// 账号停用后，兑换连接码返回「账号已停用」（不能借连接码给停用的账号新建 key）
+	dc := gen()
+	f.e.h.st.db.Exec(`UPDATE users SET disabled=1 WHERE id=(SELECT user_id FROM agent_keys WHERE prefix=?)`, f.ak[:7])
+	if code, out := e.call("POST", "/v1/agent/connect", "", map[string]any{"code": dc, "name": "x"}); code != 403 || out["error"] != "账号已停用" {
+		t.Fatalf("停用账号兑换应 403 账号已停用：%d %v", code, out)
+	}
+	f.e.h.st.db.Exec(`UPDATE users SET disabled=0 WHERE id=(SELECT user_id FROM agent_keys WHERE prefix=?)`, f.ak[:7])
 	// 换来的 key 能用，列表里带名字
 	e.agentMust(200, "GET", "/v1/agent/info", key, nil)
 	ks := e.agentMust(200, "GET", "/v1/agent/keys", f.tokB, nil)["keys"].([]any)
