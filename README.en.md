@@ -123,6 +123,25 @@ with huijian.run("exp42"):   # sends start / done (with duration) / error (urgen
 
 Priorities, channels, Markdown syntax and the full API: [user guide](docs/guide.md), [Huijian Markdown](docs/markdown.md), [API reference](docs/api.md) (Chinese).
 
+**Agents ask, you reply** (server 0.10.0+; one-step connect code 0.11.0+): MCP and CLI work on Windows, macOS and Linux.
+
+1. In the client, open "Settings → Pushkey → Connect agent" and generate a connect code (valid 10 minutes, single use).
+2. On the agent's computer, download the `huijian` CLI ([GitHub Releases](https://github.com/HongYile/huijian/releases?q=server-v&expanded=true), the server-v releases: `windows-amd64.exe` / `windows-arm64.exe`, `darwin-arm64` / `darwin-amd64`, `linux-amd64` / `linux-arm64`) and run:
+
+```bash
+huijian agent setup -u https://your-server XXXX-XXXX   # on Windows you can also double-click the exe
+```
+
+3. Approve the login request on your phone or computer and compare the 6-digit codes.
+
+setup installs itself, adds the MCP server (tools `notify` / `ask` / `check_replies`) to Claude Code, Codex, Cursor, DeepSeek Harness, Hermes Agent, Qwen Code and Pi on that computer, and installs the skill. It backs up every file it changes; `huijian agent status` shows what is connected and `huijian agent setup -remove` undoes everything. For any other MCP client, add one entry and raise the tool timeout to about 30 minutes (`ask` waits for a human):
+
+```json
+{ "mcpServers": { "huijian": { "command": "/full/path/to/huijian", "args": ["mcp"] } } }
+```
+
+The MCP server runs locally: messages are encrypted on your computer and the server only sees ciphertext, so it works with agents running on your own machines, not web or cloud-hosted agents. Agents without MCP can use the CLI: `huijian agent ask -choice yes -choice no "Delete 3 outliers?"`. Design: [docs/agent-mcp.md](docs/agent-mcp.md) (Chinese).
+
 ## Clients
 
 | | Status | Install |

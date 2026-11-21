@@ -37,9 +37,9 @@ for arch in amd64 arm64; do
   CGO_ENABLED=0 GOOS=linux GOARCH=$arch GOTOOLCHAIN=local go build -trimpath -ldflags "-s -w" -o "$f" .
   FILES+=("$f")
 done
-# agent 电脑用的命令行（huijian agent setup）：Windows / macOS。不进 update-server.json（服务端一键更新只用 linux）
+# agent 电脑用的命令行（huijian agent setup）：Windows（含 ARM）/ macOS；Linux 直接用上面的服务端程序（同一个程序）。不进 update-server.json（服务端一键更新只用 linux）
 CLI=()
-for t in windows/amd64 darwin/arm64 darwin/amd64; do
+for t in windows/amd64 windows/arm64 darwin/arm64 darwin/amd64; do
   os=${t%/*}; arch=${t#*/}; ext=""; [ "$os" = windows ] && ext=.exe
   f="$OUT/huijian-$VERSION-$os-$arch$ext"
   CGO_ENABLED=0 GOOS=$os GOARCH=$arch GOTOOLCHAIN=local go build -trimpath -ldflags "-s -w" -o "$f" .
@@ -55,9 +55,9 @@ BODY="$NOTES
 也可以 \`git pull\` 后 \`docker compose up -d --build\` 重新构建镜像。
 
 **agent 电脑用的命令行**（\`huijian agent setup\`，在回笺「设置 → Pushkey → 连接 agent」生成连接码后一步接入）：
-Windows 下载 \`huijian-$VERSION-windows-amd64.exe\` 双击运行，按提示输入服务器地址和连接码；
+Windows 下载 \`huijian-$VERSION-windows-amd64.exe\`（ARM 电脑用 windows-arm64）双击运行，按提示输入服务器地址和连接码；
 macOS：\`curl -fLo huijian https://github.com/$GITHUB_REPO/releases/download/server-v$VERSION/huijian-$VERSION-darwin-arm64 && chmod +x huijian && ./huijian agent setup -u 服务器 连接码\`（Intel Mac 换成 darwin-amd64）；
-Linux 用上面的 linux 程序，命令同 macOS。"
+Linux 同 macOS，把 darwin-arm64 换成 linux-amd64（ARM 用 linux-arm64）。MCP 三个平台都能用：setup 会把 \`huijian mcp\` 写进 agent 配置；没自动支持的 agent 手动加 \`{\"command\": \"huijian 的完整路径\", \"args\": [\"mcp\"]}\`。"
 if [ "${DRY_RUN:-}" = 1 ]; then echo "DRY_RUN：产物在 ${OUT}，未上传"; ls -lh "$OUT" | awk 'NR>1{print $5, $9}'; exit 0; fi
 gh release create "server-v$VERSION" --repo "$GITHUB_REPO" --target "$(git rev-parse HEAD)" --title "回笺服务端 $VERSION" --notes "$BODY" --latest=false \
   "${FILES[@]}" "${CLI[@]}" "$OUT/update-server.json"

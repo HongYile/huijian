@@ -124,13 +124,27 @@ with huijian.run("exp42"):   # 自动发送：开始 / 完成（含用时）/ �
     train()
 ```
 
-**agent 提问、等你回复**（服务端 0.10.0 起）：在客户端「设置 → Pushkey」页的 Agent 部分新建 Agent key，agent 登录时在设备上核对 6 位核对码批准。
+**agent 提问、等你回复**（服务端 0.10.0 起；连接码一步接入 0.11.0 起）：MCP 和命令行在 Windows、macOS、Linux 上都能用。
+
+1. 在客户端「设置 → Pushkey → 连接 agent」生成连接码（10 分钟有效、只能用一次）。
+2. 在 agent 所在的电脑上下载 `huijian` 命令行（[GitHub Releases](https://github.com/HongYile/huijian/releases?q=server-v&expanded=true) 里 server-v 开头的版本：Windows `windows-amd64.exe` / `windows-arm64.exe`，macOS `darwin-arm64` / `darwin-amd64`，Linux `linux-amd64` / `linux-arm64`），运行：
 
 ```bash
-export HUIJIAN_AGENT_KEY=AK_xxx
-huijian agent login -name "家里 Claude Code"          # 你在手机上点「批准」后显示核对码，核对一致再确认
+huijian agent setup -u https://你的服务器 XXXX-XXXX   # Windows 也可以直接双击 exe，按提示输入
+```
+
+3. 手机或电脑上出现登录请求时点「批准」，核对两边的 6 位核对码。
+
+setup 会把自己装好，自动把 MCP（工具 `notify` / `ask` / `check_replies`）写进这台电脑上的 Claude Code、Codex、Cursor、DeepSeek Harness、Hermes Agent、Qwen Code、Pi，并装上 skill；改动前先备份，`huijian agent status` 查看接入情况，`huijian agent setup -remove` 一键撤销。其他支持 MCP 的 agent 手动加一项即可，工具超时建议调到 30 分钟左右（`ask` 要等人回复）：
+
+```json
+{ "mcpServers": { "huijian": { "command": "huijian 的完整路径", "args": ["mcp"] } } }
+```
+
+MCP 在本机运行：消息在本机加密，服务器只看到密文，所以只支持在你自己电脑上运行的 agent（网页版 / 云端 agent 连不了）。不支持 MCP 的 agent 用命令行：
+
+```bash
 huijian agent ask -choice 删 -choice 保留 "要不要删掉 3 个异常样本？"   # 回复打印到标准输出
-claude mcp add huijian -- huijian mcp                 # 或者作为 MCP 工具：notify / ask / check_replies
 ```
 
 设计和格式见 [agent 双向](docs/agent-mcp.md)。
