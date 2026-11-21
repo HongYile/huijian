@@ -45,6 +45,13 @@ object AgentText {
     const val NO_REPLY_OLD_KEY = "这个会话是重置加密前批准的，不能再回复。"
     const val NO_REPLY_NO_SEQ = "这条消息没有序号，不能回复。"
     const val UNSUPPORTED = "服务端版本较旧，agent 双向需要回笺服务端 0.10.0 及以上，请更新服务端"
+
+    // 连接 agent（连接码，服务端 0.11.0，功能 agent.connect；和 Mac / iPhone 一致）
+    const val CONNECT_STEPS = "1. 在 agent 所在的电脑上安装 huijian 命令行（GitHub Releases 下载，Windows 版首次运行会自动装好）。\n2. 运行上面这行命令，或运行 huijian agent setup 再输入连接码。\n3. 本页最上方出现登录请求时点「批准」，核对两边的 6 位核对码。\nsetup 会自动把回笺接入这台电脑上的 Claude Code、Codex、Cursor、DeepSeek Harness、Hermes、Qwen Code、Pi。"
+    const val CLI_DOWNLOAD = "https://github.com/HongYile/huijian/releases/latest"
+
+    /** 给用户复制的一行命令 */
+    fun setupCommand(server: String, code: String) = "huijian agent setup -u $server $code"
 }
 
 // ---------- 接口：正式实现是 Core / Api，测试时换成假的 ----------
@@ -87,8 +94,10 @@ object CoreAgentCrypto : AgentCrypto {
 interface AgentNet {
     /** GET /v1/agent/keys */
     fun agentKeys(): JSONObject
-    /** POST /v1/agent/keys：明文只返回这一次；已有时 409 */
+    /** POST /v1/agent/keys：明文只返回这一次；已满时 409 */
     fun agentCreateKey(): JSONObject
+    /** POST /v1/agent/connect-codes：生成连接码（服务端 0.11.0）；key 已满 10 把、账号没有加密钥匙时 409（error 是中文说明） */
+    fun agentConnectCode(): JSONObject
     /** DELETE /v1/agent/keys/{id} */
     fun agentRevokeKey(id: Long)
     /** GET /v1/agent/sessions */
@@ -109,7 +118,14 @@ interface AgentNet {
 
 // ---------- 数据 ----------
 
-data class AgentKeyInfo(val id: Long, val prefix: String, val createdAt: String? = null, val lastUsed: String? = null)
+/** name：连接码兑换时 agent 报的名字（服务端 0.11.0 起；手动新建的为空） */
+data class AgentKeyInfo(val id: Long, val prefix: String, val createdAt: String? = null, val lastUsed: String? = null, val name: String? = null) {
+    /** 列表里显示的标签：有名字时「名字 · 前缀…」，否则「前缀…」 */
+    val label get() = if (name.isNullOrEmpty()) "$prefix…" else "$name · $prefix…"
+}
+
+/** 连接码：10 分钟有效、只能用一次，agent 用 huijian agent setup 兑换自己的 Agent key。expiresIn 是秒 */
+data class AgentConnectCode(val code: String, val expiresIn: Long, val expiresAt: String? = null)
 
 data class AgentNewKey(val id: Long, val key: String, val prefix: String)
 
@@ -250,7 +266,14 @@ object Agent {
     private fun objects(a: JSONArray?): List<JSONObject> = if (a == null) emptyList() else (0 until a.length()).mapNotNull { a.optJSONObject(it) }
 
     fun parseKeys(o: JSONObject): List<AgentKeyInfo> = objects(o.optJSONArray("keys")).map {
-        AgentKeyInfo(it.optLong("id"), it.optString("prefix"), it.str("created_at"), it.str("last_used"))
+        AgentKeyInfo(it.optLong("id"), it.optString("prefix"), it.str("created_at"), it.str("last_used"), it.str("name"))
+    }
+
+    /** POST /v1/agent/connect-codes 的结果；没有连接码时报错，有效期缺失或不合理时按 10 分钟算 */
+    fun parseConnectCode(o: JSONObject): AgentConnectCode {
+        val code = o.str("code") ?: throw E2EError("服务器没有返回连接码")
+        val sec = o.optLong("expires_in", 0)
+        return AgentConnectCode(code, if (sec > 0) sec else 600, o.str("expires_at"))
     }
 
     fun parseNewKey(o: JSONObject): AgentNewKey {

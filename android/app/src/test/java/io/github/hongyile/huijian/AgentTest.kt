@@ -81,6 +81,7 @@ class AgentTest {
 
         override fun agentKeys() = JSONObject().put("keys", JSONArray())
         override fun agentCreateKey() = JSONObject().put("id", 1).put("key", "AK_" + "0".repeat(32)).put("prefix", "AK_0000")
+        override fun agentConnectCode() = JSONObject().put("code", "K7Q2-9XMD").put("expires_at", "2026-11-21T03:20:00Z").put("expires_in", 600)
         override fun agentRevokeKey(id: Long) {}
         override fun agentSessions() = JSONObject().put("sessions", JSONArray(sessions.values.map(::json)))
         override fun agentEnd(id: String) { sessions[id]?.let { sessions[id] = it.copy(state = "ended") } }
@@ -496,5 +497,39 @@ class AgentTest {
         assertEquals("你好", AgentText.composeReply(null, " 你好 "))
         assertEquals("继续\n先别删文件", AgentText.composeReply("继续", "先别删文件"))
         assertEquals("", AgentText.composeReply(null, " "))
+    }
+
+    // ---------- 连接 agent（连接码，服务端 0.11.0） ----------
+
+    @Test fun keyLabelWithAndWithoutName() {
+        val keys = Agent.parseKeys(JSONObject("""{"keys":[
+            {"id":1,"prefix":"AK_ab12","name":"家里 Claude Code","created_at":"2026-11-20T01:00:00Z","last_used":null},
+            {"id":2,"prefix":"AK_cd34","name":""},
+            {"id":3,"prefix":"AK_ef56"},
+            {"id":4,"prefix":"AK_gh78","name":null}]}"""))
+        assertEquals(listOf("家里 Claude Code", null, null, null), keys.map { it.name })
+        assertEquals("家里 Claude Code · AK_ab12…", keys[0].label)
+        assertEquals("AK_cd34…", keys[1].label)
+        assertEquals("AK_ef56…", keys[2].label)
+        assertEquals("AK_gh78…", keys[3].label)
+        assertNull(keys[0].lastUsed)
+    }
+
+    @Test fun parseConnectCode() {
+        val c = Agent.parseConnectCode(FakeAgentNet().agentConnectCode())
+        assertEquals(AgentConnectCode("K7Q2-9XMD", 600, "2026-11-21T03:20:00Z"), c)
+        // 有效期缺失或不合理：按 10 分钟算；expires_at 可以没有
+        assertEquals(AgentConnectCode("ABCD-EFGH", 600, null), Agent.parseConnectCode(JSONObject("""{"code":"ABCD-EFGH","expires_at":null}""")))
+        assertEquals(600L, Agent.parseConnectCode(JSONObject("""{"code":"ABCD-EFGH","expires_in":0}""")).expiresIn)
+        assertEquals(300L, Agent.parseConnectCode(JSONObject("""{"code":"ABCD-EFGH","expires_in":300}""")).expiresIn)
+        for (bad in listOf("""{}""", """{"code":""}""", """{"code":null,"expires_in":600}""")) {
+            try { Agent.parseConnectCode(JSONObject(bad)); fail(bad) } catch (_: E2EError) {}
+        }
+    }
+
+    @Test fun setupCommand() {
+        assertEquals("huijian agent setup -u https://push.example.com K7Q2-9XMD", AgentText.setupCommand("https://push.example.com", "K7Q2-9XMD"))
+        assertEquals(AgentText.CLI_DOWNLOAD, "https://github.com/HongYile/huijian/releases/latest")
+        assertTrue(AgentText.CONNECT_STEPS.startsWith("1. 在 agent 所在的电脑上安装 huijian 命令行"))
     }
 }

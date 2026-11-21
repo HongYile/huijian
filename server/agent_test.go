@@ -9,6 +9,7 @@ import (
 	"flag"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -142,8 +143,7 @@ func TestAgentFlow(t *testing.T) {
 	if !hasFeature("agent") {
 		t.Fatal("功能清单里应有 agent")
 	}
-	// Agent key：每账号 1 把；列表只有前缀；明文不再出现
-	e.agentMust(409, "POST", "/v1/agent/keys", f.tokB, nil)
+	// Agent key：列表只有前缀；明文不再出现（0.11.0 起每账号最多 10 把，见 TestAgentConnectCode）
 	ks := e.agentMust(200, "GET", "/v1/agent/keys", f.tokB, nil)["keys"].([]any)
 	if len(ks) != 1 || ks[0].(map[string]any)["prefix"] != f.ak[:7] || bytes.Contains(mustJSON(ks), []byte(f.ak)) {
 		t.Fatalf("Agent key 列表不对：%v", ks)
@@ -505,4 +505,57 @@ func TestAgentReviewFixes(t *testing.T) {
 		t.Fatal("同一内容重发应返回同一条")
 	}
 	e.agentMust(409, "POST", "/v1/agent/push", tok, map[string]any{"e2e": env2, "idem": "k1"})
+}
+
+func TestAgentConnectCode(t *testing.T) {
+	f := newAgentFixture(t)
+	e := f.e
+	if !hasFeature("agent.connect") {
+		t.Fatal("功能清单里应有 agent.connect")
+	}
+	gen := func() string {
+		out := e.agentMust(200, "POST", "/v1/agent/connect-codes", f.tokB, nil)
+		c, _ := out["code"].(string)
+		if len(c) != 9 || c[4] != '-' || normalizeAgentCode(c) == "" || out["expires_in"] != float64(agentConnectTTL) {
+			t.Fatalf("连接码格式不对：%v", out)
+		}
+		return c
+	}
+	old := gen()
+	c := gen()
+	// 同一台设备重新生成：旧码作废
+	if code, _ := e.call("POST", "/v1/agent/connect", "", map[string]any{"code": old, "name": "x"}); code != 403 {
+		t.Fatalf("旧连接码应作废，得到 %d", code)
+	}
+	if code, out := e.call("POST", "/v1/agent/connect", "", map[string]any{"code": "ZZZZ-ZZZZ", "name": "x"}); code != 403 || out["error"] != errAgentConnect.Error() {
+		t.Fatalf("错误连接码应 403：%d %v", code, out)
+	}
+	// 小写、不带短横线、O 写成 0 的反过来（0 写成 O）都认
+	loose := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(c, "-", ""), "0", "O"))
+	code, out := e.call("POST", "/v1/agent/connect", "", map[string]any{"code": loose, "name": "Windows Harness"})
+	key, _ := out["key"].(string)
+	if code != 200 || !strings.HasPrefix(key, "AK_") || out["name"] != "Windows Harness" {
+		t.Fatalf("兑换连接码失败：%d %v", code, out)
+	}
+	if code, _ := e.call("POST", "/v1/agent/connect", "", map[string]any{"code": c, "name": "again"}); code != 403 {
+		t.Fatalf("连接码只能用一次，得到 %d", code)
+	}
+	// 换来的 key 能用，列表里带名字
+	e.agentMust(200, "GET", "/v1/agent/info", key, nil)
+	ks := e.agentMust(200, "GET", "/v1/agent/keys", f.tokB, nil)["keys"].([]any)
+	if len(ks) != 2 || ks[1].(map[string]any)["name"] != "Windows Harness" {
+		t.Fatalf("key 列表不对：%v", ks)
+	}
+	// 额度：满 10 把后生成连接码、手动新建都 409
+	for i := len(ks); i < agentKeysPerAccount; i++ {
+		e.agentMust(200, "POST", "/v1/agent/keys", f.tokB, nil)
+	}
+	e.agentMust(409, "POST", "/v1/agent/keys", f.tokB, nil)
+	e.agentMust(409, "POST", "/v1/agent/connect-codes", f.tokB, nil)
+	// 格式
+	for in, want := range map[string]string{"k7q2-9xmd": "K7Q29XMD", " K7Q2 9XMD ": "K7Q29XMD", "IL00-ABCD": "1100ABCD", "K7Q2-9XM": "", "K7Q2-9XMU": "", "中文中文中文中文": ""} {
+		if got := normalizeAgentCode(in); got != want {
+			t.Fatalf("normalizeAgentCode(%q)=%q，应为 %q", in, got, want)
+		}
+	}
 }

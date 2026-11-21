@@ -13,6 +13,9 @@ struct AgentSettings: View {
     @State private var error: String?
     @State private var confirmRevoke: Agent.KeyInfo?
     @State private var confirmRegen: Agent.KeyInfo?
+    @State private var connect: Agent.ConnectCode?
+    @State private var connectAt = Date()
+    @State private var connectMsg: String?
     @State private var confirmEnd: Agent.Session?
 
     var body: some View {
@@ -26,6 +29,7 @@ struct AgentSettings: View {
                     SettingsRow(label: "服务端版本太旧，暂不能使用", divider: false) { EmptyView() }
                 }
             } else {
+                if model.agentConnectSupported { connectCard }
                 keyCard
                 sessionsCard
                 usageCard
@@ -41,7 +45,7 @@ struct AgentSettings: View {
         } message: {
             Text("用它登录的 agent 会话全部结束，之后要用新的 key 重新登录。")
         }
-        // key 只显示一次、每个账号只能有 1 把：没保存好时用「重新生成」换一把（吊销旧的 + 新建，新 key 显示出来可复制）
+        // key 只显示一次：没保存好时用「重新生成」换一把（吊销旧的 + 新建，新 key 显示出来可复制）
         .confirmationDialog("重新生成 Agent key？", isPresented: Binding(get: { confirmRegen != nil }, set: { if !$0 { confirmRegen = nil } })) {
             Button("重新生成", role: .destructive) {
                 if let k = confirmRegen { act("key") { try await model.revokeAgentKey(k.id); newKey = try await model.createAgentKey() } }
@@ -146,6 +150,50 @@ struct AgentSettings: View {
         }
     }
 
+    // MARK: 连接 agent（连接码）
+
+    var connectCard: some View {
+        SettingsCard(title: "连接 agent", footer: connectMsg ?? "在 agent 所在的电脑上用连接码一步接入：自动登录、自动配置那台电脑上的 agent。") {
+            if let c = connect, Date() < connectAt.addingTimeInterval(TimeInterval(c.expires_in)) {
+                let cmd = Agent.setupCommand(server: model.server, code: c.code)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(c.code).font(.system(size: 28, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.accent).textSelection(.enabled)
+                        Text("\(TimeFmt.compact(connectAt.addingTimeInterval(TimeInterval(c.expires_in)))) 前有效，只能用一次").font(.system(size: 12)).foregroundStyle(Theme.text3)
+                    }
+                    Text(cmd).font(.system(size: 12.5, design: .monospaced)).foregroundStyle(Theme.text).textSelection(.enabled)
+                        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Theme.surface2))
+                    HStack(spacing: 8) {
+                        Button("复制命令") { copyPlain(cmd); connectMsg = "已复制命令。" }.buttonStyle(SoftButtonStyle())
+                        Button("下载命令行") { if let u = URL(string: Agent.T.cliDownload) { NSWorkspace.shared.open(u) } }.buttonStyle(SoftButtonStyle())
+                        Button("完成") { connect = nil; connectMsg = nil }.buttonStyle(SoftButtonStyle())
+                    }
+                    Text(Agent.T.connectSteps).font(.system(size: 12.5)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.vertical, 12)
+            } else {
+                SettingsRow(label: "用连接码接入一台电脑上的 agent", divider: false) {
+                    Button(busy == "connect" ? "生成中…" : "生成连接码") {
+                        act("connect") {
+                            let c = try await model.createAgentConnectCode()
+                            connectAt = Date(); connect = c
+                        }
+                    }
+                    .buttonStyle(SoftButtonStyle()).disabled(busy != nil)
+                }
+            }
+        }
+        .padding(.bottom, 18)
+    }
+
+    /// 复制命令：连接码 10 分钟就失效、只能用一次，不按敏感内容处理（Agent key 才用 copySecret）
+    func copyPlain(_ s: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(s, forType: .string)
+    }
+
     // MARK: Agent key
 
     var keyCard: some View {
@@ -168,7 +216,7 @@ struct AgentSettings: View {
                 }
             } else {
                 ForEach(model.agentKeys) { k in
-                    SettingsRow(label: "\(k.prefix)…", divider: false) {
+                    SettingsRow(label: k.label, divider: false) {
                         Text(k.last_used.map { "上次使用 \(time($0))" } ?? "还没用过").font(.system(size: 12)).foregroundStyle(Theme.text3)
                         Button(busy == "key" ? "生成中…" : "重新生成") { confirmRegen = k }.buttonStyle(SoftButtonStyle()).disabled(busy != nil)
                         Button("吊销") { confirmRevoke = k }.buttonStyle(SoftButtonStyle(destructive: true)).disabled(busy != nil)
@@ -215,8 +263,14 @@ struct AgentSettings: View {
     }
 
     var usageCard: some View {
-        SettingsCard(title: "用法", footer: "MCP 工具：notify（发消息）、ask（提问并等回复）、check_replies（取之后才到的回复）。") {
-            Text("""
+        SettingsCard(title: "用法", footer: "MCP 工具：notify（发消息）、ask（提问并等回复）、check_replies（取之后才到的回复）。huijian agent status 查看接入情况，huijian agent setup -remove 撤销。") {
+            Text(model.agentConnectSupported ? """
+            # 推荐：上面「生成连接码」后一步接入
+            huijian agent setup -u \(model.server) 连接码
+            # 手动：用 Agent key 登录，再自己配置 MCP
+            huijian agent login -u \(model.server) -k AK_… -name "家里 Claude Code"
+            claude mcp add huijian -- huijian mcp
+            """ : """
             export HUIJIAN_URL=\(model.server)
             export HUIJIAN_AGENT_KEY=AK_…
             huijian agent login -name "家里 Claude Code"
@@ -233,7 +287,7 @@ struct AgentSettings: View {
             defer { busy = nil }
             do { try await f() } catch {
                 let m = (error as? LocalizedError)?.errorDescription ?? Updater.describe(error)
-                if id == "key" { keyMsg = m } else { self.error = m }
+                if id == "key" { keyMsg = m } else if id == "connect" { connectMsg = m } else { self.error = m }
             }
         }
     }

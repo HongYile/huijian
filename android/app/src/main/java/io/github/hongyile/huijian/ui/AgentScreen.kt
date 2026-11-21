@@ -6,9 +6,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -16,6 +19,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -34,6 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.hongyile.huijian.AgentConnectCode
 import io.github.hongyile.huijian.AgentHub
 import io.github.hongyile.huijian.AgentKeyInfo
 import io.github.hongyile.huijian.AgentNewKey
@@ -43,14 +48,19 @@ import io.github.hongyile.huijian.AgentText
 import io.github.hongyile.huijian.E2EHub
 import io.github.hongyile.huijian.E2EStatus
 import io.github.hongyile.huijian.Hub
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 /**
  * Pushkey 页里的 agent 部分（docs/agent-mcp.md §8）：Agent key 和 pushkey 一样是交给程序的钥匙，放在一起。和 Mac 的 AgentSettings.swift 一致。
  * AgentRequestsPart：页面最上方的「请求登录的 agent」（有请求时才显示，点 agent 登录通知打开 Pushkey 页时第一眼看到）；
- * AgentMainPart：页面底部的 Agent key（新建 / 只显示一次 / 复制 / 吊销）、已登录的 agent（在线状态、结束）、用法
+ * AgentMainPart：页面底部的连接 agent（连接码，服务端支持 agent.connect 时）、Agent key（新建 / 只显示一次 / 复制 / 吊销）、
+ * 已登录的 agent（在线状态、结束）、用法
  */
 @Composable
 fun AgentRequestsPart(say: (String) -> Unit) {
@@ -62,20 +72,104 @@ fun AgentRequestsPart(say: (String) -> Unit) {
 @Composable
 fun AgentMainPart(say: (String) -> Unit) {
     val unsupported by AgentHub.unsupported.collectAsStateWithLifecycle()
+    val connect by AgentHub.connectSupported.collectAsStateWithLifecycle()
     var loadError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
         val e1 = runCatching { AgentHub.reload() }.exceptionOrNull()
         val e2 = if (AgentHub.unsupported.value) null else runCatching { AgentHub.loadKeys() }.exceptionOrNull()
         loadError = (e1 ?: e2)?.let(::describe)
+        // 读不到 /v1/info 时不显示连接码卡片（沿用上次的结果），不影响其他部分
+        if (!AgentHub.unsupported.value) runCatching { AgentHub.loadFeatures() }
     }
     if (unsupported) {
         SectionCard("Agent") { Text(AgentText.UNSUPPORTED, color = WARNING, fontSize = 14.sp) }
         return
     }
     loadError?.let { SectionCard(null) { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 14.sp) } }
+    if (connect) ConnectCard()
     KeyCard(say)
     SessionsCard(say)
-    UsageCard()
+    UsageCard(connect)
+}
+
+// ---------- 连接 agent（连接码） ----------
+
+private val hm = DateTimeFormatter.ofPattern("HH:mm")
+
+/**
+ * 生成连接码 → 在 agent 所在的电脑上运行 huijian agent setup，一步完成登录和配置（和 Mac / iPhone 的 connectSection 一致）。
+ * 连接码只放内存（remember，不进 saved state），离开页面就没了；有效期按本机生成时刻 + expires_in 算，到期自动收起
+ */
+@Composable
+private fun ConnectCard() {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var code by remember { mutableStateOf<AgentConnectCode?>(null) }
+    var until by remember { mutableStateOf(0L) }       // 到期时刻（本机时钟，毫秒）
+    var busy by remember { mutableStateOf(false) }
+    var msg by remember { mutableStateOf<String?>(null) }
+    var msgError by remember { mutableStateOf(false) }
+    val c = code
+    LaunchedEffect(c, until) {
+        if (c == null) return@LaunchedEffect
+        delay((until - System.currentTimeMillis()).coerceAtLeast(0))
+        code = null; msg = null
+    }
+    val live = c != null && System.currentTimeMillis() < until
+    val footer = if (live) null else "在 agent 所在的电脑上用连接码一步接入：自动登录、自动配置那台电脑上的 agent。"
+    SectionCard("连接 agent", footer) {
+        if (c != null && live) {
+            val cmd = AgentText.setupCommand(Hub.store.server, c.code)
+            SelectionContainer {
+                Text(c.code, fontFamily = FontFamily.Monospace, fontSize = 30.sp, fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary, modifier = Modifier.testTag("agentConnectCode"))
+            }
+            Text(hm.format(Instant.ofEpochMilli(until).atZone(ZoneId.systemDefault())) + " 前有效，只能用一次", fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                SelectionContainer {
+                    Text(cmd, Modifier.fillMaxWidth().padding(10.dp), fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 17.sp)
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton({
+                    copyText(ctx, "连接命令", cmd)
+                    msg = "已复制命令"; msgError = false
+                }, modifier = Modifier.testTag("agentCopySetup")) { Text("复制命令") }
+                OutlinedButton({ openLink(ctx, AgentText.CLI_DOWNLOAD) }) { Text("下载命令行") }
+                Button({ code = null; msg = null }) { Text("完成") }
+            }
+            msg?.let { Text(it, fontSize = 13.sp, color = if (msgError) MaterialTheme.colorScheme.error else SUCCESS) }
+            Text(AgentText.CONNECT_STEPS, fontSize = 13.sp, lineHeight = 19.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("用连接码接入一台电脑上的 agent", Modifier.weight(1f), fontSize = 14.sp)
+                Button({
+                    busy = true; msg = null
+                    scope.launch {
+                        try {
+                            val n = AgentHub.connectCode()
+                            until = System.currentTimeMillis() + n.expiresIn * 1000
+                            code = n
+                        } catch (e: Exception) {
+                            msg = describe(e); msgError = true
+                        } finally { busy = false }
+                    }
+                }, enabled = !busy, modifier = Modifier.testTag("agentConnectButton")) { Text(if (busy) "生成中…" else "生成连接码") }
+            }
+            msg?.let { Text(it, fontSize = 13.sp, color = if (msgError) MaterialTheme.colorScheme.error else SUCCESS) }
+        }
+    }
+}
+
+/** 用浏览器打开链接；没有能打开的应用时提示 */
+private fun openLink(ctx: android.content.Context, url: String) {
+    try {
+        ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+            .addCategory(android.content.Intent.CATEGORY_BROWSABLE).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+    } catch (_: Exception) {
+        android.widget.Toast.makeText(ctx, "没有能打开这个链接的应用", android.widget.Toast.LENGTH_SHORT).show()
+    }
 }
 
 // ---------- 登录请求 ----------
@@ -214,7 +308,7 @@ private fun KeyCard(say: (String) -> Unit) {
                 if (i > 0) HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("${key.prefix}…", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Medium)
+                        Text(key.label, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Medium)
                         Text(rfcText(key.lastUsed)?.let { "上次使用 $it" } ?: "还没用过", fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -235,7 +329,7 @@ private fun KeyCard(say: (String) -> Unit) {
             }
         }
     }
-    // key 只显示一次、每个账号只能有 1 把：没保存好时用「重新生成」换一把（吊销旧的 + 新建，新 key 显示出来可复制）
+    // key 只显示一次：没保存好时用「重新生成」换一把（吊销旧的 + 新建，新 key 显示出来可复制）
     confirmRegen?.let { key ->
         ConfirmDialog("重新生成 Agent key？", "旧 key 立即作废，用它登录的 agent 会话全部结束，要用新 key 重新登录。新 key 只显示一次，记得复制。",
             "重新生成", { confirmRegen = null }) {
@@ -293,12 +387,21 @@ private fun SessionsCard(say: (String) -> Unit) {
     }
 }
 
+/** connect：服务端支持连接码时推荐 huijian agent setup，手动方式放后面 */
 @Composable
-private fun UsageCard() {
-    SectionCard("用法", "MCP 工具：notify（发消息）、ask（提问并等回复）、check_replies（取之后才到的回复）。") {
+private fun UsageCard(connect: Boolean) {
+    val server = Hub.store.server
+    SectionCard("用法", "MCP 工具：notify（发消息）、ask（提问并等回复）、check_replies（取之后才到的回复）。" +
+        "huijian agent status 查看接入情况，huijian agent setup -remove 撤销。") {
         CodeBox(
-            """
-            export HUIJIAN_URL=${Hub.store.server}
+            if (connect) """
+            # 推荐：上面「生成连接码」后一步接入
+            huijian agent setup -u $server 连接码
+            # 手动：用 Agent key 登录，再自己配置 MCP
+            huijian agent login -u $server -k AK_… -name "家里 Claude Code"
+            claude mcp add huijian -- huijian mcp
+            """.trimIndent() else """
+            export HUIJIAN_URL=$server
             export HUIJIAN_AGENT_KEY=AK_…
             huijian agent login -name "家里 Claude Code"
             claude mcp add huijian -- huijian mcp

@@ -6,6 +6,7 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -27,11 +28,15 @@ CREATE TABLE IF NOT EXISTS agent_replies(
   receipt TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, received_at INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_agent_reply_sess ON agent_replies(session_id, state);
 CREATE INDEX IF NOT EXISTS idx_agent_reply_msg ON agent_replies(user_id, msg_id);
+CREATE TABLE IF NOT EXISTS agent_connect_codes(
+  code_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created_by TEXT NOT NULL DEFAULT '', expires_at INTEGER NOT NULL,
+  used INTEGER NOT NULL DEFAULT 0, used_by TEXT NOT NULL DEFAULT '', used_at INTEGER NOT NULL DEFAULT 0);
 `
 
 // 内测额度（docs/agent-mcp.md §3）
 const (
-	agentKeysPerAccount = 1
+	agentKeysPerAccount = 10               // 0.11.0 起每台 agent 电脑一把（连接码兑换时新建），可单独吊销
+	agentConnectTTL     = 10 * 60          // 秒：连接码有效期
 	agentOnlineMax      = 3                // 同时在线的会话
 	agentPendingMax     = 3                // 等待批准的登录请求
 	agentPendingTTL     = 10 * 60          // 秒：没批准的登录请求自动作废
@@ -61,7 +66,8 @@ const (
 const changeAgent = "agent" // 0.10.0：agent 会话请求、批准、结束、回复、回执（id 0），客户端重新拉取
 
 var (
-	errAgentKeyExists = errors.New("内测期间每个账号只能有 1 把 Agent key，请先吊销原来的")
+	errAgentKeyExists = errors.New("每个账号最多 10 把 Agent key，请先在「设置 → Pushkey」里吊销不用的")
+	errAgentConnect   = errors.New("连接码无效或已过期：请在回笺「设置 → Pushkey」里重新生成")
 	errAgentPending   = errors.New("等待批准的 agent 登录请求太多，请先在设备上处理")
 	errAgentState     = errors.New("这个 agent 会话的状态已经变了，请刷新")
 	errAgentTaken     = errors.New("这个请求已经由另一台设备处理")
@@ -72,6 +78,7 @@ type AgentKey struct {
 	ID       int64
 	UserID   int64
 	Prefix   string
+	Name     string // 连接码兑换时 agent 报的名字（手动新建的为空）
 	Created  int64
 	LastUsed int64
 }
@@ -102,6 +109,7 @@ func (s *Store) migrateAgent() error {
 	for _, m := range [][3]string{
 		{"messages", "agent_session", "TEXT NOT NULL DEFAULT ''"},
 		{"messages", "ask", "INTEGER NOT NULL DEFAULT 0"},
+		{"agent_keys", "name", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.addColumn(m[0], m[1], m[2]); err != nil {
 			return err
@@ -118,6 +126,19 @@ func (s *Store) CreateAgentKey(userID int64) (*AgentKey, string, error) {
 		return nil, "", err
 	}
 	defer tx.Rollback()
+	k, key, err := insertAgentKey(tx, userID, "")
+	if err != nil {
+		return nil, "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, "", err
+	}
+	s.settingsChanged(userID, changeAgent)
+	return k, key, nil
+}
+
+// insertAgentKey：在事务里新建一把 key（检查额度）
+func insertAgentKey(tx *sql.Tx, userID int64, name string) (*AgentKey, string, error) {
 	var n int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM agent_keys WHERE user_id=? AND revoked=0`, userID).Scan(&n); err != nil {
 		return nil, "", err
@@ -126,12 +147,100 @@ func (s *Store) CreateAgentKey(userID int64) (*AgentKey, string, error) {
 		return nil, "", errAgentKeyExists
 	}
 	key := "AK_" + randHex(16)
-	k := &AgentKey{UserID: userID, Prefix: key[:7], Created: now()}
-	res, err := tx.Exec(`INSERT INTO agent_keys(user_id,key_hash,prefix,created_at) VALUES(?,?,?,?)`, userID, sha256Hex(key), k.Prefix, k.Created)
+	k := &AgentKey{UserID: userID, Prefix: key[:7], Name: name, Created: now()}
+	res, err := tx.Exec(`INSERT INTO agent_keys(user_id,key_hash,prefix,name,created_at) VALUES(?,?,?,?,?)`, userID, sha256Hex(key), k.Prefix, name, k.Created)
 	if err != nil {
 		return nil, "", err
 	}
 	k.ID, _ = res.LastInsertId()
+	return k, key, nil
+}
+
+// ---------- 连接码（0.11.0，docs/agent-mcp.md §4.0） ----------
+// 设备生成 8 位一次性连接码（XXXX-XXXX，Crockford Base32，40 位随机），agent 用它换一把自己的 Agent key，
+// 然后照常登录（设备核对 6 位核对码后批准）。服务器只存连接码的哈希。
+
+// normalizeAgentCode：大写、去掉分隔符，O→0、I/L→1；不是 8 位 Crockford 字符返回空
+func normalizeAgentCode(s string) string {
+	var b []byte
+	for _, c := range strings.ToUpper(s) {
+		switch c {
+		case '-', ' ', '\t':
+			continue
+		case 'O':
+			c = '0'
+		case 'I', 'L':
+			c = '1'
+		}
+		if c > 127 || strings.IndexByte(crockford, byte(c)) < 0 {
+			return ""
+		}
+		b = append(b, byte(c))
+	}
+	if len(b) != 8 {
+		return ""
+	}
+	return string(b)
+}
+
+// CreateAgentConnectCode：同一台设备重新生成时，它之前没用掉的连接码立即作废。账号 key 已满时直接报错（免得兑换时才失败）
+func (s *Store) CreateAgentConnectCode(userID int64, deviceID string) (string, int64, error) {
+	s.db.Exec(`DELETE FROM agent_connect_codes WHERE expires_at < ?`, now()-3600)
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM agent_keys WHERE user_id=? AND revoked=0`, userID).Scan(&n); err != nil {
+		return "", 0, err
+	}
+	if n >= agentKeysPerAccount {
+		return "", 0, errAgentKeyExists
+	}
+	s.db.Exec(`UPDATE agent_connect_codes SET expires_at=? WHERE user_id=? AND created_by=? AND used=0 AND expires_at>=?`, now()-1, userID, deviceID, now())
+	exp := now() + agentConnectTTL
+	for i := 0; i < 5; i++ {
+		raw := randBytes(5)
+		var code []byte
+		acc := uint64(raw[0])<<32 | uint64(raw[1])<<24 | uint64(raw[2])<<16 | uint64(raw[3])<<8 | uint64(raw[4])
+		for j := 7; j >= 0; j-- {
+			code = append(code, crockford[(acc>>(uint(j)*5))&31])
+		}
+		c := string(code)
+		if _, err := s.db.Exec(`INSERT INTO agent_connect_codes(code_hash,user_id,created_by,expires_at) VALUES(?,?,?,?)`, sha256Hex(c), userID, deviceID, exp); err == nil {
+			return c[:4] + "-" + c[4:], exp, nil
+		}
+	}
+	return "", 0, errors.New("生成连接码失败")
+}
+
+// RedeemAgentConnectCode：消费连接码，给 agent 新建一把带名字的 Agent key（明文只返回这一次）
+func (s *Store) RedeemAgentConnectCode(code, name string) (*AgentKey, string, error) {
+	c := normalizeAgentCode(code)
+	if c == "" {
+		return nil, "", errAgentConnect
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, "", err
+	}
+	defer tx.Rollback()
+	var userID int64
+	if err := tx.QueryRow(`SELECT user_id FROM agent_connect_codes WHERE code_hash=? AND used=0 AND expires_at>=?`, sha256Hex(c), now()).Scan(&userID); err != nil {
+		return nil, "", errAgentConnect
+	}
+	var dis int
+	tx.QueryRow(`SELECT disabled FROM users WHERE id=?`, userID).Scan(&dis)
+	if dis != 0 {
+		return nil, "", errDisabled
+	}
+	res, err := tx.Exec(`UPDATE agent_connect_codes SET used=1, used_by=?, used_at=? WHERE code_hash=? AND used=0`, name, now(), sha256Hex(c))
+	if err != nil {
+		return nil, "", err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return nil, "", errAgentConnect
+	}
+	k, key, err := insertAgentKey(tx, userID, name)
+	if err != nil {
+		return nil, "", err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, "", err
 	}
@@ -140,7 +249,7 @@ func (s *Store) CreateAgentKey(userID int64) (*AgentKey, string, error) {
 }
 
 func (s *Store) AgentKeys(userID int64) ([]AgentKey, error) {
-	rows, err := s.db.Query(`SELECT id,user_id,prefix,created_at,last_used FROM agent_keys WHERE user_id=? AND revoked=0 ORDER BY id`, userID)
+	rows, err := s.db.Query(`SELECT id,user_id,prefix,name,created_at,last_used FROM agent_keys WHERE user_id=? AND revoked=0 ORDER BY id`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +257,7 @@ func (s *Store) AgentKeys(userID int64) ([]AgentKey, error) {
 	out := []AgentKey{}
 	for rows.Next() {
 		var k AgentKey
-		if err := rows.Scan(&k.ID, &k.UserID, &k.Prefix, &k.Created, &k.LastUsed); err != nil {
+		if err := rows.Scan(&k.ID, &k.UserID, &k.Prefix, &k.Name, &k.Created, &k.LastUsed); err != nil {
 			return nil, err
 		}
 		out = append(out, k)
@@ -158,8 +267,8 @@ func (s *Store) AgentKeys(userID int64) ([]AgentKey, error) {
 
 func (s *Store) AgentKeyByToken(key string) (*AgentKey, error) {
 	var k AgentKey
-	err := s.db.QueryRow(`SELECT id,user_id,prefix,created_at,last_used FROM agent_keys WHERE key_hash=? AND revoked=0`, sha256Hex(key)).
-		Scan(&k.ID, &k.UserID, &k.Prefix, &k.Created, &k.LastUsed)
+	err := s.db.QueryRow(`SELECT id,user_id,prefix,name,created_at,last_used FROM agent_keys WHERE key_hash=? AND revoked=0`, sha256Hex(key)).
+		Scan(&k.ID, &k.UserID, &k.Prefix, &k.Name, &k.Created, &k.LastUsed)
 	if err != nil {
 		return nil, err
 	}

@@ -187,6 +187,7 @@ class Api(val server: String, private val token: String?) : E2ENet, AgentNet {
 
     override fun agentKeys(): JSONObject = json(req("/v1/agent/keys").build())
     override fun agentCreateKey(): JSONObject = json(post("/v1/agent/keys", JSONObject()))
+    override fun agentConnectCode(): JSONObject = json(post("/v1/agent/connect-codes", JSONObject()))
     override fun agentRevokeKey(id: Long) { exec(req("/v1/agent/keys/$id").delete().build()).close() }
     override fun agentSessions(): JSONObject = json(req("/v1/agent/sessions").build())
     override fun agentEnd(id: String) { exec(req(pathUrl("v1/agent/sessions", id)).delete().build()).close() }

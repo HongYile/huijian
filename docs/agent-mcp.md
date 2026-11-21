@@ -21,7 +21,7 @@
 
 | 名词 | 说明 |
 |---|---|
-| Agent key | 账号下专门给 agent 用的 key，前缀 `AK_`。只能发加密消息、发起会话请求，不能读消息列表、不能管理账号。内测每个账号 1 把，可以给多个 agent 共用 |
+| Agent key | 账号下专门给 agent 用的 key，前缀 `AK_`。只能发加密消息、发起会话请求，不能读消息列表、不能管理账号。每个账号最多 10 把（0.11.0 起；之前 1 把），一般每台 agent 电脑一把（连接码兑换时新建、带名字），可以单独吊销 |
 | 会话 | 一个 agent 进程（一个 MCP 进程或一次 `huijian agent` 登录）。登录时生成会话钥匙对，经手机批准后拿到会话令牌 `ST_` |
 | 回复 | 用户对某条会话消息的回复，加密后暂存在服务器，等 agent 取走 |
 
@@ -29,7 +29,7 @@
 
 | 项目 | 内测 | 以后付费版可以放宽 |
 |---|---|---|
-| Agent key | 每账号 1 把 | 多把 |
+| Agent key | 每账号 10 把 | 更多 |
 | 同时在线的会话 | 全账号 3 个 | 更多 |
 | 回复在服务器保留 | 3 天（agent 确认取走后立即删除） | 更久 |
 | 单条回复 | 16 KB 文字 | — |
@@ -39,6 +39,12 @@
 ## 4. 加密和身份
 
 所有账号都加密，没有不加密的账号：0.8.0 起首次客户端登录就自动开启，不能关闭。账号还没有钥匙（新建后没有客户端登录过）时，Agent key 的请求返回 409「请先在任一设备登录回笺」。
+
+### 4.0 连接码（0.11.0，feature `agent.connect`）
+
+用户在设备上点「连接 agent」生成 8 位一次性连接码（Crockford Base32，40 位随机，显示为 XXXX-XXXX，10 分钟有效），在 agent 电脑上运行 `huijian agent setup -u <服务器> <连接码>`：用连接码换一把这台电脑专用的 Agent key（带名字，存在 `~/.huijian/agent/<槽位>/agent_key`），然后照常走 4.1 的登录（仍要在设备上核对 6 位核对码）。连接码只是代替「复制 Agent key」，不跳过核对：服务器拿到连接码也只能换 key，冒充不了账号公钥。服务器只存连接码的哈希；兑换接口按 IP 限速，失败统一 403 并延迟。
+
+setup 接着找出本机装的 agent（Claude Code、Codex、Cursor、DeepSeek Harness、Hermes、Qwen Code、Pi），把 `huijian mcp` 写进它们的配置、装上 skill；写之前备份为 `<文件>.bak-huijian`，写入内容带标记，`huijian agent setup -remove` 原样撤销并结束会话；`huijian agent status` 列出接入情况。
 
 ### 4.1 登录（手机批准 + 6 位核对码）
 
@@ -221,7 +227,9 @@ Mac、iPhone、安卓同步做：
 
 | 请求 | 认证 | 说明 |
 |---|---|---|
-| `POST /v1/agent/keys` | 设备 | 新建 Agent key → `{"id","key","prefix","created_at"}`；内测每账号 1 把，已有时 409 |
+| `POST /v1/agent/keys` | 设备 | 新建 Agent key → `{"id","key","prefix","created_at"}`；每账号最多 10 把，满了 409 |
+| `POST /v1/agent/connect-codes` | 设备 | 0.11.0：生成连接码 → `{"code":"XXXX-XXXX","expires_at","expires_in":600}`；同一设备重新生成时旧码作废；key 已满或账号没有钥匙时 409 |
+| `POST /v1/agent/connect` | 无（按 IP 限速） | 0.11.0：`{code, name}` → `{"id","key","prefix","name"}`，用连接码换一把带名字的 Agent key；码不对 / 过期 / 用过统一 403（延迟 0.5 秒） |
 | `GET /v1/agent/keys` | 设备 | `{"keys":[{"id","prefix","created_at","last_used"}]}` |
 | `DELETE /v1/agent/keys/{id}` | 设备 | 吊销，它登录的会话全部结束 |
 | `GET /v1/agent/info` | AK | `{"account_pub","kid","limits":{…}}`；账号还没有钥匙时 409 |

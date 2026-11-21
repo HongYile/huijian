@@ -16,6 +16,8 @@ enum Agent {
         static let tooLong = "回复太长（最多 16 KB）"
         static let waitingReply = "等你回复"
         static let choiceHint = "选好选项、写好补充（都可选），再点发送。"
+        static let connectSteps = "1. 在 agent 所在的电脑上安装 huijian 命令行（GitHub Releases 下载，Windows 版首次运行会自动装好）。\n2. 运行上面这行命令，或运行 huijian agent setup 再输入连接码。\n3. 本页最上方出现登录请求时点「批准」，核对两边的 6 位核对码。\nsetup 会自动把回笺接入这台电脑上的 Claude Code、Codex、Cursor、DeepSeek Harness、Hermes、Qwen Code、Pi。"
+        static let cliDownload = "https://github.com/HongYile/huijian/releases/latest"
         static let tookReply = "agent 已拿到你的回复，现在没在等你；再发的回复要等它下次查看才会收到。"
         static func codeHint(_ name: String) -> String { "确认「\(name)」那边显示的也是这 6 位数字，再批准。" }
     }
@@ -32,8 +34,23 @@ enum Agent {
     struct KeyInfo: Decodable, Equatable, Identifiable {
         let id: Int64
         let prefix: String
+        /// 连接码兑换时 agent 报的名字（服务端 0.11.0 起；手动新建的为空）
+        var name: String?
         var created_at: String?
         var last_used: String?
+        var label: String { (name ?? "").isEmpty ? "\(prefix)…" : "\(name!) · \(prefix)…" }
+    }
+
+    /// 连接码（服务端 0.11.0，feature agent.connect）：10 分钟有效、只能用一次，agent 用 huijian agent setup 兑换自己的 Agent key
+    struct ConnectCode: Decodable, Equatable {
+        let code: String
+        let expires_in: Int
+        var expires_at: String?
+    }
+
+    /// 给用户复制的一行命令
+    static func setupCommand(server: String, code: String) -> String {
+        "huijian agent setup -u \(server) \(code)"
     }
 
     struct NewKey: Decodable, Equatable {
@@ -114,6 +131,10 @@ enum Agent {
     /// 新建 Agent key：明文只返回这一次；已有时 409
     static func createKey(_ api: E2E.API) async throws -> NewKey {
         try JSONDecoder().decode(NewKey.self, from: try await api.call("POST", "/v1/agent/keys"))
+    }
+
+    static func connectCode(_ api: E2E.API) async throws -> ConnectCode {
+        try JSONDecoder().decode(ConnectCode.self, from: try await api.call("POST", "/v1/agent/connect-codes"))
     }
 
     static func revokeKey(_ api: E2E.API, id: Int64) async throws {

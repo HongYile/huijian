@@ -26,11 +26,15 @@ struct AgentSections: View {
     @State private var confirmRevoke: Agent.KeyInfo?
     @State private var confirmRegen: Agent.KeyInfo?
     @State private var confirmEnd: Agent.Session?
+    @State private var connect: Agent.ConnectCode?
+    @State private var connectAt = Date()
+    @State private var connectMsg: String?
 
     var body: some View {
         if part == .requests {
             requests
         } else {
+            if model.agentConnectSupported { connectSection }
             keySection
                 .confirmationDialog("吊销这把 Agent key？", isPresented: Binding(get: { confirmRevoke != nil }, set: { if !$0 { confirmRevoke = nil } }),
                                     titleVisibility: .visible) {
@@ -38,7 +42,7 @@ struct AgentSections: View {
                 } message: {
                     Text("用它登录的 agent 会话全部结束，之后要用新的 key 重新登录。")
                 }
-                // key 只显示一次、每个账号只能有 1 把：没保存好时用「重新生成」换一把（吊销旧的 + 新建，新 key 显示出来可复制）
+                // key 只显示一次：没保存好时用「重新生成」换一把（吊销旧的 + 新建，新 key 显示出来可复制）
                 .confirmationDialog("重新生成 Agent key？", isPresented: Binding(get: { confirmRegen != nil }, set: { if !$0 { confirmRegen = nil } }),
                                     titleVisibility: .visible) {
                     Button("重新生成", role: .destructive) {
@@ -55,7 +59,13 @@ struct AgentSections: View {
                     Text("「\(confirmEnd.map(name) ?? "")」不能再发消息、收回复；还没取走的回复一起删除。")
                 }
             Section {
-                Text("""
+                Text(model.agentConnectSupported ? """
+                # 推荐：上面「生成连接码」后一步接入
+                huijian agent setup -u \(model.settings.server) 连接码
+                # 手动：用 Agent key 登录，再自己配置 MCP
+                huijian agent login -u \(model.settings.server) -k AK_… -name "家里 Claude Code"
+                claude mcp add huijian -- huijian mcp
+                """ : """
                 export HUIJIAN_URL=\(model.settings.server)
                 export HUIJIAN_AGENT_KEY=AK_…
                 huijian agent login -name "家里 Claude Code"
@@ -65,7 +75,7 @@ struct AgentSections: View {
             } header: {
                 Text("Agent 用法")
             } footer: {
-                Text("MCP 工具：notify（发消息）、ask（提问并等回复）、check_replies（取之后才到的回复）。")
+                Text("MCP 工具：notify（发消息）、ask（提问并等回复）、check_replies（取之后才到的回复）。huijian agent status 查看接入情况，huijian agent setup -remove 撤销。")
             }
         }
     }
@@ -175,7 +185,7 @@ struct AgentSections: View {
                 ForEach(model.agentKeys) { k in
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("\(k.prefix)…").font(.body.monospaced())
+                            Text(k.label).font(.body.monospaced())
                             Text(k.last_used.map { "上次使用 \(agentTime($0))" } ?? "还没用过").font(.caption).foregroundStyle(Theme.text3)
                         }
                         Spacer()
@@ -221,12 +231,46 @@ struct AgentSections: View {
         return "\(s.name)（来源无法核实）"
     }
 
+    // MARK: 连接 agent（连接码）
+
+    private var connectSection: some View {
+        Section {
+            if let c = connect, Date() < connectAt.addingTimeInterval(TimeInterval(c.expires_in)) {
+                let cmd = Agent.setupCommand(server: model.settings.server, code: c.code)
+                Text(c.code).font(.system(size: 30, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.accent).textSelection(.enabled)
+                Text(cmd).font(.caption.monospaced()).foregroundStyle(Theme.text).textSelection(.enabled)
+                Button("复制命令") {
+                    UIPasteboard.general.string = cmd
+                    connectMsg = "已复制命令。"
+                }
+                if let u = URL(string: Agent.T.cliDownload) { Link("下载命令行（GitHub Releases）", destination: u) }
+                Button("完成") { connect = nil; connectMsg = nil }
+            } else {
+                Button(busy == "connect" ? "生成中…" : "生成连接码") {
+                    act("connect") {
+                        let c = try await model.createAgentConnectCode()
+                        connectAt = Date(); connect = c
+                    }
+                }
+                .disabled(busy != nil)
+            }
+        } header: {
+            Text("连接 agent")
+        } footer: {
+            if let c = connect, Date() < connectAt.addingTimeInterval(TimeInterval(c.expires_in)) {
+                Text((connectMsg.map { $0 + "\n" } ?? "") + "\(TimeText.full(connectAt.addingTimeInterval(TimeInterval(c.expires_in)))) 前有效，只能用一次。\n" + Agent.T.connectSteps)
+            } else {
+                Text(connectMsg ?? "在 agent 所在的电脑上用连接码一步接入：自动登录、自动配置那台电脑上的 agent。")
+            }
+        }
+    }
+
     private func act(_ id: String, _ f: @escaping () async throws -> Void) {
         Task {
             busy = id; error = nil; keyMsg = nil
             defer { busy = nil }
             do { try await f() } catch {
-                if id == "key" { keyMsg = describeError(error) } else { self.error = describeError(error) }
+                if id == "key" { keyMsg = describeError(error) } else if id == "connect" { connectMsg = describeError(error) } else { self.error = describeError(error) }
             }
         }
     }

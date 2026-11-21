@@ -57,6 +57,7 @@ var serverFeatures = []feature{
 	{"push.e2e", "服务器不保存明文：账号还没有加密钥匙时，明文推送返回 403（先在回笺客户端用密码登录一次），服务端系统通知直接丢弃", "0.9.0"},
 	{"pair.key", "配对码带钥匙：已解锁的设备生成的二维码 / 长配对码让新设备登录后直接解锁加密消息", "0.10.0"},
 	{"agent", "agent 双向：Agent key、会话登录（设备批准 + 核对码）、可回复的加密消息、回复与送达回执（/v1/agent/*，docs/agent-mcp.md）", "0.10.0"},
+	{"agent.connect", "agent 连接码：设备生成 8 位一次性码，agent 用 huijian agent setup 兑换自己的 Agent key（每账号最多 10 把）", "0.11.0"},
 }
 
 func (h *Hub) handleInfo(w http.ResponseWriter, r *http.Request) {

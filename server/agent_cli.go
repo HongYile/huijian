@@ -211,6 +211,8 @@ func runAgentCLI(args []string) int {
 		err = agentStatusCmd(args[1:])
 	case "logout":
 		err = agentLogoutCmd(args[1:])
+	case "setup":
+		err = agentSetupCmd(args[1:])
 	case "-h", "--help", "help":
 		agentUsage()
 		return 0
@@ -232,11 +234,13 @@ func runAgentCLI(args []string) int {
 
 func agentUsage() {
 	fmt.Fprint(os.Stderr, `用法：
+  huijian agent setup  [-u 地址] [连接码]             一步接入：用连接码登录，并自动配置本机的 Claude Code、Codex、Cursor、
+                                                     DeepSeek Harness、Hermes、Qwen Code、Pi（-yes 不提问，-agents claude,codex 只接这些，-remove 撤销）
   huijian agent login  [-name 显示名] [-s 槽位]      登录：打印 6 位核对码，在回笺设备上核对后批准
   huijian agent send   [-p 3] [-d 正文] [-topic agent] [-thread 线程] [-choice 选项]... [-ask] 标题
   huijian agent ask    [-timeout 30m] [-choice 选项]... [-d 正文] 问题   发出并等回复，回复打印到标准输出
   huijian agent replies [-wait 60]                   取回复（每行一条 JSON），自动发送回执
-  huijian agent status                               查看当前会话
+  huijian agent status                               查看当前会话和本机各 agent 的接入情况
   huijian agent logout                               结束会话
 通用选项：-s 槽位（默认 HUIJIAN_AGENT_SESSION 或 default，多个 agent 同时用时区分）
 登录需要 -u 地址（或 HUIJIAN_URL）和 -k Agent key（或 HUIJIAN_AGENT_KEY，在回笺「设置 → Pushkey」页的 Agent 部分里新建）。
@@ -256,6 +260,15 @@ func agentLoginCmd(args []string) error {
 	wait := fs.Duration("timeout", 10*time.Minute, "最多等多久批准")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	// 没给 key：用 huijian agent setup 保存在本机的那把（会话被结束后重新登录不用再要连接码）
+	if *key == "" {
+		if s, k := loadAgentKey(*slot); k != "" {
+			*key = k
+			if strings.TrimSpace(*server) == "" {
+				*server = s
+			}
+		}
 	}
 	srv := strings.TrimRight(strings.Split(*server, ",")[0], "/")
 	if srv == "" {
@@ -658,10 +671,15 @@ func agentStatusCmd(args []string) error {
 	}
 	s, err := loadAgentState(*slot)
 	if err != nil {
-		return err
+		fmt.Println("会话：", err)
+	} else {
+		pb, _ := b64.DecodeString(s.AccountPub)
+		fmt.Printf("会话：%s（%s）\n服务器：%s\n账号钥匙：%s\n已发消息：%d 条；待交出的回复：%d 条\n", s.Name, s.SessionID, s.Server, e2eKID(pb), s.Seq, len(s.Inbox))
 	}
-	pb, _ := b64.DecodeString(s.AccountPub)
-	fmt.Printf("会话：%s（%s）\n服务器：%s\n账号钥匙：%s\n已发消息：%d 条；待交出的回复：%d 条\n", s.Name, s.SessionID, s.Server, e2eKID(pb), s.Seq, len(s.Inbox))
+	agentSetupStatus()
+	if err != nil {
+		return errors.New("还没有登录")
+	}
 	return nil
 }
 

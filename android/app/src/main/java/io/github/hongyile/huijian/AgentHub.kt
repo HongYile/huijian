@@ -39,6 +39,9 @@ object AgentHub {
     private val _unsupported = MutableStateFlow(false)
     /** 服务端没有 agent 功能（0.10.0 以前） */
     val unsupported: StateFlow<Boolean> = _unsupported.asStateFlow()
+    private val _connectSupported = MutableStateFlow(false)
+    /** 服务端支持连接码（/v1/info 的 features 里有 agent.connect，0.11.0 起） */
+    val connectSupported: StateFlow<Boolean> = _connectSupported.asStateFlow()
     private val _revision = MutableStateFlow(0)
     /** 每次刷新完加一（包括收到 kind "agent" 的变更）：打开着的消息详情重新拉回复状态，等待核对码的页面立即再查 */
     val revision: StateFlow<Int> = _revision.asStateFlow()
@@ -137,6 +140,7 @@ object AgentHub {
         _phases.value = emptyMap()
         _loaded.value = false
         _unsupported.value = false
+        _connectSupported.value = false
         lastKids = emptyList()
         if (::app.isInitialized) {
             runCatching { Hub.store.agentNotified = emptyList() }
@@ -168,6 +172,20 @@ object AgentHub {
         val session = Hub.session
         val k = Agent.parseKeys(api.agentKeys())
         if (session == Hub.session) _keys.value = k
+    }
+
+    /** 读 /v1/info，看服务端支不支持连接码（和其他功能一样用 Manage.hasFeature 判断） */
+    suspend fun loadFeatures() = withContext(Dispatchers.IO) {
+        val api = Hub.api() ?: throw IOException("未登录")
+        val session = Hub.session
+        val ok = Manage.hasFeature(api.info(), "agent.connect")
+        if (session == Hub.session) _connectSupported.value = ok
+    }
+
+    /** 生成连接码（只放内存，界面上显示一次）；key 已满、账号没有加密钥匙时 409，显示服务端的中文说明 */
+    suspend fun connectCode(): AgentConnectCode = withContext(Dispatchers.IO) {
+        val api = Hub.api() ?: throw IOException("未登录")
+        Agent.parseConnectCode(api.agentConnectCode())
     }
 
     /** 新建 Agent key：明文只返回这一次 */

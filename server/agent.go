@@ -18,6 +18,8 @@ import (
 
 func (h *Hub) registerAgentRoutes(m *http.ServeMux) {
 	m.HandleFunc("POST /v1/agent/keys", h.deviceAuth(h.handleAgentKeyCreate))
+	m.HandleFunc("POST /v1/agent/connect-codes", h.deviceAuth(h.handleAgentConnectCode)) // 0.11.0：设备生成连接码
+	m.HandleFunc("POST /v1/agent/connect", h.handleAgentConnect)                           // 0.11.0：agent 用连接码换 Agent key（不需要登录，限速）
 	m.HandleFunc("GET /v1/agent/keys", h.deviceAuth(h.handleAgentKeys))
 	m.HandleFunc("DELETE /v1/agent/keys/{id}", h.deviceAuth(h.handleAgentKeyRevoke))
 	m.HandleFunc("GET /v1/agent/sessions", h.deviceAuth(h.handleAgentSessions))
@@ -170,6 +172,63 @@ func (h *Hub) handleAgentKeyCreate(w http.ResponseWriter, r *http.Request, d *De
 	writeJSON(w, 200, map[string]any{"id": k.ID, "key": key, "prefix": k.Prefix, "created_at": unixRFC(k.Created)})
 }
 
+// handleAgentConnectCode：已登录的设备生成连接码。账号还没有加密钥匙时 agent 登录不了，先拦下
+func (h *Hub) handleAgentConnectCode(w http.ResponseWriter, r *http.Request, d *Device) {
+	pub, err := h.st.E2EActivePub(d.UserID)
+	if err != nil {
+		apiErr(w, 500, "读取失败")
+		return
+	}
+	if pub == nil {
+		apiErr(w, 409, "这个账号还没有加密钥匙：请先在本机解锁加密")
+		return
+	}
+	code, exp, err := h.st.CreateAgentConnectCode(d.UserID, d.ID)
+	if errors.Is(err, errAgentKeyExists) {
+		apiErr(w, 409, err.Error())
+		return
+	}
+	if err != nil {
+		apiErr(w, 500, "生成失败")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"code": code, "expires_at": unixRFC(exp), "expires_in": agentConnectTTL})
+}
+
+// handleAgentConnect：agent 用连接码换一把自己的 Agent key。按 IP 限速（和配对码同一个限速器），失败统一 403 并延迟
+func (h *Hub) handleAgentConnect(w http.ResponseWriter, r *http.Request) {
+	if !h.pairLimit.Allow("ip:" + h.realIP(r)) {
+		apiErr(w, 429, "尝试太频繁")
+		return
+	}
+	var in struct{ Code, Name string }
+	if !readJSON(w, r, &in) {
+		return
+	}
+	name := cleanLabel(in.Name, 64)
+	if name == "" {
+		name = "agent"
+	}
+	k, key, err := h.st.RedeemAgentConnectCode(in.Code, name)
+	switch {
+	case errors.Is(err, errAgentKeyExists):
+		apiErr(w, 409, err.Error())
+		return
+	case errors.Is(err, errDisabled):
+		time.Sleep(500 * time.Millisecond)
+		apiErr(w, 403, "账号已停用")
+		return
+	case err != nil:
+		if !errors.Is(err, errAgentConnect) {
+			log.Printf("兑换连接码失败：%v", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+		apiErr(w, 403, errAgentConnect.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"id": k.ID, "key": key, "prefix": k.Prefix, "name": k.Name})
+}
+
 func (h *Hub) handleAgentKeys(w http.ResponseWriter, r *http.Request, d *Device) {
 	ks, err := h.st.AgentKeys(d.UserID)
 	if err != nil {
@@ -178,7 +237,7 @@ func (h *Hub) handleAgentKeys(w http.ResponseWriter, r *http.Request, d *Device)
 	}
 	out := []map[string]any{}
 	for _, k := range ks {
-		out = append(out, map[string]any{"id": k.ID, "prefix": k.Prefix, "created_at": unixRFC(k.Created), "last_used": unixRFC(k.LastUsed)})
+		out = append(out, map[string]any{"id": k.ID, "prefix": k.Prefix, "name": k.Name, "created_at": unixRFC(k.Created), "last_used": unixRFC(k.LastUsed)})
 	}
 	writeJSON(w, 200, map[string]any{"keys": out})
 }

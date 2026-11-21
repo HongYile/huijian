@@ -71,6 +71,13 @@ extension AppModel {
         return k
     }
 
+    var agentConnectSupported: Bool { supports("agent.connect") == true }
+
+    func createAgentConnectCode() async throws -> Agent.ConnectCode {
+        guard let api = e2eAPI else { throw E2E.Failure(.server, "未登录") }
+        return try await Agent.connectCode(api)
+    }
+
     func revokeAgentKey(_ id: Int64) async throws {
         guard let api = e2eAPI else { return }
         try await Agent.revokeKey(api, id: id)
