@@ -12,6 +12,7 @@ struct AgentSettings: View {
     @State private var busy: String?
     @State private var error: String?
     @State private var confirmRevoke: Agent.KeyInfo?
+    @State private var confirmRegen: Agent.KeyInfo?
     @State private var confirmEnd: Agent.Session?
 
     var body: some View {
@@ -39,6 +40,14 @@ struct AgentSettings: View {
             Button("吊销", role: .destructive) { if let k = confirmRevoke { act("key") { try await model.revokeAgentKey(k.id) } } }
         } message: {
             Text("用它登录的 agent 会话全部结束，之后要用新的 key 重新登录。")
+        }
+        // key 只显示一次、每个账号只能有 1 把：没保存好时用「重新生成」换一把（吊销旧的 + 新建，新 key 显示出来可复制）
+        .confirmationDialog("重新生成 Agent key？", isPresented: Binding(get: { confirmRegen != nil }, set: { if !$0 { confirmRegen = nil } })) {
+            Button("重新生成", role: .destructive) {
+                if let k = confirmRegen { act("key") { try await model.revokeAgentKey(k.id); newKey = try await model.createAgentKey() } }
+            }
+        } message: {
+            Text("旧 key 立即作废，用它登录的 agent 会话全部结束，要用新 key 重新登录。新 key 只显示一次，记得复制。")
         }
         .confirmationDialog("结束这个 agent 会话？", isPresented: Binding(get: { confirmEnd != nil }, set: { if !$0 { confirmEnd = nil } })) {
             Button("结束", role: .destructive) { if let s = confirmEnd { act(s.id) { try await model.endAgentSession(s.id) } } }
@@ -140,7 +149,7 @@ struct AgentSettings: View {
     // MARK: Agent key
 
     var keyCard: some View {
-        SettingsCard(title: "Agent key（给 agent 用）", footer: keyMsg ?? "agent 用它发起登录，每次登录都要在已解锁的设备上核对批准。key 只显示一次，请放进 agent 所在机器的环境变量 HUIJIAN_AGENT_KEY。") {
+        SettingsCard(title: "Agent key（给 agent 用）", footer: keyMsg ?? "agent 用它发起登录，每次登录都要在已解锁的设备上核对批准。key 只显示一次，请放进 agent 所在机器的环境变量 HUIJIAN_AGENT_KEY；没保存好就点「重新生成」。") {
             if let k = newKey {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(k.key).font(.system(size: 13.5, design: .monospaced)).foregroundStyle(Theme.text).textSelection(.enabled)
@@ -161,6 +170,7 @@ struct AgentSettings: View {
                 ForEach(model.agentKeys) { k in
                     SettingsRow(label: "\(k.prefix)…", divider: false) {
                         Text(k.last_used.map { "上次使用 \(time($0))" } ?? "还没用过").font(.system(size: 12)).foregroundStyle(Theme.text3)
+                        Button(busy == "key" ? "生成中…" : "重新生成") { confirmRegen = k }.buttonStyle(SoftButtonStyle()).disabled(busy != nil)
                         Button("吊销") { confirmRevoke = k }.buttonStyle(SoftButtonStyle(destructive: true)).disabled(busy != nil)
                     }
                 }

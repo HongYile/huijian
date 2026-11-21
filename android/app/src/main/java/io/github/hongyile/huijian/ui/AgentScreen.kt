@@ -5,7 +5,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
@@ -176,6 +178,7 @@ private fun KeyCard(say: (String) -> Unit) {
     var newKey by remember { mutableStateOf<AgentNewKey?>(null) }
     var busy by remember { mutableStateOf(false) }
     var confirmRevoke by remember { mutableStateOf<AgentKeyInfo?>(null) }
+    var confirmRegen by remember { mutableStateOf<AgentKeyInfo?>(null) }
     // 显示 key 期间窗口加 FLAG_SECURE：不能截图，最近任务的缩略图里也看不到（和恢复码、配对码一样）
     val showing = newKey != null
     DisposableEffect(showing) {
@@ -183,7 +186,7 @@ private fun KeyCard(say: (String) -> Unit) {
         if (showing) w?.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         onDispose { if (showing) w?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE) }
     }
-    SectionCard("Agent key", "agent 用它发起登录，每次登录都要在已解锁的设备上核对批准。key 只显示一次，请放进 agent 所在机器的环境变量 HUIJIAN_AGENT_KEY。") {
+    SectionCard("Agent key", "agent 用它发起登录，每次登录都要在已解锁的设备上核对批准。key 只显示一次，请放进 agent 所在机器的环境变量 HUIJIAN_AGENT_KEY；没保存好就点「重新生成」。") {
         val k = newKey
         val list = keys
         when {
@@ -215,6 +218,10 @@ private fun KeyCard(say: (String) -> Unit) {
                         Text(rfcText(key.lastUsed)?.let { "上次使用 $it" } ?: "还没用过", fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                    OutlinedButton({ confirmRegen = key }, enabled = !busy, modifier = Modifier.testTag("agentRegenKeyButton")) {
+                        Text(if (busy) "生成中…" else "重新生成")
+                    }
+                    Spacer(Modifier.width(8.dp))
                     OutlinedButton({ confirmRevoke = key }, enabled = !busy) { Text("吊销", color = MaterialTheme.colorScheme.error) }
                 }
             }
@@ -225,6 +232,16 @@ private fun KeyCard(say: (String) -> Unit) {
             busy = true
             scope.launch {
                 try { AgentHub.revokeKey(key.id); say("已吊销") } catch (e: Exception) { say(describe(e)) } finally { busy = false }
+            }
+        }
+    }
+    // key 只显示一次、每个账号只能有 1 把：没保存好时用「重新生成」换一把（吊销旧的 + 新建，新 key 显示出来可复制）
+    confirmRegen?.let { key ->
+        ConfirmDialog("重新生成 Agent key？", "旧 key 立即作废，用它登录的 agent 会话全部结束，要用新 key 重新登录。新 key 只显示一次，记得复制。",
+            "重新生成", { confirmRegen = null }) {
+            busy = true
+            scope.launch {
+                try { AgentHub.revokeKey(key.id); newKey = AgentHub.createKey() } catch (e: Exception) { say(describe(e)) } finally { busy = false }
             }
         }
     }
