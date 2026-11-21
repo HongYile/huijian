@@ -422,6 +422,7 @@ func agentSendCmd(args []string, ask bool) error {
 		return err
 	}
 	fmt.Println(got.Text)
+	fmt.Fprintln(os.Stderr, "（用户之后可能还会补充：用 huijian agent replies 取）")
 	return nil
 }
 

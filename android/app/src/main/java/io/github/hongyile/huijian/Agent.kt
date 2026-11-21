@@ -23,6 +23,15 @@ object AgentText {
     const val TOO_LONG = "回复太长（最多 16 KB）"
     const val EMPTY = "回复不能为空"
     const val WAITING_REPLY = "等你回复"
+    const val CHOICE_HINT = "选好选项、写好补充（都可选），再点发送。"
+    const val TOOK_REPLY = "agent 已拿到你的回复，现在没在等你；再发的回复要等它下次查看才会收到。"
+
+    /** 回复正文：快捷选项和补充文字一起发。都有时第一行是选项、后面是补充（docs/agent-mcp.md §5.1；和 Mac / iPhone 一致） */
+    fun composeReply(choice: String?, text: String): String {
+        val t = text.trim()
+        if (choice.isNullOrEmpty()) return t
+        return if (t.isEmpty()) choice else choice + "\n" + t
+    }
     const val LOCKED_APPROVE = "本机还没有解锁加密，不能批准"
     const val LOCKED_APPROVE_HINT = "本机还没有解锁加密，不能批准（批准要用账号私钥写会话证明）。"
     const val LOCKED_REPLY = "本机还没有解锁加密，不能回复"

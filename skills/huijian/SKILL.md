@@ -214,7 +214,8 @@ huijian agent ask -timeout 30m -choice 删 -choice 保留 -d "异常样本 id：
 ```
 
 - 回复打印到标准输出；超时退出码 3（用户可能在忙），这时**按最稳妥的默认做法继续或停下**，并在之后的通知里说明。
-- `-choice` 是快捷回复按钮（最多 4 个、每个最长 20 字），用户点一下即可；用户也可以打字回别的内容，要按文字理解。
+- `-choice` 是快捷选项（最多 4 个、每个最长 20 字）。用户选好选项、写好补充再一起发送：只选了选项时回复就是选项本身；又写了补充时，**第一行是选项，后面是补充**，要连补充一起理解。用户也可以不选、只打字。
+- `ask` 拿到第一条回复就返回，用户之后还可能补充：**继续做之前、结束任务之前用 `huijian agent replies` 看一眼**。
 - 问题写清楚背景和选项的后果，正文用回笺 Markdown。
 - `huijian agent send "标题"` 发一条可回复但不等待的消息；`huijian agent replies -wait 60` 取之后才到的回复（每行一条 JSON）。
 
@@ -224,7 +225,7 @@ huijian agent ask -timeout 30m -choice 删 -choice 保留 -d "异常样本 id：
 claude mcp add huijian -- huijian mcp
 ```
 
-工具：`notify(title, body?, priority?)` 发消息；`ask(question, body?, choices?, timeout_seconds?)` 提问并等回复；`check_replies()` 取之后才到的回复。
+工具：`notify(title, body?, priority?)` 发消息；`ask(question, body?, choices?, timeout_seconds?)` 提问并等回复；`check_replies()` 取之后才到的回复（ask 超时后才回的、或者拿到回复后用户又补充的；继续做之前、结束之前调用一次）。`ask` 的结果以「用户回复：」开头。
 
 ### 注意
 

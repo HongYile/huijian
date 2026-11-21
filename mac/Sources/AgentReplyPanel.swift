@@ -5,6 +5,7 @@ struct AgentReplyPanel: View {
     @EnvironmentObject var model: AppModel
     let message: Message
     @State private var text = ""
+    @State private var choice: String?
     @State private var replies: [Agent.ReplyView] = []
     @State private var busy = false
     @State private var error: String?
@@ -33,12 +34,18 @@ struct AgentReplyPanel: View {
                 }
             }
             if canReply {
+                if replies.contains(where: { $0.state == .received }) {
+                    Text(Agent.T.tookReply).font(.system(size: 12.5)).foregroundStyle(Theme.text3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if !message.choices.isEmpty {
+                    // 选项只是选中（再点取消），和补充文字一起点「发送」才发出
                     HStack(spacing: 8) {
                         ForEach(message.choices, id: \.self) { c in
-                            Button(c) { Task { await send(c) } }.buttonStyle(SoftButtonStyle()).disabled(busy)
+                            Button(c) { choice = choice == c ? nil : c }.buttonStyle(SoftButtonStyle(selected: choice == c)).disabled(busy)
                         }
                     }
+                    Text(Agent.T.choiceHint).font(.system(size: 12)).foregroundStyle(Theme.text3)
                 }
                 HStack(alignment: .bottom, spacing: 8) {
                     TextField("回复…（⌘↩ 发送）", text: $text, axis: .vertical)
@@ -47,10 +54,10 @@ struct AgentReplyPanel: View {
                         .lineLimit(1...8)
                         .padding(8)
                         .background(RoundedRectangle(cornerRadius: 8).stroke(Theme.border))
-                    Button(busy ? "发送中…" : "发送") { Task { await send(text) } }
+                    Button(busy ? "发送中…" : "发送") { Task { await send() } }
                         .buttonStyle(SoftButtonStyle())
                         .keyboardShortcut(.return, modifiers: .command)
-                        .disabled(busy || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(busy || Agent.composeReply(choice: choice, text: text).isEmpty)
                 }
             } else {
                 Text(reason).font(.system(size: 12.5)).foregroundStyle(Theme.text3)
@@ -73,12 +80,17 @@ struct AgentReplyPanel: View {
         if let r = try? await model.agentReplies(message), r != replies { replies = r }
     }
 
-    func send(_ t: String) async {
+    func send() async {
+        let sentText = text, sentChoice = choice
+        let t = Agent.composeReply(choice: sentChoice, text: sentText)
+        guard !t.isEmpty else { return }
         busy = true; error = nil
         defer { busy = false }
         do {
             try await model.agentReply(message, text: t)
-            if t == text { text = "" }
+            // 发送期间又改过的不清
+            if text == sentText { text = "" }
+            if choice == sentChoice { choice = nil }
             await load()
         } catch {
             self.error = (error as? LocalizedError)?.errorDescription ?? Updater.describe(error)

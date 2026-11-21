@@ -305,18 +305,25 @@ private fun AgentReplyPanel(m: Message) {
     val block = remember(m, status, verified, sessions, loaded) { AgentHub.replyBlock(m, status == E2EStatus.UNLOCKED) }
     var replies by remember(m.id) { mutableStateOf<List<AgentReplyView>>(emptyList()) }
     var text by rememberSaveable(m.id) { mutableStateOf("") }
+    var choice by rememberSaveable(m.id) { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     // 收到 kind "agent" 变更（回复、回执、会话变化）时 revision 加一：重新拉这条消息的回复状态
     LaunchedEffect(m.id, m.e2eStatus, revision, verified) {
         if (m.e2eStatus == E2EMessages.OK) runCatching { AgentHub.replies(m) }.getOrNull()?.let { if (it != replies) replies = it }
     }
-    fun send(t: String) {
+    fun send() {
+        val sentText = text
+        val sentChoice = choice
+        val t = AgentText.composeReply(sentChoice, sentText)
+        if (t.isEmpty()) return
         busy = true; error = null
         scope.launch {
             try {
                 AgentHub.reply(m, t)
-                if (t == text) text = ""
+                // 发送期间又改过的不清
+                if (text == sentText) text = ""
+                if (choice == sentChoice) choice = null
                 runCatching { AgentHub.replies(m) }.getOrNull()?.let { replies = it }
             } catch (e: Exception) {
                 error = describe(e)
@@ -342,12 +349,21 @@ private fun AgentReplyPanel(m: Message) {
             }
         }
         if (block == null) {
-            if (m.choices.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                for (c in m.choices) OutlinedButton({ send(c) }, enabled = !busy, modifier = Modifier.testTag("agentChoice")) { Text(c) }
+            if (replies.any { it.state == AgentReplyView.State.RECEIVED })
+                Text(AgentText.TOOK_REPLY, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // 快捷选项只是选中（再点取消），和补充文字一起点「发送」才发出
+            if (m.choices.isNotEmpty()) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (c in m.choices) {
+                        if (choice == c) Button({ choice = null }, enabled = !busy, modifier = Modifier.testTag("agentChoice")) { Text(c) }
+                        else OutlinedButton({ choice = c }, enabled = !busy, modifier = Modifier.testTag("agentChoice")) { Text(c) }
+                    }
+                }
+                Text(AgentText.CHOICE_HINT, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(text, { text = it }, Modifier.weight(1f).testTag("agentReplyText"), placeholder = { Text("回复…") }, maxLines = 8)
-                Button({ send(text) }, enabled = !busy && text.isNotBlank(), modifier = Modifier.testTag("agentReplySend")) {
+                Button({ send() }, enabled = !busy && AgentText.composeReply(choice, text).isNotEmpty(), modifier = Modifier.testTag("agentReplySend")) {
                     Text(if (busy) "发送中…" else "发送")
                 }
             }

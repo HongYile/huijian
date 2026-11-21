@@ -187,14 +187,14 @@ func mcpTools() []map[string]any {
 				"body":     str("正文，回笺 Markdown（可选）"),
 				"priority": map[string]any{"type": "integer", "minimum": 0, "maximum": 5, "description": "0–5，默认 3；4 = 重要（响铃），5 = 紧急"},
 			}}},
-		{"name": "ask", "description": "问用户一个问题并等待回复（用户在回笺里直接回复，可以点快捷选项）。只在确实需要用户决定时用。返回用户回复的文字；超时返回「超时」。",
+		{"name": "ask", "description": "问用户一个问题并等待回复（用户在回笺里选快捷选项、写补充，一起发送；选了选项又写了补充时，回复第一行是选项、后面是补充）。只在确实需要用户决定时用。返回用户回复的文字；超时返回「超时」。用户之后还可能补充，用 check_replies 取。",
 			"inputSchema": map[string]any{"type": "object", "required": []string{"question"}, "properties": map[string]any{
 				"question":        str("要问的问题（标题）"),
 				"body":            str("补充说明，回笺 Markdown（可选）"),
 				"choices":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 4, "description": "快捷回复选项，最多 4 个、每个最长 20 字（可选）"},
 				"timeout_seconds": map[string]any{"type": "integer", "minimum": 10, "maximum": 86400, "description": "最多等多久，默认 1800"},
 			}}},
-		{"name": "check_replies", "description": "取用户发来、还没处理的回复（例如之前 ask 超时后用户才回的）。",
+		{"name": "check_replies", "description": "取用户发来、还没处理的回复：ask 超时后用户才回的，或者 ask 拿到回复之后用户又补充的。继续做之前、结束任务之前调用一次。",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
 	}
 }
@@ -271,7 +271,8 @@ func (m *mcpServer) tool(ctx context.Context, name string, raw json.RawMessage) 
 			}
 			return m.failed("等回复失败：", err)
 		}
-		return got.Text, false
+		// 拿到回复 ask 就结束了，之后用户再补充的话 agent 不会自动知道：提醒它适时 check_replies（2026-11-21 实测：用户回了「继续」又补了一句，agent 没看到）
+		return "用户回复：\n" + got.Text + "\n\n（用户之后可能还会补充：继续做之前、结束任务之前，用 check_replies 看看有没有新回复。）", false
 	case "check_replies":
 		if err := m.fetch(ctx, 0); err != nil {
 			return m.failed("取回复失败：", err)

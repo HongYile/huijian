@@ -219,7 +219,7 @@ func TestAgentCLIAndMCP(t *testing.T) {
 	}
 	if res[1]["result"].(map[string]any)["protocolVersion"] != "2025-06-18" ||
 		len(res[2]["result"].(map[string]any)["tools"].([]any)) != 3 ||
-		!strings.HasPrefix(text(3), "已发出") || text(4) != "继续" ||
+		!strings.HasPrefix(text(3), "已发出") || !strings.HasPrefix(text(4), "用户回复：\n继续\n") ||
 		!strings.Contains(text(5), "收到") || res[6]["error"] == nil {
 		t.Fatalf("MCP 响应不对：%s", out.String())
 	}

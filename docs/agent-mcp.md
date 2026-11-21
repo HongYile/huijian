@@ -67,6 +67,8 @@ HPKE Auth 模式（RFC 9180 `mode_auth`）在加密的同时证明「是谁加�
 - 信封前缀用 `hje2`，和普通加密消息 `hje1` 区分。
 - 明文里带 `session_id`、`msg_id`（回复时为被回复的消息 id）、`seq`、时间。agent 记录已处理的 `seq`，重放的回复丢弃。
 - agent 消息可以带快捷回复选项 `choices`（最多 4 个，每个最长 20 字），和正文一起加密。
+- 客户端：点选项只是选中（再点取消），和补充文字一起点「发送」才发出（2026-11-21 用户要求：先填好再统一发送）。回复正文：只有选项时就是选项；只有文字时就是文字；都有时第一行是选项、换行后是补充。协议不变，仍是一段 `text`。
+- `ask` 拿到第一条回复就结束，之后的回复要 agent 再来取：MCP `ask` 的结果以「用户回复：」开头并附提示「继续做之前、结束之前用 check_replies 看看」；客户端在回复已被 agent 收到后提示「agent 已拿到你的回复，现在没在等你」。
 - 实现前先确认各端的 HPKE 库支持 Auth 模式：
   - Go 和 Rust 核心是自己写的 HPKE，补 AuthEncap 工作量小；
   - CryptoKit 原生支持。
@@ -133,8 +135,8 @@ huijian mcp                                     # stdio MCP 服务
 
 MCP 工具：
 - `notify(title, body, priority)`：发消息，不等回复；
-- `ask(question, choices?, timeout)`：发出并等待回复，返回回复文字或「超时」；
-- `check_replies()`：取未处理的回复。
+- `ask(question, choices?, timeout)`：发出并等待回复，返回「用户回复：<文字>」加补充提示，或「超时」；
+- `check_replies()`：取未处理的回复（ask 超时后才回的、ask 之后用户又补充的）。
 
 skill：`skills/huijian` 里加一节「问用户、等回复」，教 agent 用 `huijian agent ask`。只有确实需要人决定时才用，不要把普通进度做成提问。
 
@@ -143,7 +145,7 @@ skill：`skills/huijian` 里加一节「问用户、等回复」，教 agent 用
 ## 8. 客户端
 
 Mac、iPhone、安卓同步做：
-- 消息：会话消息显示 agent 名称和「回复」按钮；`ask` 消息显示「等你回复」，有快捷选项时显示成按钮，点一下即回复（iPhone、安卓的通知上也可以直接点）；
+- 消息：会话消息显示 agent 名称和「回复」按钮；`ask` 消息显示「等你回复」，有快捷选项时显示成可选中的按钮，选好、写好补充后点「发送」一起发出；
 - 回复框：纯文字，发出后显示「已发出 / ✓✓ agent 已收到 / 已过期」，见 5.1；
 - 设置 → Pushkey 页（Agent key 和 pushkey 一样是交给程序的钥匙，放在一起；登录请求显示在这一页最上方）：
   - Agent key 新建、复制、吊销；

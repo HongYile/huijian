@@ -237,6 +237,7 @@ struct AgentReplySection: View {
     @EnvironmentObject private var model: AppModel
     let message: Message
     @State private var text = ""
+    @State private var choice: String?
     @State private var replies: [Agent.ReplyView] = []
     @State private var busy = false
     @State private var error: String?
@@ -259,24 +260,32 @@ struct AgentReplySection: View {
                 .background(RoundedRectangle(cornerRadius: 10).fill(Theme.surface2))
             }
             if canReply {
+                if replies.contains(where: { $0.state == .received }) {
+                    Text(Agent.T.tookReply).font(.caption).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
+                }
                 if !message.choices.isEmpty {
-                    // 快捷回复：点一下即发出
+                    // 快捷选项只是选中（再点取消），和补充文字一起点「发送」才发出
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             ForEach(message.choices, id: \.self) { c in
-                                Button(c) { Task { await send(c) } }.buttonStyle(.bordered).disabled(busy)
+                                if choice == c {
+                                    Button(c) { choice = nil }.buttonStyle(.borderedProminent).disabled(busy)
+                                } else {
+                                    Button(c) { choice = c }.buttonStyle(.bordered).disabled(busy)
+                                }
                             }
                         }
                     }
+                    Text(Agent.T.choiceHint).font(.caption).foregroundStyle(Theme.text3)
                 }
                 HStack(alignment: .bottom, spacing: 8) {
                     TextField("回复…", text: $text, axis: .vertical)
                         .lineLimit(1...6)
                         .padding(8)
                         .background(RoundedRectangle(cornerRadius: 10).stroke(Theme.border))
-                    Button(busy ? "发送中…" : "发送") { Task { await send(text) } }
+                    Button(busy ? "发送中…" : "发送") { Task { await send() } }
                         .buttonStyle(.borderedProminent)
-                        .disabled(busy || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(busy || Agent.composeReply(choice: choice, text: text).isEmpty)
                 }
             } else {
                 Text(reason).font(.caption).foregroundStyle(Theme.text3)
@@ -300,12 +309,17 @@ struct AgentReplySection: View {
         if let r = try? await model.agentReplies(message), r != replies { replies = r }
     }
 
-    private func send(_ t: String) async {
+    private func send() async {
+        let sentText = text, sentChoice = choice
+        let t = Agent.composeReply(choice: sentChoice, text: sentText)
+        guard !t.isEmpty else { return }
         busy = true; error = nil
         defer { busy = false }
         do {
             try await model.agentReply(message, text: t)
-            if t == text { text = "" }
+            // 发送期间又改过的不清
+            if text == sentText { text = "" }
+            if choice == sentChoice { choice = nil }
             await load()
         } catch {
             self.error = describeError(error)

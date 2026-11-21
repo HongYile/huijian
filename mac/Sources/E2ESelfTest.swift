@@ -1500,6 +1500,9 @@ enum E2ESelfTest {
                 struct NewS: Decodable { let session_id: String }
                 struct LS: Decodable { let state: String; let challenge: String?; let token: String? }
                 struct Pushed: Decodable { let id: Int64 }
+                check("回复正文：选项和补充一起发（第一行选项）",
+                      Agent.composeReply(choice: "继续", text: "") == "继续" && Agent.composeReply(choice: nil, text: " 你好 ") == "你好"
+                      && Agent.composeReply(choice: "继续", text: "先别删") == "继续\n先别删" && Agent.composeReply(choice: nil, text: " \n").isEmpty, "")
                 let ak = try JSONDecoder().decode(Agent.NewKey.self, from: try await apiA.call("POST", "/v1/agent/keys")).key
                 let apiK = E2E.API(transport(ak))
                 let acctPub = try Core.publicKey(skA).pub

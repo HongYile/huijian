@@ -1214,15 +1214,17 @@ struct PrimaryButtonStyle: ButtonStyle {
 
 struct SoftButtonStyle: ButtonStyle {
     var destructive = false
+    /// 选中态（agent 快捷选项）：强调色文字和边框
+    var selected = false
     @Environment(\.isEnabled) var enabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 13.5, weight: .medium))
-            .foregroundStyle(!enabled ? Theme.text3 : (destructive ? Theme.danger : Theme.text))
+            .foregroundStyle(!enabled ? Theme.text3 : (destructive ? Theme.danger : (selected ? Theme.accent : Theme.text)))
             .padding(.horizontal, 14)
             .frame(minWidth: 44, minHeight: 32)
-            .background(RoundedRectangle(cornerRadius: 8).fill(configuration.isPressed ? Theme.border : Theme.surface2))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border, lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: 8).fill(configuration.isPressed ? Theme.border : (selected ? Theme.accentSoft : Theme.surface2)))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? Theme.accent : Theme.border, lineWidth: selected ? 1.5 : 1))
             .contentShape(RoundedRectangle(cornerRadius: 8))
     }
 }

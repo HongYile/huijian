@@ -15,7 +15,16 @@ enum Agent {
         static let ended = "这个 agent 会话已结束，不能再回复"
         static let tooLong = "回复太长（最多 16 KB）"
         static let waitingReply = "等你回复"
+        static let choiceHint = "选好选项、写好补充（都可选），再点发送。"
+        static let tookReply = "agent 已拿到你的回复，现在没在等你；再发的回复要等它下次查看才会收到。"
         static func codeHint(_ name: String) -> String { "确认「\(name)」那边显示的也是这 6 位数字，再批准。" }
+    }
+
+    /// 回复正文：快捷选项和补充文字一起发。都有时第一行是选项、后面是补充（docs/agent-mcp.md §5.1）
+    static func composeReply(choice: String?, text: String) -> String {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let c = choice, !c.isEmpty else { return t }
+        return t.isEmpty ? c : c + "\n" + t
     }
 
     // MARK: - 服务端结构

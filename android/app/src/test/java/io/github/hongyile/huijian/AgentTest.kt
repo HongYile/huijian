@@ -489,4 +489,12 @@ class AgentTest {
         assertEquals(1L, back.agentSeq)
         assertEquals(0L, Message.fromServer(JSONObject().put("id", 9).put("agent_seq", 7).put("agent_session", "as1")).agentSeq)
     }
+
+    @Test fun composeReplyJoinsChoiceAndText() {
+        assertEquals("继续", AgentText.composeReply("继续", ""))
+        assertEquals("继续", AgentText.composeReply("继续", "  \n "))
+        assertEquals("你好", AgentText.composeReply(null, " 你好 "))
+        assertEquals("继续\n先别删文件", AgentText.composeReply("继续", "先别删文件"))
+        assertEquals("", AgentText.composeReply(null, " "))
+    }
 }
